@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["contracts/registry", "contracts/mock_token"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/KeyLease-Security/keylease-core"
+homepage = "https://github.com/KeyLease-Security/keylease-core"
+documentation = "https://github.com/KeyLease-Security/keylease-core#readme"
+rust-version = "1.84"
+authors = ["KeyLease Security <security@keylease.dev>"]
+
+[workspace.dependencies]
+soroban-sdk = "26"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

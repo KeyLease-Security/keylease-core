@@ -1,0 +1,22 @@
+# Rust / Cargo
+/target
+**/target
+
+# Soroban / Stellar
+.wasm
+*.wasm
+test_snapshots/
+.estuary
+.stellar
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode
+*.swp
+*.swo
+
+# Env & secrets
+.env
+.env.*
+!.env.example
