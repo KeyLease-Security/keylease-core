@@ -36,6 +36,12 @@ commands above, plus `cargo build --target wasm32v1-none --release --all`.
 | `contracts/registry/src/errors.rs` | Stable `Error` codes (never reuse a number). |
 | `contracts/registry/src/test.rs` | Integration tests for the registry. |
 | `contracts/mock_token/` | Test-only SEP-41 token. |
+| `scripts/` | Deploy, issue generation, repo setup. |
+| `docs/` | Protocol docs, contract reference, guides. |
+
+Before your first change, read [`docs/developer-guide.md`](./docs/developer-guide.md)
+and the [contract reference](./docs/contract-reference.md). The
+[security model](./docs/security.md) lists the current known limitations.
 
 ## Code standards
 
@@ -108,7 +114,8 @@ token transfers and cover it with an adversarial test.
 
 ## Reporting security issues
 
-Please **do not** open a public issue for a security vulnerability. Email
+Please **do not** open a public issue for a security vulnerability. See
+[SECURITY.md](./SECURITY.md) for private reporting and scope, or email
 `security@keylease.dev` with a description and reproduction steps.
 
 ## License

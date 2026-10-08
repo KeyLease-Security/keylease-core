@@ -66,6 +66,12 @@ keylease-core/
 │   │   │   └── test.rs    # full lifecycle + adversarial tests
 │   │   └── Cargo.toml
 │   └── mock_token/        # minimal SEP-41 token for tests & local sandboxes
+├── scripts/
+│   ├── deploy-testnet.sh  # sequential, copy-pasteable testnet deploy
+│   ├── create-issues.sh   # batch Wave backlog creation from the templates
+│   └── setup-repo.sh      # topics, labels, branch protection
+├── docs/                  # protocol docs, contract reference, guides
+├── system-prompts/        # agent briefs for the contract and gateway repos
 └── Cargo.toml             # workspace
 ```
 
@@ -121,30 +127,59 @@ cargo build --target wasm32v1-none --release --all
 # → target/wasm32v1-none/release/keylease_mock_token.wasm
 ```
 
-### Local sandbox (Stellar CLI)
+---
+
+## Deployment
+
+One command runs the whole dependency-ordered sequence (build → deploy → `init`
+→ `set_token` → `register_service`) and prints the values the gateway needs:
+
+```bash
+SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.sh
+
+# or create and Friendbot-fund the identity first (testnet only):
+KEYLEASE_GENERATE_KEY=1 SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.sh
+```
+
+The raw sequence it automates:
 
 ```bash
 stellar contract deploy \
   --wasm target/wasm32v1-none/release/keylease_registry.wasm \
-  --source <your-account> \
-  --network testnet
+  --source-account keylease-admin --network testnet --alias keylease-registry
+
+stellar contract invoke --id $REGISTRY --network testnet --source-account keylease-admin \
+  --send=yes -- init --admin $ADMIN
+
+stellar contract invoke --id $REGISTRY --network testnet --source-account keylease-admin \
+  --send=yes -- set_token --admin $ADMIN --token $TOKEN
+
+stellar contract invoke --id $REGISTRY --network testnet --source-account keylease-admin \
+  --send=yes -- register_service \
+     --provider $PROVIDER --rate_per_call 1000000 --endpoint_hash <64_HEX_CHARS>
 ```
 
-Then initialize and publish a service:
+`--send=yes` is required for state-changing calls. Deployed addresses are
+recorded in [`docs/deployments.md`](./docs/deployments.md) — never guessed.
+Full options are in [`docs/deployment.md`](./docs/deployment.md), and
+[`docs/hosting-topology.md`](./docs/hosting-topology.md) covers where the proxy
+and RPC fit. Runtime configuration is documented in [`.env.example`](./.env.example).
 
-```bash
-stellar contract invoke --id $REGISTRY --network testnet --source <admin> \
-  -- init --admin <ADMIN>
+---
 
-stellar contract invoke --id $REGISTRY --network testnet --source <admin> \
-  -- set_token --admin <ADMIN> --token <SAC_OR_TOKEN_ADDRESS>
+## Documentation
 
-stellar contract invoke --id $REGISTRY --network testnet --source <provider> \
-  -- register_service \
-     --provider <PROVIDER> \
-     --rate_per_call 100 \
-     --endpoint_hash 0707070707070707070707070707070707070707070707070707070707070707
-```
+The full docs live in [`docs/`](./docs/README.md):
+
+| Read | For |
+| --- | --- |
+| [Introduction](./docs/introduction.md) | what KeyLease is and why |
+| [Architecture](./docs/architecture.md) | how the contract and gateway split |
+| [How the protocol works](./docs/protocol.md) | state machine + worked economics |
+| [Contract reference](./docs/contract-reference.md) | every entry point, parameter and error code |
+| [Security model](./docs/security.md) | trust assumptions and known limitations |
+| [Provider](./docs/provider-guide.md) / [Consumer](./docs/consumer-guide.md) guides | using the protocol |
+| [Developer guide](./docs/developer-guide.md) | building, testing and extending |
 
 ---
 
@@ -156,9 +191,13 @@ invariants:
 1. **Checked arithmetic everywhere.** Deposit (`rate × calls`) and payout math
    use `checked_mul`/`checked_add`; overflow aborts the transaction instead of
    minting a cheap lease or a truncated refund. See `test_rate_math_overflow_reverts_deposit`.
-2. **No double settlement.** `settled` is set before any payout is recorded as
-   complete, and every money-moving path checks it first
-   (`LeaseAlreadySettled`).
+2. **A lease releases funds once.** Every money-moving path checks `settled`
+   first and marks the lease settled when it releases value
+   (`LeaseAlreadySettled`). Settlement currently performs the token transfers
+   before persisting the flag, which is safe for an honest token but not for a
+   re-entrant one — see
+   [known limitations](docs/security.md#known-limitations) and the `wave-high`
+   hardening issue.
 3. **Bounded provider claims.** A provider can never withdraw more than
    `allocated_calls × rate_per_call`, and only for leases it owns
    (`InvalidCalls`, `Unauthorized`).
@@ -203,7 +242,21 @@ The suite in `contracts/registry/src/test.rs` covers:
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md). Drips Wave tasks are filed from the
 templates in `.github/ISSUE_TEMPLATE/`
-(`trivial 100 pts`, `medium 150 pts`, `high 200 pts`).
+(`trivial 100 pts`, `medium 150 pts`, `high 200 pts`), or in bulk with
+[`scripts/create-issues.sh`](./scripts/create-issues.sh):
+
+```bash
+./scripts/create-issues.sh --dry-run   # preview the backlog
+./scripts/create-issues.sh             # create it
+```
+
+Maintainers run [`scripts/setup-repo.sh`](./scripts/setup-repo.sh) to apply topics,
+labels and branch protection.
+
+## Security
+
+See [SECURITY.md](./SECURITY.md). Report vulnerabilities privately, never as a
+public issue.
 
 ## License
 
