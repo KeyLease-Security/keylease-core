@@ -64,9 +64,18 @@ create_issue() {
   local tmp
   tmp="$(mktemp)"
   printf '%s\n' "$body" > "$tmp"
-  IFS=',' read -r -a label_args <<< "$labels"
+
+  # Build the --label arguments without word-splitting, so labels containing
+  # spaces (e.g. "good first issue") survive as single arguments.
+  local label
+  local -a label_args=()
+  IFS=',' read -r -a label_parts <<< "$labels"
+  for label in "${label_parts[@]}"; do
+    label_args+=(--label "$label")
+  done
+
   gh issue create --repo "$REPO" --title "$title" --body-file "$tmp" \
-    $(for l in "${label_args[@]}"; do printf ' --label %s' "$l"; done) >/dev/null
+    "${label_args[@]}" >/dev/null
   rm -f "$tmp"
   echo "created: $title"
   created=$((created + 1))

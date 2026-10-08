@@ -2,18 +2,23 @@
 #
 # setup-repo.sh — apply the repository settings keylease-core expects.
 #
-# Idempotent. Applies:
+# Applies, in order:
 #   1. GitHub topics      (so the repo is discoverable in the Stellar ecosystem)
 #   2. Wave labels        (wave-trivial/100pts, wave-medium/150pts, wave-high/200pts, security)
 #   3. Branch protection  (require PRs + approvals + the exact CI checks)
+#
+# Each section is applied independently. A section that fails (for example
+# because the token lacks the `administration` permission) is reported and the
+# script continues, then exits non-zero.
 #
 # Usage
 #   ./scripts/setup-repo.sh --dry-run     # show what would change
 #   ./scripts/setup-repo.sh               # apply
 #
-# Requires the GitHub CLI, authenticated as a repo admin.
+# Requires the GitHub CLI. Topics and branch protection require a token with
+# `administration: write`; labels and issues only need `issues: write`.
 
-set -euo pipefail
+set -uo pipefail
 
 REPO="${KEYLEASE_REPO:-KeyLease-Security/keylease-core}"
 BRANCH="${KEYLEASE_BRANCH:-main}"
@@ -23,14 +28,8 @@ DRY_RUN=0
 
 command -v gh >/dev/null 2>&1 || { echo "error: gh CLI not found" >&2; exit 1; }
 
-run() {
-  if [ "$DRY_RUN" = "1" ]; then
-    printf '  [dry-run] %s\n' "$*"
-  else
-    printf '  %s\n' "$*"
-    "$@" >/dev/null
-  fi
-}
+FAILED=0
+fail() { echo "  ✗ $1"; FAILED=1; }
 
 # ---------------------------------------------------------------------------
 # 1. Topics
@@ -42,10 +41,11 @@ echo "==> Topics"
 if [ "$DRY_RUN" = "1" ]; then
   echo "  [dry-run] PUT /repos/$REPO/topics"
   echo "            {\"names\": $TOPICS}"
+elif printf '{"names": %s}' "$TOPICS" | gh api -X PUT "repos/$REPO/topics" \
+       -H "Accept: application/vnd.github+json" --input - >/dev/null 2>&1; then
+  echo "  ✓ set $TOPICS"
 else
-  printf '{"names": %s}' "$TOPICS" | gh api -X PUT "repos/$REPO/topics" \
-    -H "Accept: application/vnd.github+json" --input - >/dev/null
-  echo "  set $TOPICS"
+  fail "could not set topics — the token needs 'administration: write'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,14 @@ security|d73a4a|Security-sensitive change
 echo "==> Labels"
 while IFS='|' read -r name color desc; do
   [ -z "$name" ] && continue
-  run gh label create "$name" --repo "$REPO" --color "$color" --description "$desc" --force
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "  [dry-run] gh label create \"$name\" --color $color --description \"$desc\" --force"
+  elif gh label create "$name" --repo "$REPO" --color "$color" \
+       --description "$desc" --force >/dev/null 2>&1; then
+    echo "  ✓ $name"
+  else
+    fail "could not create label '$name'"
+  fi
 done <<< "$LABELS_OF"
 
 # ---------------------------------------------------------------------------
@@ -77,7 +84,6 @@ done <<< "$LABELS_OF"
 # .github/workflows/ci.yml. If you rename a job there, update them here.
 # ---------------------------------------------------------------------------
 
-echo "==> Branch protection on $BRANCH"
 PROTECTION='{
   "required_status_checks": {
     "strict": true,
@@ -95,16 +101,21 @@ PROTECTION='{
   "allow_deletions": false
 }'
 
+echo "==> Branch protection on $BRANCH"
 if [ "$DRY_RUN" = "1" ]; then
   echo "  [dry-run] PUT /repos/$REPO/branches/$BRANCH/protection"
   echo "$PROTECTION" | sed 's/^/            /'
+elif printf '%s' "$PROTECTION" | gh api -X PUT \
+       "repos/$REPO/branches/$BRANCH/protection" \
+       -H "Accept: application/vnd.github+json" --input - >/dev/null 2>&1; then
+  echo "  ✓ protection applied"
 else
-  printf '%s' "$PROTECTION" | gh api -X PUT \
-    "repos/$REPO/branches/$BRANCH/protection" \
-    -H "Accept: application/vnd.github+json" \
-    --input - >/dev/null
-  echo "  protection applied"
+  fail "could not set branch protection — the token needs 'administration: write'"
 fi
 
 echo
+if [ "$FAILED" = "1" ]; then
+  echo "Finished with errors. Verify permissions at https://github.com/$REPO/settings"
+  exit 1
+fi
 echo "Done. Verify at https://github.com/$REPO/settings/branches"
