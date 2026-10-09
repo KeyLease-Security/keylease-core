@@ -78,7 +78,7 @@ All figures below are from the live Stellar documentation.
 | Testnet resets | **2–4 times per year at 17:00 UTC**; the next scheduled 2026 reset is **December 16, 2026** |
 
 > **Testnet resets wipe all ledger entries.** Re-run
-> [`scripts/deploy-testnet.sh`](../scripts/deploy-testnet.sh) after a reset —
+> [`scripts/deploy-testnet.sh`](https://github.com/KeyLease-Security/keylease-core/blob/main/scripts/deploy-testnet.sh) after a reset —
 > your contract id will change.
 
 ## Read next

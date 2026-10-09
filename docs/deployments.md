@@ -2,7 +2,7 @@
 
 Only trust contract ids listed on this page. Any other "KeyLease" contract id is
 not ours. Addresses are filled in from the output of
-[`scripts/deploy-testnet.sh`](../scripts/deploy-testnet.sh) — never guess one.
+[`scripts/deploy-testnet.sh`](https://github.com/KeyLease-Security/keylease-core/blob/main/scripts/deploy-testnet.sh) — never guess one.
 
 ## Testnet
 
@@ -27,7 +27,7 @@ not ours. Addresses are filled in from the output of
 | RPC | third-party only, e.g. `https://mainnet.sorobanrpc.com` |
 
 Mainnet deployment is intentionally deferred until the contract is audited. See
-[Security](security.md) and [SECURITY.md](../SECURITY.md).
+[Security](security.md) and [SECURITY.md](https://github.com/KeyLease-Security/keylease-core/blob/main/SECURITY.md).
 
 ## Recording a deployment
 

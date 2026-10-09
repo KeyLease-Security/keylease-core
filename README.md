@@ -8,6 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.84%2B-blue.svg)](https://www.rust-lang.org)
 [![Soroban SDK](https://img.shields.io/badge/soroban--sdk-26-purple.svg)](https://crates.io/crates/soroban-sdk)
+[![Docs](https://img.shields.io/badge/docs-keylease--security.github.io-blue.svg)](https://keylease-security.github.io/keylease-core/)
 
 ---
 
@@ -169,7 +170,11 @@ and RPC fit. Runtime configuration is documented in [`.env.example`](./.env.exam
 
 ## Documentation
 
-The full docs live in [`docs/`](./docs/README.md):
+📖 **Read the docs: <https://keylease-security.github.io/keylease-core/>**
+
+The site is built from [`docs/`](./docs/index.md) and documents **both**
+repositories — this contract repo and the
+[gateway](https://github.com/KeyLease-Security/keylease-gateway):
 
 | Read | For |
 | --- | --- |
@@ -178,6 +183,9 @@ The full docs live in [`docs/`](./docs/README.md):
 | [How the protocol works](./docs/protocol.md) | state machine + worked economics |
 | [Contract reference](./docs/contract-reference.md) | every entry point, parameter and error code |
 | [Security model](./docs/security.md) | trust assumptions and known limitations |
+| [Gateway overview](./docs/gateway/index.md) | the CLI + edge proxy |
+| [CLI reference](./docs/gateway/cli.md) | `keylease acquire` / `env` / `status` |
+| [Proxy](./docs/gateway/proxy.md) | config, verification pipeline and responses |
 | [Provider](./docs/provider-guide.md) / [Consumer](./docs/consumer-guide.md) guides | using the protocol |
 | [Developer guide](./docs/developer-guide.md) | building, testing and extending |
 

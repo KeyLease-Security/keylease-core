@@ -2,7 +2,7 @@
 
 KeyLease escrows funds. This page states exactly what the contract guarantees,
 what it assumes, and what is not yet hardened. For reporting a vulnerability, see
-[SECURITY.md](../SECURITY.md).
+[SECURITY.md](https://github.com/KeyLease-Security/keylease-core/blob/main/SECURITY.md).
 
 ## Trust assumptions
 
@@ -95,5 +95,5 @@ stellar contract invoke --id $REGISTRY --network testnet -- get_service --servic
 
 ## Disclosure
 
-Report vulnerabilities privately per [SECURITY.md](../SECURITY.md). We will
+Report vulnerabilities privately per [SECURITY.md](https://github.com/KeyLease-Security/keylease-core/blob/main/SECURITY.md). We will
 credit reporters in the release notes unless asked not to.

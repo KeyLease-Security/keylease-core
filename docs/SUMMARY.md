@@ -11,6 +11,13 @@
 - [Contract reference](contract-reference.md)
 - [Security model](security.md)
 
+## Gateway
+
+- [Gateway overview](gateway/index.md)
+- [CLI reference](gateway/cli.md)
+- [Proxy](gateway/proxy.md)
+- [Session tokens](gateway/session-tokens.md)
+
 ## Guides
 
 - [Provider guide](provider-guide.md)

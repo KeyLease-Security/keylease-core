@@ -2,6 +2,9 @@
 /target
 **/target
 
+# MkDocs build output
+/site
+
 # Soroban / Stellar
 .wasm
 *.wasm

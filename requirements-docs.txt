@@ -1,0 +1,8 @@
+# Documentation site dependencies (GitHub Pages).
+#
+#   pip install -r requirements-docs.txt
+#   mkdocs serve
+#
+# Pinned so the deployed site is reproducible. `mkdocs-material` pulls in
+# MkDocs, PyMdown Extensions and the Material theme.
+mkdocs-material==9.7.7

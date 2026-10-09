@@ -53,7 +53,7 @@ the required status checks in branch protection.
 
 ## Environment variables
 
-See [`.env.example`](../.env.example) for the full list.
+See [`.env.example`](https://github.com/KeyLease-Security/keylease-core/blob/main/.env.example) for the full list.
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
@@ -145,7 +145,7 @@ sequence and prints the values the gateway needs.
 
 ## Contributing
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md). Drips Wave tasks are filed from the
+See [CONTRIBUTING.md](https://github.com/KeyLease-Security/keylease-core/blob/main/CONTRIBUTING.md). Drips Wave tasks are filed from the
 templates in `.github/ISSUE_TEMPLATE/`, or in bulk with
 `scripts/create-issues.sh`.
 
