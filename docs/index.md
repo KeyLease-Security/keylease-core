@@ -18,6 +18,7 @@ price instead of a secret; consumers pay only for the calls they use.
 | see how the pieces fit together | [Architecture](architecture.md) |
 | understand the state machine and the economics | [How the protocol works](protocol.md) |
 | look up an entry point or error code | [Contract reference](contract-reference.md) |
+| run the CLI or the edge proxy | [Gateway](gateway/index.md) |
 | sell access to my API | [Provider guide](provider-guide.md) |
 | buy metered access to an API | [Consumer guide](consumer-guide.md) |
 | build on or extend the protocol | [Developer guide](developer-guide.md) |
