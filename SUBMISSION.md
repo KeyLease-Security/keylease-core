@@ -10,7 +10,7 @@ Application to list **keylease-core** for the Stellar Wave Program.
 | Sibling repo | `https://github.com/KeyLease-Security/keylease-gateway` |
 | License | MIT |
 | Language | Rust (100% of this repo) |
-| Docs site | `docs/` (GitBook-style; start at `docs/README.md`) |
+| Docs site | <https://keylease-security.github.io/keylease-core/> — MkDocs Material, built from `docs/`, covering both this repo and `keylease-gateway` |
 
 ## One-paragraph description
 
