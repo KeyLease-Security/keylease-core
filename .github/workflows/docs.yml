@@ -1,10 +1,15 @@
 name: Docs
 
-# Builds the unified KeyLease documentation site (keylease-core + gateway) and
-# publishes it to GitHub Pages.
+# Builds the unified KeyLease documentation site (keylease-core + gateway) with
+# MkDocs Material and publishes it to GitHub Pages.
 #
-# One-time setup: repository Settings → Pages → Source = "GitHub Actions".
-# The `configure-pages` step also tries to enable it automatically.
+# GitHub Pages for this repository is served from the `gh-pages` branch
+# (Settings → Pages → Source: "Deploy from a branch" → gh-pages / root). This
+# workflow force-pushes a fresh orphan commit of the built site there on every
+# change to docs/, so the branch is generated output and never hand-edited.
+#
+# Local preview:
+#   pip install -r requirements-docs.txt && mkdocs serve
 
 on:
   push:
@@ -17,18 +22,15 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
-# Never cancel a run mid-deploy; queue instead.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: docs-pages
+  cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build
+  build-deploy:
+    name: Build & deploy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,22 +47,12 @@ jobs:
       - name: Build site
         run: mkdocs build --strict
 
-      - uses: actions/configure-pages@v5
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          # Enable Pages (source: GitHub Actions) if it is not already set up.
-          enablement: true
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-  deploy:
-    name: Deploy
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          # Keep the branch a single generated commit instead of growing a
+          # history of built HTML on every docs change.
+          force_orphan: true
