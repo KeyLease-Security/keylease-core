@@ -1,7 +1,8 @@
 # Deployment
 
-Deploying KeyLease is a short, strictly ordered sequence. Steps 2–5 each depend
-on the previous one, so the whole thing is scripted:
+Deploying KeyLease is a short, strictly ordered sequence of `stellar contract`
+commands against a Stellar network. Steps 2–5 each depend on the previous one,
+so the whole thing is scripted:
 
 ```bash
 SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.sh
@@ -95,34 +96,63 @@ stellar contract invoke --id "$REGISTRY" --source-account keylease-admin \
 ## Verifying a deployment
 
 ```bash
-stellar contract invoke --id $REGISTRY --network testnet -- get_admin
-stellar contract invoke --id $REGISTRY --network testnet -- get_token
-stellar contract invoke --id $REGISTRY --network testnet -- get_service --service_id 1
-stellar contract invoke --id $REGISTRY --network testnet -- service_count
+stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- version
+stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- get_admin
+stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- get_token
+stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- get_service --service_id 1
+stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- service_count
 ```
 
-Finally, record the addresses in [`docs/deployments.md`](deployments.md) and tag
-the release so the addresses are tied to a revision.
+`version` is embedded by `contractmeta!`, so it proves which release is live.
+The contract id itself is in the registry: see
+[Deployments](deployments.md), and the explorer link for that network in
+[Networks](networks.md).
+
+## Upgrading
+
+The contract is upgradeable in place through the Soroban deployer; the contract
+id, storage and balances are preserved.
+
+```bash
+# 1. upload the new Wasm and print its hash
+WASM_HASH=$(stellar contract upload \
+  --wasm target/wasm32v1-none/release/keylease_registry.wasm \
+  --source-account keylease-admin --network testnet)
+
+# 2. install it (admin auth)
+stellar contract invoke --id $REGISTRY --source-account keylease-admin \
+  --network testnet --send=yes -- upgrade \
+    --admin $ADMIN --new_wasm_hash "$WASM_HASH"
+
+# 3. confirm the new version and watch the event
+stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- version
+stellar events --id $REGISTRY --network testnet --start-ledger <ledger>
+```
+
+Or use the script:
+
+```bash
+REGISTRY=C... SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.sh --upgrade
+```
+
+Guard rails for an upgrade: keep the storage layout unchanged, append error
+codes instead of renumbering, and keep event names and payload fields
+backwards-compatible. Settle or revoke in-flight leases before changing token
+semantics. See [Security](security.md#known-limitations).
 
 ## Post-deploy
 
 1. **Fund a consumer** so `create_lease` can escrow a deposit.
-2. **Point the gateway at the registry** with `KEYLEASE_CONTRACT_ID` and
-   `KEYLEASE_SERVICE_ID`.
-3. **Host the proxy** — see [Hosting topology](hosting-topology.md).
+2. **Point your client or indexer at the registry** with
+   `KEYLEASE_CONTRACT_ID`, `KEYLEASE_RPC_URL` and `KEYLEASE_NETWORK`.
+3. **Subscribe to events**, or read `get_lease` on demand — see
+   [Integration](integration.md).
 
 ## Networks
 
-| Network | Passphrase | RPC |
-| --- | --- | --- |
-| Testnet | `Test SDF Network ; September 2015` | `https://soroban-testnet.stellar.org` |
-| Futurenet | `Test SDF Future Network ; October 2022` | `https://rpc-futurenet.stellar.org` |
-| Mainnet | `Public Global Stellar Network ; September 2015` | third-party only, e.g. `https://mainnet.sorobanrpc.com` |
-| Local standalone | `Standalone Network ; February 2017` | your local RPC |
-
-⚠️ **Testnet resets 2–4 times per year at 17:00 UTC**, wiping all ledger entries
-and invalidating your contract id. The next scheduled 2026 reset is
-**December 16, 2026**. Redeploy afterwards.
+Testnet, Futurenet, Mainnet and local standalone differ only in RPC endpoint and
+passphrase; the full table, SAC addresses and reset schedule are in
+[Networks](networks.md).
 
 ## Mainnet
 
@@ -131,5 +161,6 @@ Not yet. Mainnet deployment is deferred until the contract is audited — see
 
 ## Read next
 
-- [Hosting topology](hosting-topology.md) — where each process runs.
+- [Networks](networks.md) — endpoints, passphrases and resets.
 - [Deployments](deployments.md) — the address registry.
+- [Integration](integration.md) — verifying leases from your service.

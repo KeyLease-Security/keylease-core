@@ -10,7 +10,7 @@
 # is kept only for readers who browse the repository directly.
 
 site_name: KeyLease
-site_description: Time-bound, ephemeral micro-leases for API & RPC providers on Stellar/Soroban.
+site_description: A Soroban protocol on Stellar for time-bound, escrowed API & RPC micro-leases.
 site_url: https://keylease-security.github.io/keylease-core/
 repo_url: https://github.com/KeyLease-Security/keylease-core
 repo_name: KeyLease-Security/keylease-core
@@ -64,20 +64,19 @@ nav:
       - How the protocol works: protocol.md
       - Contract reference: contract-reference.md
       - Security model: security.md
-  - Gateway:
-      - Overview: gateway/index.md
-      - CLI reference: gateway/cli.md
-      - Proxy: gateway/proxy.md
-      - Session tokens: gateway/session-tokens.md
+  - Stellar:
+      - Networks: networks.md
+      - Integration: integration.md
   - Guides:
       - Provider guide: provider-guide.md
       - Consumer guide: consumer-guide.md
       - Developer guide: developer-guide.md
       - Deployment: deployment.md
-      - Hosting topology: hosting-topology.md
   - Project:
       - Deployments: deployments.md
-      - Release notes: releases/v0.1.0.md
+      - Release notes: releases/v0.2.1.md
+      - v0.2.0: releases/v0.2.0.md
+      - v0.1.0: releases/v0.1.0.md
 
 markdown_extensions:
   - admonition

@@ -37,14 +37,23 @@ cargo test --all
 cargo build --target wasm32v1-none --release --all
 ```
 
+## Soroban checklist
+
+- [ ] Every state transition emits a typed event (`contracts/registry/src/events.rs`) with no secret material.
+- [ ] New or changed entry points are reflected in `docs/contract-reference.md` and the README interface table.
+- [ ] New storage keys have documented TTL semantics, and user-controlled lifetimes have a bound.
+- [ ] `contractmeta!` / `version()` are updated when behaviour changes (workspace version bump).
+- [ ] Any upgrade keeps the `DataKey` layout and stored-value semantics unchanged.
+- [ ] Event names, topics and error codes are additive; nothing is renumbered or reused.
+
 ## Security checklist
 
 - [ ] All state-changing entry points authenticate the relevant actor with `require_auth`.
 - [ ] All token math uses checked arithmetic and handles overflow.
-- [ ] No funds can be paid out twice (re-entrancy / double-settlement guard).
+- [ ] No funds can be paid out twice (state persisted before any token call).
 - [ ] Escrowed funds always have an exit path for the consumer.
-- [ ] New storage keys have documented TTL semantics.
-- [ ] Tests cover both the happy path **and** the failure/refund paths.
+- [ ] Tests cover the happy path, the failure/refund paths **and** the emitted event.
+- [ ] The real-SAC test and the re-entrant-token test still pass.
 
 ## Reviewer notes
 

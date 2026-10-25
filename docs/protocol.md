@@ -4,12 +4,15 @@
 
 | Actor | Address | Can do |
 | --- | --- | --- |
-| **Admin** | one address | `init` once, then `set_token`. Cannot move escrowed funds. |
-| **Provider** | per service | Register/update services, settle leases it owns. |
-| **Consumer** | per lease | Create leases, revoke expired unsettled leases. |
+| **Admin** | one Stellar account | `init` once, `set_token`, `upgrade`. Cannot move escrowed funds. |
+| **Provider** | per service (account or contract address) | Register/pause services, settle leases it owns. |
+| **Consumer** | per lease (account or contract address) | Create leases, revoke expired unsettled leases. |
 
-The admin is a deployment role. It can point the registry at a token address, and
-nothing else. It has no path to user funds.
+The admin is a deployment role. It can point the registry at a token address and
+install a new Wasm, and nothing else. It has no path to user funds.
+
+Because every actor is a Soroban `Address`, the same protocol works for classic
+Stellar accounts (`G…`), multisig accounts and smart contracts (`C…`).
 
 ## State
 
@@ -99,6 +102,28 @@ at expiry would lose a legitimate payout to a consumer racing to revoke. The
 window gives providers a guaranteed settlement period while keeping the
 consumer's exit bounded at 24 hours.
 
+## Events
+
+Every transition publishes a typed Soroban event. Event names are the first
+topic, followed by the id fields marked `#[topic]`; the payload is a map of the
+remaining fields.
+
+| Event | Topics | Data |
+| --- | --- | --- |
+| `registry_initialized` | — | `admin` |
+| `escrow_token_set` | — | `admin`, `token` |
+| `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
+| `service_status_changed` | `service_id` | `provider`, `is_active` |
+| `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `contract_upgraded` | — | `admin`, `new_wasm_hash` |
+
+Events are the indexing contract between on-chain state and off-chain systems: a
+provider can settle from a projection built by subscribing to `lease_created`,
+and accounting can reconcile payouts from `lease_settled` without polling every
+lease. See [Integration](integration.md).
+
 ## Worked economics
 
 All figures use the escrow token's smallest unit (7 decimals for the native
@@ -148,18 +173,26 @@ Settlement costs one more. There is no per-call on-chain cost — the provider
 settles with a single call count, which is what makes this cheap enough for
 small allotments.
 
+The create transaction also pays **Soroban storage rent** for extending the
+lease entry through its term, the 24-hour grace window and a one-day buffer.
+Rent scales with the duration and the number of entries, not with the number of
+calls, so short leases stay cheap and the TTL is deliberately not padded to the
+thirty-day default.
+
 ## Invariants
 
 These must hold for every reachable state. They are asserted in tests.
 
 1. **Conservation.** For every lease, `payout + refund == locked_deposit`.
 2. **Single release.** A settled lease can never be settled or revoked again
-   (`LeaseAlreadySettled`).
+   (`LeaseAlreadySettled`), and `settled` is persisted before any token call.
 3. **Bounded claim.** A provider can never receive more than
    `allocated_calls × rate_per_call`, and only for a service it owns.
 4. **Guaranteed exit.** Every lease has a consumer path to a full refund.
 5. **Checked math.** Deposit, payout and timestamp arithmetic abort on overflow
    rather than truncating.
+6. **Claimable storage.** A lease's persistent entry outlives its term plus the
+   grace window (`MAX_LEASE_DURATION_SECS = 30 days`).
 
 ## Storage and lifetime
 
@@ -168,12 +201,15 @@ These must hold for every reachable state. They are asserted in tests.
 | `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
 | `Service(u64)` | persistent | TTL extended on save and on read |
-| `Lease(u64)` | persistent | TTL extended on save and on read |
+| `Lease(u64)` | persistent | TTL extended on save and on read to cover term + grace |
 
 `LEDGER_BUMP_THRESHOLD = 17_280` ledgers (~1 day at 5s ledgers) and
-`LEDGER_BUMP_EXTEND = 518_400` ledgers (~30 days). Reads re-extend the TTL, so an
-actively-read lease stays alive; the safe upper bound on `duration_secs` for a
-lease nobody reads is tracked as a `wave-high` issue.
+`LEDGER_BUMP_EXTEND = 518_400` ledgers (~30 days). For leases, `save_lease` and
+`get_lease` extend to `(expires_at − now + 24h) / 5s + LEDGER_BUMP_THRESHOLD`
+ledgers, so the escrow stays claimable for the whole lease, the provider's grace
+window and a one-day read buffer — without paying rent for unused storage time.
+The host clamps persistent TTL to its network minimum (120,960 ledgers ≈ 7 days
+on Testnet), so very short leases pay that floor rather than a month.
 
 ## Read next
 

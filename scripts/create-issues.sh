@@ -7,6 +7,10 @@
 # (wave-trivial/100pts, wave-medium/150pts, wave-high/200pts), and states
 # acceptance criteria a reviewer can check.
 #
+# The backlog reflects the v0.2.0 contract: events, upgrades, checks-effects-
+# interactions and TTL-safe lease durations have already shipped, so they are
+# not filed here.
+#
 # Usage
 #   ./scripts/create-issues.sh              # create every issue
 #   ./scripts/create-issues.sh --dry-run    # print what would be created
@@ -90,10 +94,10 @@ create_issue trivial \
   "wave-trivial,good first issue,100pts" <<'EOF'
 ## Summary
 
-The registry is deployed on-chain, where contract code is billed by size.
-Nothing currently stops a pull request from silently inflating the release
-Wasm. Add a CI guard that fails when `keylease_registry.wasm` exceeds a
-documented budget.
+The registry is deployed on Stellar, where contract code is billed by size and
+every ledger entry pays rent. Nothing currently stops a pull request from
+silently inflating the release Wasm. Add a CI guard that fails when
+`keylease_registry.wasm` exceeds a documented budget.
 
 ## Where
 
@@ -115,7 +119,6 @@ documented budget.
 ## Out of scope
 
 - Optimizing the contract to shrink it (file a separate issue if needed).
-- Caching/artifact upload.
 
 ## Pointers
 
@@ -202,57 +205,6 @@ EOF
 # ===========================================================================
 
 create_issue medium \
-  "[medium] Emit structured events for the service and lease lifecycle" \
-  "wave-medium,150pts" <<'EOF'
-## Summary
-
-The registry mutates escrow state without emitting a single event. Providers,
-consumers, indexers and explorers therefore have no cheap way to observe
-`create_lease`, `settle_lease` or `revoke_expired_lease`. Add Soroban contract
-events so the whole lifecycle is observable off-chain.
-
-## Context
-
-There is currently no `#[contractevent]` (or `env.events().publish`) anywhere in
-`contracts/registry`. Everything must be discovered by polling storage.
-
-## Proposed approach
-
-1. Define event payloads alongside `types.rs` (or a new `events.rs`).
-2. Emit on: `register_service`, `set_service_active`, `create_lease`,
-   `settle_lease`, `revoke_expired_lease`.
-3. Include the ids and the money fields (deposit, payout, refund) so a
-   subscriber never needs a second RPC read for the common case.
-4. Update `README.md` with the event list and payload shapes.
-
-## Acceptance criteria
-
-- [ ] Every state-changing entry point emits at least one event.
-- [ ] Events carry `service_id` / `lease_id` and the relevant addresses.
-- [ ] `settle_lease` emits the `payout` and `refund` amounts.
-- [ ] A test asserts each event is emitted, using the testutils event API.
-- [ ] `README.md` documents the event names and payloads.
-- [ ] New behaviour is covered by unit tests (happy path + failure path)
-- [ ] `cargo fmt --all -- --check` passes
-- [ ] `cargo clippy --all-targets -- -D warnings` passes
-- [ ] `cargo test --all` passes
-- [ ] `cargo build --target wasm32v1-none --release --all` succeeds
-
-## Security considerations
-
-Events must never include secret material. The `endpoint_hash` is intentionally
-a commitment, not a credential — do not change that.
-
-## Out of scope
-
-- A hosted indexer.
-
-## Pointers
-
-- https://developers.stellar.org/docs/learn/encyclopedia/contract-development/events
-EOF
-
-create_issue medium \
   "[medium] Let providers update a service's rate and endpoint commitment" \
   "wave-medium,150pts" <<'EOF'
 ## Summary
@@ -265,7 +217,8 @@ Add an owner-only update entry point.
 ## Context
 
 `set_service_active` is the only mutable service entry point. `register_service`
-sets the rate once, and `service_id`s are monotonic and never reused.
+sets the rate once, and `service_id`s are monotonic and never reused. Every
+transition now emits a typed Soroban event, so the update must too.
 
 ## Proposed approach
 
@@ -274,9 +227,11 @@ sets the rate once, and `service_id`s are monotonic and never reused.
 2. Authenticate `provider` and check it owns the service, as
    `set_service_active` does.
 3. Reject non-positive rates with the existing `InvalidRate`.
-4. Decide and document whether in-flight leases keep the old rate (they should —
+4. Define a `service_updated` event in `events.rs`.
+5. Decide and document whether in-flight leases keep the old rate (they should —
    `locked_deposit` is already escrowed at the old rate) and test it.
-5. Update the interface table in `README.md`.
+6. Update the interface and event tables in `README.md` and
+   `docs/contract-reference.md`.
 
 ## Acceptance criteria
 
@@ -285,8 +240,8 @@ sets the rate once, and `service_id`s are monotonic and never reused.
 - [ ] Non-positive rate reverts with `Error::InvalidRate`.
 - [ ] Existing leases still settle at their original rate (test).
 - [ ] New leases use the new rate (test).
-- [ ] Interface table in `README.md` updated.
-- [ ] New behaviour is covered by unit tests (happy path + failure path)
+- [ ] The emitted event is asserted with the shared event test helper.
+- [ ] Interface and event tables updated.
 - [ ] `cargo fmt --all -- --check` passes
 - [ ] `cargo clippy --all-targets -- -D warnings` passes
 - [ ] `cargo test --all` passes
@@ -317,15 +272,16 @@ transfer so the provider role can move.
 
 `Service.provider` is set once in `register_service` and never mutated.
 `settle_lease` checks `service.provider == provider`, so a rotated key cannot
-settle any in-flight lease.
+settle any in-flight lease. Events make the transfer observable to indexers.
 
 ## Proposed approach
 
 1. Add `transfer_service(provider, service_id, new_provider)`.
 2. Require auth from the current owner; reject `new_provider == current`.
-3. Document how in-flight leases behave (the new provider becomes the only
+3. Define a `service_transferred` event in `events.rs`.
+4. Document how in-flight leases behave (the new provider becomes the only
    party able to settle them).
-4. Update the interface table in `README.md`.
+5. Update the interface and event tables.
 
 ## Acceptance criteria
 
@@ -333,8 +289,8 @@ settle any in-flight lease.
 - [ ] Only the current owner can transfer (`Error::Unauthorized` otherwise).
 - [ ] After transfer, the old address can no longer settle or deactivate.
 - [ ] After transfer, the new address can settle existing leases (test).
-- [ ] Interface table in `README.md` updated.
-- [ ] New behaviour is covered by unit tests (happy path + failure path)
+- [ ] The emitted event is asserted with the shared event test helper.
+- [ ] Interface and event tables updated.
 - [ ] `cargo fmt --all -- --check` passes
 - [ ] `cargo clippy --all-targets -- -D warnings` passes
 - [ ] `cargo test --all` passes
@@ -356,80 +312,27 @@ EOF
 # ===========================================================================
 
 create_issue high \
-  "[high] Harden the money paths against re-entrant SEP-41 tokens" \
-  "wave-high,200pts,security" <<'EOF'
-## Summary
-
-`settle_lease` performs the token transfers **before** it persists
-`lease.settled = true`. The documented invariant ("No double settlement ...
-`settled` is set before any payout is recorded as complete") does not match the
-implementation, so a malicious or upgradeable escrow token could re-enter
-`settle_lease` for the same lease and be paid twice.
-
-## Motivation
-
-The escrow token is admin-configurable via `set_token`, so the registry's safety
-must not assume the token is honest. This is the single highest-value threat to
-escrowed funds in the protocol.
-
-## Design requirements
-
-- Follow checks-effects-interactions: write `used_calls` and `settled`, and
-  persist them, before any external `transfer` call.
-- The same audit must be applied to `create_lease` and `revoke_expired_lease`.
-- Must not break the existing public entry points in `contracts/registry`.
-- Must not introduce unbounded work per ledger entry.
-
-## Threat model / invariants
-
-- Invariant: no lease's total payout + refund can exceed `locked_deposit`.
-- Invariant: `settled` is observably true on-chain before any value leaves the
-  contract.
-- Adversary: a token contract whose `transfer` re-enters `settle_lease` /
-  `revoke_expired_lease` for the same `lease_id`.
-
-## Acceptance criteria
-
-- [ ] Design note approved by a maintainer before implementation begins
-- [ ] State is persisted before any external call in `settle_lease`,
-      `create_lease`, and `revoke_expired_lease`
-- [ ] An adversarial test uses a malicious token that re-enters on `transfer`
-      and asserts the second attempt reverts (`LeaseAlreadySettled`)
-- [ ] A conservation assertion: `payout + refund == locked_deposit`
-- [ ] `README.md` security-model wording matches the implementation
-- [ ] Adversarial tests cover each listed invariant
-- [ ] `cargo fmt --all -- --check` passes
-- [ ] `cargo clippy --all-targets -- -D warnings` passes
-- [ ] `cargo test --all` passes
-- [ ] `cargo build --target wasm32v1-none --release --all` succeeds
-
-## Deliverables
-
-- [ ] Contract changes
-- [ ] Tests
-- [ ] Documentation update (`README.md` / module docs)
-EOF
-
-create_issue high \
   "[high] Fuzz the escrow invariant: value can never be created or destroyed" \
   "wave-high,200pts,security" <<'EOF'
 ## Summary
 
-The money paths are covered by examples and a few adversarial unit tests, but
-not by randomised or exhaustive exploration. Add property-based tests that
-assert the protocol's conservation law over arbitrary sequences of operations.
+The money paths are covered by examples and targeted adversarial tests (including
+a re-entrant SEP-41 token), but not by randomised or exhaustive exploration. Add
+property-based tests that assert the protocol's conservation law over arbitrary
+sequences of operations.
 
 ## Motivation
 
 Escrow bugs hide at boundaries: `verified_calls == allocated_calls`,
 `now == expires_at`, `now == expires_at + SETTLE_GRACE_PERIOD_SECS`,
-`u32::MAX` calls, `i128`-scale rates. Randomised operation sequences reach
-combinations hand-written tests do not.
+`duration_secs == MAX_LEASE_DURATION_SECS`, `u32::MAX` calls, `i128`-scale rates.
+Randomised operation sequences reach combinations hand-written tests do not.
 
 ## Design requirements
 
 - Assert the conservation law after **every** operation.
 - Cover interleavings of two consumers, two services and one provider.
+- Advance ledger time and ledger sequence numbers, not just timestamps.
 - Must not break the existing public entry points in `contracts/registry`.
 - Must not introduce unbounded work per ledger entry (tests only).
 
@@ -439,6 +342,8 @@ combinations hand-written tests do not.
 - Invariant: the registry's token balance equals the sum of unsettled
   `locked_deposit`s at all times.
 - Invariant: a settled lease can never transition again.
+- Invariant: every lease created through the public API remains readable for its
+  full term plus the grace window.
 - Adversary: an actor that settles, revokes, double-settles, over-claims, or
   advances ledger time adversarially.
 
@@ -447,9 +352,8 @@ combinations hand-written tests do not.
 - [ ] Design note approved by a maintainer before implementation begins
 - [ ] A property test (e.g. `proptest` as a dev-dependency) drives randomised
       call sequences against the registry
-- [ ] The two invariants above are asserted after every step
+- [ ] The invariants above are asserted after every step
 - [ ] A minimal failing case is persisted as a regression test
-- [ ] Adversarial tests cover each listed invariant
 - [ ] `cargo fmt --all -- --check` passes
 - [ ] `cargo clippy --all-targets -- -D warnings` passes
 - [ ] `cargo test --all` passes
@@ -463,49 +367,47 @@ combinations hand-written tests do not.
 EOF
 
 create_issue high \
-  "[high] Prove lease and service storage survive archival (TTL) under load" \
+  "[high] Make the escrow token immutable after the first lease" \
   "wave-high,200pts,security" <<'EOF'
 ## Summary
 
-Leases and services live in **persistent** storage with a TTL bump of
-`LEDGER_BUMP_EXTEND = 518_400` ledgers (~30 days). A lease may legitimately
-outlive that window — a long lease plus the 24h grace period — and if its entry
-is evicted while funds are still locked, the consumer's refund path breaks.
-Establish the real limits and make them safe.
+The admin can call `set_token` at any time, including while leases are
+unsettled. Pointing the registry at a different SEP-41 token mid-flight changes
+the asset that in-flight escrow is paid out in — a migration hazard documented in
+`docs/contract-reference.md` but not prevented by the contract.
 
 ## Motivation
 
-`get_lease` re-extends the TTL on every read, so an *active* lease stays alive.
-But a lease that nobody touches between creation and (expiry + grace) can fall
-off the ledger. Today that possibility is untested and undocumented.
+The admin is trusted to configure the deployment, not to change the value users
+are owed. Making the token immutable after the first lease removes a class of
+admin-key compromise and migration mistakes, and makes the escrow guarantee
+easier to reason about.
 
 ## Design requirements
 
-- Provide a documented bound on the maximum safe `duration_secs` (or a TTL
-  policy that removes the bound).
-- Prove it with tests that advance the ledger sequence past
-  `LEDGER_BUMP_EXTEND`.
+- After the first `create_lease`, `set_token` must revert (or only be callable
+  when every lease is settled).
+- Choose and document the exact rule; a new error variant may be appended.
+- Emit a typed event for any accepted token change.
 - Must not break the existing public entry points in `contracts/registry`.
 - Must not introduce unbounded work per ledger entry.
 
 ## Threat model / invariants
 
-- Invariant: for any lease created through the public API, either the provider
-  can settle it or the consumer can revoke it, for its entire lifetime.
-- Adversary: a griefing actor who creates a lease with a very long duration and
-  then never touches it, and a provider who lets a lease go untouched.
+- Invariant: for the lifetime of an unsettled lease, the escrow token cannot
+  change.
+- Adversary: a compromised admin key attempting to re-point the registry at a
+  token it controls.
+- Adversary: an admin migrating a token while leases are live and stranding
+  refunds.
 
 ## Acceptance criteria
 
 - [ ] Design note approved by a maintainer before implementation begins
-- [ ] A test advances `env.ledger().set_sequence_number(...)` past the extend
-      window and asserts the lease is still readable (or documents the failure
-      and fixes it)
-- [ ] `create_lease` either rejects durations that cannot be supported, with a
-      clear error, or its TTL policy guarantees them
-- [ ] The TTL policy and its limits are documented in `storage.rs` and
-      `README.md`
-- [ ] Adversarial tests cover each listed invariant
+- [ ] The chosen rule is enforced in `set_token` and documented
+- [ ] Tests cover the rejected paths (settled and unsettled leases)
+- [ ] The lock is observable: an event and/or read view exposes the pinned token
+- [ ] `docs/security.md`, `docs/contract-reference.md` and `README.md` updated
 - [ ] `cargo fmt --all -- --check` passes
 - [ ] `cargo clippy --all-targets -- -D warnings` passes
 - [ ] `cargo test --all` passes
@@ -515,7 +417,7 @@ off the ledger. Today that possibility is untested and undocumented.
 
 - [ ] Contract changes
 - [ ] Tests
-- [ ] Documentation update (`README.md` / module docs)
+- [ ] Documentation update
 EOF
 
 echo

@@ -2,15 +2,21 @@
 #
 # deploy-testnet.sh — deploy KeyLease to Stellar Testnet in dependency order.
 #
-# This script is deliberately sequential and idempotent-adjacent: each step
-# depends on the previous one, and it prints the exact values you must hand to
-# the gateway afterwards.
+# This script is deliberately sequential: each step depends on the previous one,
+# and it prints the exact values a Stellar client or indexer needs afterwards.
 #
+# Deploy:
 #   1. cargo build --target wasm32v1-none --release --all
 #   2. stellar contract deploy   (registry)  -> REGISTRY contract id
 #   3. stellar contract invoke -- init         --admin <ADMIN>
 #   4. stellar contract invoke -- set_token    --admin <ADMIN> --token <TOKEN>
 #   5. stellar contract invoke -- register_service --provider <P> --rate_per_call <R> --endpoint_hash <H>
+#
+# Upgrade an existing deployment in place:
+#   1. cargo build --target wasm32v1-none --release --all
+#   2. stellar contract upload   (registry)  -> Wasm hash
+#   3. stellar contract invoke -- upgrade --admin <ADMIN> --new_wasm_hash <HASH>
+#   4. stellar contract invoke -- version  (verify)
 #
 # Prerequisites
 #   - Rust 1.84+ with `rustup target add wasm32v1-none`
@@ -22,6 +28,9 @@
 #
 #   KEYLEASE_GENERATE_KEY=1 SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.sh
 #       -> creates + Friendbot-funds the identity first (testnet only)
+#
+#   REGISTRY=C... SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.sh --upgrade
+#       -> uploads the built Wasm and installs it over an existing contract id
 #
 # Environment
 #   SOURCE_ACCOUNT          stellar CLI identity/key used to sign. Default: keylease-admin
@@ -51,6 +60,20 @@ RATE_PER_CALL="${RATE_PER_CALL:-1000000}"
 SERVICE_NAME="${SERVICE_NAME:-keylease-demo}"
 KEYLEASE_GENERATE_KEY="${KEYLEASE_GENERATE_KEY:-}"
 
+MODE="deploy"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --upgrade) MODE="upgrade" ;;
+    --deploy)  MODE="deploy" ;;
+    -h|--help)
+      sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -59,6 +82,13 @@ REGISTRY_WASM="$REPO_ROOT/target/wasm32v1-none/release/keylease_registry.wasm"
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 die()  { printf '\n\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+build_wasm() {
+  rustup target list --installed 2>/dev/null | grep -qx 'wasm32v1-none' \
+    || rustup target add wasm32v1-none
+  cargo build --target wasm32v1-none --release --package keylease-registry
+  [ -f "$REGISTRY_WASM" ] || die "expected Wasm not found: $REGISTRY_WASM"
+}
 
 command -v cargo   >/dev/null 2>&1 || die "cargo not found. Install Rust: https://rustup.rs"
 command -v stellar >/dev/null 2>&1 || die "stellar CLI not found. See https://developers.stellar.org/docs/tools/cli/stellar-cli"
@@ -80,6 +110,65 @@ fi
 
 ADMIN="${ADMIN:-$(stellar keys address "$SOURCE_ACCOUNT")}"
 PROVIDER="${PROVIDER:-$ADMIN}"
+
+# ---------------------------------------------------------------------------
+# Upgrade mode: build -> upload -> upgrade an existing contract id
+# ---------------------------------------------------------------------------
+
+if [ "$MODE" = "upgrade" ]; then
+  [ -n "${REGISTRY:-}" ] || die "REGISTRY=<contract id> is required with --upgrade"
+  printf '%s' "$REGISTRY" | grep -Eq '^C[A-Z0-9]{55}$' \
+    || die "REGISTRY must be a contract id starting with C, got: $REGISTRY"
+
+  step "Building Soroban Wasm (wasm32v1-none, release)"
+  build_wasm
+
+  step "Uploading registry Wasm"
+  WASM_HASH="$(stellar contract upload \
+    --wasm "$REGISTRY_WASM" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" | tail -n1)"
+
+  printf '%s' "$WASM_HASH" | grep -Eq '^[0-9a-fA-F]{64}$' \
+    || die "unexpected upload output, expected a 64-char Wasm hash: $WASM_HASH"
+  info "wasm hash: $WASM_HASH"
+
+  step "Upgrading $REGISTRY (admin = $ADMIN)"
+  stellar contract invoke \
+    --id "$REGISTRY" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" \
+    --send=yes \
+    -- upgrade --admin "$ADMIN" --new_wasm_hash "$WASM_HASH"
+
+  step "Verifying on-chain version"
+  VERSION="$(stellar contract invoke \
+    --id "$REGISTRY" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" \
+    -- version | tail -n1)"
+
+  cat <<EOF
+
+============================================================================
+ KeyLeaseRegistry upgraded on $NETWORK
+============================================================================
+ KEYLEASE_CONTRACT_ID=$REGISTRY
+ KEYLEASE_NETWORK=$NETWORK
+ version()            = $VERSION
+ wasm hash            = $WASM_HASH
+============================================================================
+ Next steps
+   - Watch the upgrade event:
+       stellar events --id $REGISTRY --network $NETWORK --start-ledger <ledger>
+   - Verify storage and balances are intact:
+       stellar contract invoke --id $REGISTRY --source-account $SOURCE_ACCOUNT \
+         --network $NETWORK -- get_service --service_id 1
+   - Explorer: https://stellar.expert/explorer/$NETWORK/contract/$REGISTRY
+============================================================================
+EOF
+  exit 0
+fi
 
 if [ -z "${TOKEN:-}" ]; then
   TOKEN="$(stellar contract id asset --network "$NETWORK" --asset native)"
@@ -111,11 +200,7 @@ info "endpoint hash  : $ENDPOINT_HASH"
 # ---------------------------------------------------------------------------
 
 step "Building Soroban Wasm (wasm32v1-none, release)"
-rustup target list --installed 2>/dev/null | grep -qx 'wasm32v1-none' \
-  || rustup target add wasm32v1-none
-cargo build --target wasm32v1-none --release --package keylease-registry
-
-[ -f "$REGISTRY_WASM" ] || die "expected Wasm not found: $REGISTRY_WASM"
+build_wasm
 
 # ---------------------------------------------------------------------------
 # 2. Deploy the registry
@@ -182,7 +267,7 @@ stellar contract invoke \
   -- get_service --service_id "$SERVICE_ID" >/dev/null
 
 # ---------------------------------------------------------------------------
-# Done — hand these to keylease-gateway
+# Done — configuration for Stellar clients, indexers and explorers
 # ---------------------------------------------------------------------------
 
 cat <<EOF
@@ -202,10 +287,15 @@ cat <<EOF
 ============================================================================
  Next steps
    - Copy the values above into your .env (see .env.example).
-   - Point @keylease/cli at the registry:
-       export KEYLEASE_CONTRACT_ID=$REGISTRY
-       export KEYLEASE_SERVICE_ID=$SERVICE_ID
+   - Confirm the on-chain metadata and configuration:
+       stellar contract invoke --id $REGISTRY --source-account $SOURCE_ACCOUNT \
+         --network $NETWORK -- version
+       stellar contract invoke --id $REGISTRY --source-account $SOURCE_ACCOUNT \
+         --network $NETWORK -- get_token
+   - Follow the lifecycle events:
+       stellar events --id $REGISTRY --network $NETWORK --start-ledger <ledger>
    - Fund the consumer account so create_lease can escrow a deposit.
+   - Verification pipeline for providers: docs/integration.md
    - Explorer: https://stellar.expert/explorer/$NETWORK/contract/$REGISTRY
 ============================================================================
 EOF

@@ -1,6 +1,6 @@
 name: Docs
 
-# Builds the unified KeyLease documentation site (keylease-core + gateway) with
+# Builds the KeyLease documentation site for this Soroban repository with
 # MkDocs Material and publishes it to GitHub Pages.
 #
 # GitHub Pages for this repository is served from the `gh-pages` branch

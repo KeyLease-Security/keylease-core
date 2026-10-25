@@ -31,22 +31,64 @@
 //! * A consumer can always reclaim the full deposit if the provider fails to
 //!   settle within [`SETTLE_GRACE_PERIOD_SECS`] of expiry.
 //! * All ledger math uses checked arithmetic; overflow reverts the transaction.
+//!
+//! ## Stellar / Soroban dependencies
+//!
+//! This contract is not a generic escrow with a Stellar logo on it; it is built
+//! out of Soroban primitives:
+//!
+//! * **SEP-41 tokens** — every deposit and payout is a cross-contract call to a
+//!   Stellar Asset Contract or a custom SEP-41 token.
+//! * **`Address` auth** — every actor is a Stellar account (`G...`) or contract
+//!   (`C...`) address authenticated by the host's `require_auth()`.
+//! * **Contract events** — every transition emits a typed Soroban event (see
+//!   [`events`]) so indexers can follow escrow without polling.
+//! * **Ledger time** — expiry is measured in ledger timestamps, not wall clocks.
+//! * **Persistent storage TTL** — lease entries are extended for their full
+//!   duration plus the grace period, so escrow cannot fall off the ledger.
+//! * **Wasm upgrades** — the admin can install a new Wasm through the Soroban
+//!   deployer, and `contractmeta!` identifies the running version on-chain.
 
 mod errors;
+mod events;
 mod storage;
 mod types;
 
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
 
 pub use crate::errors::Error;
+pub use crate::events::{
+    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
+    RegistryInitialized, ServiceRegistered, ServiceStatusChanged,
+};
 pub use crate::types::{Lease, LeaseStatus, Service};
+
+// On-chain contract metadata, readable from the ledger without the source.
+soroban_sdk::contractmeta!(key = "name", val = "KeyLeaseRegistry");
+soroban_sdk::contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+soroban_sdk::contractmeta!(
+    key = "description",
+    val = "Time-bound micro-leases for API/RPC access, escrowed with SEP-41 tokens on Stellar."
+);
+soroban_sdk::contractmeta!(
+    key = "repository",
+    val = "https://github.com/KeyLease-Security/keylease-core"
+);
 
 /// Grace period after lease expiry during which the provider may still settle.
 /// After this window elapses, the consumer may reclaim the full deposit.
 pub const SETTLE_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60;
+
+/// Longest lease the TTL policy is guaranteed to keep alive.
+///
+/// Persistent entries are extended to cover the full lease term, the 24-hour
+/// grace window and a one-day read buffer, so this bound guarantees a lease can
+/// never outlive its storage entry. At thirty days the resulting TTL (~32 days)
+/// is well under the network's maximum entry TTL (180 days on Testnet).
+pub const MAX_LEASE_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
 
 #[contract]
 pub struct KeyLeaseRegistry;
@@ -60,7 +102,8 @@ impl KeyLeaseRegistry {
     /// Initialize the registry and appoint `admin`.
     ///
     /// Can only be called once. The admin is the only account allowed to
-    /// configure the escrow token via [`Self::set_token`].
+    /// configure the escrow token via [`Self::set_token`] or upgrade the
+    /// contract via [`Self::upgrade`].
     pub fn init(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         if storage::is_initialized(&env) {
@@ -68,19 +111,46 @@ impl KeyLeaseRegistry {
         }
         storage::set_admin(&env, &admin);
         storage::extend_instance_ttl(&env);
+        RegistryInitialized {
+            admin: admin.clone(),
+        }
+        .publish(&env);
         Ok(())
     }
 
     /// Configure the SEP-41 token used to escrow deposits. Admin only.
     ///
     /// Kept as a separate, admin-gated entry point so that deployments can point
-    /// the registry at the native Stellar asset contract or a custom token
-    /// without redeploying the registry logic.
+    /// the registry at the native Stellar asset contract (SAC) or a custom SEP-41
+    /// token without redeploying the registry logic.
     pub fn set_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
         storage::set_token(&env, &token);
         storage::extend_instance_ttl(&env);
+        EscrowTokenSet {
+            admin: admin.clone(),
+            token: token.clone(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Install a new registry Wasm through the Soroban deployer. Admin only.
+    ///
+    /// `new_wasm_hash` is the hash produced by `stellar contract upload`. The
+    /// contract id stays the same; storage, balances and in-flight leases are
+    /// preserved, which is why upgrades must never change the storage layout.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        ContractUpgraded {
+            admin: admin.clone(),
+            new_wasm_hash,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -108,13 +178,20 @@ impl KeyLeaseRegistry {
         let service_id = storage::next_service_id(&env)?;
         let service = Service {
             service_id,
-            provider,
+            provider: provider.clone(),
             rate_per_call,
             is_active: true,
-            endpoint_hash,
+            endpoint_hash: endpoint_hash.clone(),
         };
         storage::save_service(&env, &service);
         storage::extend_instance_ttl(&env);
+        ServiceRegistered {
+            service_id,
+            provider,
+            rate_per_call,
+            endpoint_hash,
+        }
+        .publish(&env);
 
         Ok(service_id)
     }
@@ -136,6 +213,12 @@ impl KeyLeaseRegistry {
         }
         service.is_active = is_active;
         storage::save_service(&env, &service);
+        ServiceStatusChanged {
+            service_id,
+            provider,
+            is_active,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -148,6 +231,11 @@ impl KeyLeaseRegistry {
     /// Transfers `rate_per_call * requested_calls` of the escrow token from
     /// `consumer` into the registry, and records a lease that expires at
     /// `ledger.timestamp() + duration_secs`. Requires `consumer` auth.
+    ///
+    /// `duration_secs` must be in `1..=MAX_LEASE_DURATION_SECS`. The upper bound
+    /// is a Soroban storage constraint: the lease's persistent entry is extended
+    /// for the whole term plus the grace window, so a longer lease could be
+    /// evicted while escrow is still locked.
     ///
     /// Returns the new `lease_id`.
     pub fn create_lease(
@@ -165,6 +253,9 @@ impl KeyLeaseRegistry {
         if duration_secs == 0 {
             return Err(Error::InvalidDuration);
         }
+        if duration_secs > MAX_LEASE_DURATION_SECS {
+            return Err(Error::DurationTooLong);
+        }
 
         let service = storage::get_service(&env, service_id)?;
         if !service.is_active {
@@ -181,9 +272,9 @@ impl KeyLeaseRegistry {
             return Err(Error::InvalidRate);
         }
 
+        // A lease with no token configured can never be funded or settled, so
+        // fail before mutating state.
         let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
-        let contract = env.current_contract_address();
-        token::Client::new(&env, &token_addr).transfer(&consumer, &contract, &required_deposit);
 
         let expires_at = env
             .ledger()
@@ -195,15 +286,33 @@ impl KeyLeaseRegistry {
         let lease = Lease {
             lease_id,
             service_id,
-            consumer,
+            consumer: consumer.clone(),
             allocated_calls: requested_calls,
             used_calls: 0,
             expires_at,
             locked_deposit: required_deposit,
             settled: false,
         };
+
+        // checks-effects-interactions: the lease exists before the token is
+        // called, and the whole transaction reverts if the transfer does.
         storage::save_lease(&env, &lease);
         storage::extend_instance_ttl(&env);
+        token::Client::new(&env, &token_addr).transfer(
+            &consumer,
+            env.current_contract_address(),
+            &required_deposit,
+        );
+
+        LeaseCreated {
+            lease_id,
+            service_id,
+            consumer,
+            allocated_calls: requested_calls,
+            expires_at,
+            locked_deposit: required_deposit,
+        }
+        .publish(&env);
 
         Ok(lease_id)
     }
@@ -252,6 +361,12 @@ impl KeyLeaseRegistry {
             .checked_sub(payout)
             .ok_or(Error::Overflow)?;
 
+        // checks-effects-interactions: persist the settlement before any token
+        // transfer, so a re-entrant token sees a settled lease and reverts.
+        lease.used_calls = verified_calls;
+        lease.settled = true;
+        storage::save_lease(&env, &lease);
+
         let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
         let client = token::Client::new(&env, &token_addr);
         let contract = env.current_contract_address();
@@ -263,9 +378,14 @@ impl KeyLeaseRegistry {
             client.transfer(&contract, &lease.consumer, &refund);
         }
 
-        lease.used_calls = verified_calls;
-        lease.settled = true;
-        storage::save_lease(&env, &lease);
+        LeaseSettled {
+            lease_id,
+            provider,
+            verified_calls,
+            payout,
+            refund,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -301,6 +421,12 @@ impl KeyLeaseRegistry {
         }
 
         let refund = lease.locked_deposit;
+
+        // checks-effects-interactions: mark the lease settled before the refund
+        // transfer so a re-entrant token cannot reclaim twice.
+        lease.settled = true;
+        storage::save_lease(&env, &lease);
+
         if refund > 0 {
             let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
             token::Client::new(&env, &token_addr).transfer(
@@ -310,8 +436,12 @@ impl KeyLeaseRegistry {
             );
         }
 
-        lease.settled = true;
-        storage::save_lease(&env, &lease);
+        LeaseRevoked {
+            lease_id,
+            consumer,
+            refund,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -328,6 +458,11 @@ impl KeyLeaseRegistry {
     /// Return the configured escrow token, or `TokenNotSet`.
     pub fn get_token(env: Env) -> Result<Address, Error> {
         storage::get_token(&env).ok_or(Error::TokenNotSet)
+    }
+
+    /// Version string embedded in the Wasm by `contractmeta!`.
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
     }
 
     /// Total number of services registered.

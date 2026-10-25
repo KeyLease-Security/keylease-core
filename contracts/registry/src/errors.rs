@@ -37,4 +37,7 @@ pub enum Error {
     TokenNotSet = 14,
     /// Arithmetic overflow during rate or deposit math.
     Overflow = 15,
+    /// Lease duration exceeds `MAX_LEASE_DURATION_SECS`, so its storage entry
+    /// could not be kept alive for the whole term.
+    DurationTooLong = 16,
 }

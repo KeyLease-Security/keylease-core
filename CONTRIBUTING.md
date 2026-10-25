@@ -30,18 +30,21 @@ commands above, plus `cargo build --target wasm32v1-none --release --all`.
 
 | Path | Purpose |
 | --- | --- |
-| `contracts/registry/src/lib.rs` | Entry points and protocol lifecycle. |
+| `contracts/registry/src/lib.rs` | Entry points, `contractmeta!`, upgrade, protocol lifecycle. |
+| `contracts/registry/src/events.rs` | Typed Soroban events, the indexing surface. |
 | `contracts/registry/src/types.rs` | `Service`, `Lease`, `LeaseStatus`. |
 | `contracts/registry/src/storage.rs` | `DataKey` layout, TTL policy, accessors. |
 | `contracts/registry/src/errors.rs` | Stable `Error` codes (never reuse a number). |
-| `contracts/registry/src/test.rs` | Integration tests for the registry. |
+| `contracts/registry/src/test.rs` | Lifecycle, SAC, event, upgrade and re-entrancy tests. |
 | `contracts/mock_token/` | Test-only SEP-41 token. |
 | `scripts/` | Deploy, issue generation, repo setup. |
 | `docs/` | Protocol docs, contract reference, guides. |
 
 Before your first change, read [`docs/developer-guide.md`](./docs/developer-guide.md)
 and the [contract reference](./docs/contract-reference.md). The
-[security model](./docs/security.md) lists the current known limitations.
+[security model](./docs/security.md) lists the current known limitations, and
+[`docs/integration.md`](./docs/integration.md) describes how Stellar clients
+verify leases.
 
 ## Code standards
 
@@ -50,8 +53,13 @@ and the [contract reference](./docs/contract-reference.md). The
   `checked_sub` and map failures to `Error::Overflow`.
 - **Authenticate actors.** Every state-changing entry point calls
   `require_auth()` on the address it represents.
-- **Guard money paths.** Any path that moves escrow must first check that the
-  lease is not already settled.
+- **Follow checks-effects-interactions.** Any path that moves escrow must first
+  check that the lease is not already settled and persist the settlement before
+  calling the token.
+- **Emit events.** Every state transition publishes a typed event from
+  `events.rs`, and events never contain secret material.
+- **Bound storage.** New persistent keys need a TTL policy; user-controlled
+  lifetimes need an upper bound (see `MAX_LEASE_DURATION_SECS`).
 - **No unbounded loops** over user-supplied collections.
 - **Errors over panics.** Return `Result<_, Error>`; do not `panic!` on
   recoverable conditions.
@@ -78,7 +86,10 @@ assert_eq!(
 );
 ```
 
-Every security-sensitive change should include an adversarial test.
+Assert emitted events with `assert_single_event`, and keep the two Stellar-specific
+safety nets green: the lifecycle test that escrows through the real Stellar Asset
+Contract, and the re-entrant-token test that proves a lease cannot be settled
+twice. Every security-sensitive change should include an adversarial test.
 
 ## Design notes for `high` (200 pt) issues
 

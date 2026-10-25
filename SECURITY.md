@@ -36,12 +36,13 @@ will credit reporters in the release notes unless you ask us not to.
 - arithmetic overflow/truncation in deposit, payout, or timestamp math
 - storage TTL/griefing issues that evict a live lease or service
 - a way to make a settled lease settle again, or to resurrect one
+- an unauthorized path to `set_token` or `upgrade`, or a way to force an upgrade
+- a contract event that leaks secret material
 
 **Out of scope**
 
-- vulnerabilities in the gateway (`@keylease/cli`, `@keylease/proxy`) — report
-  them on
-  [keylease-gateway](https://github.com/KeyLease-Security/keylease-gateway)
+- off-chain clients, indexers and provider middleware — this policy covers the
+  Soroban contract; report client issues to the project that ships them
 - `contracts/mock_token` — it is a deliberately insecure test-only token with
   unlimited mint; findings there are expected and not actionable
 - issues queued in the [Stellar Core](https://github.com/stellar/stellar-core)
@@ -59,8 +60,10 @@ notes.
 
 ## Deployed addresses
 
-Only trust contract ids published in this repository's release notes and
-`README.md`. Any other "KeyLease" contract id is not ours.
+Only trust contract ids published in [`docs/deployments.md`](./docs/deployments.md)
+and this repository's release notes. Any other "KeyLease" contract id is not
+ours. Every deployment is verifiable on-chain through `version()`, `get_admin()`,
+`get_token()` and the contract's event stream.
 
 ## Supported versions
 
