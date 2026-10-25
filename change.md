@@ -2,7 +2,8 @@
 
 **Repository:** `KeyLease-Security/keylease-core`
 **Submission state:** `01581ef` (2026-10-09, the tree as reviewed)
-**Current state:** `03dd6fe` → `main` (2026-10-25)
+**Current state:** `main` (2026-10-25) — everything below is the single
+commit `03dd6fe`, plus this file.
 **Scope of this document:** everything that changed in this repository after the
 submission was rejected, with pointers so every claim can be verified
 independently.
