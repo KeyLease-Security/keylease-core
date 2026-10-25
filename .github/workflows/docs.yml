@@ -23,6 +23,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: docs-pages
@@ -56,3 +58,26 @@ jobs:
           # Keep the branch a single generated commit instead of growing a
           # history of built HTML on every docs change.
           force_orphan: true
+
+      # GitHub Pages is configured with build_type: workflow, so the branch
+      # push above alone does not publish anything — the site must be deployed
+      # through the Pages API or the live site never updates.
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+  deploy:
+    name: Deploy
+    needs: build-deploy
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
