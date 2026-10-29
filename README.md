@@ -300,18 +300,7 @@ The 40 tests in `contracts/registry/src/test.rs` cover:
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). Drips Wave tasks are filed from the
-templates in `.github/ISSUE_TEMPLATE/`
-(`trivial 100 pts`, `medium 150 pts`, `high 200 pts`), or in bulk with
-[`scripts/create-issues.sh`](./scripts/create-issues.sh):
-
-```bash
-./scripts/create-issues.sh --dry-run   # preview the backlog
-./scripts/create-issues.sh             # create it
-```
-
-Maintainers run [`scripts/setup-repo.sh`](./scripts/setup-repo.sh) to apply topics,
-labels and branch protection.
+See [CONTRIBUTING.md](./CONTRIBUTING.md). 
 
 ## Security
 
