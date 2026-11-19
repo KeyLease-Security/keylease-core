@@ -44,4 +44,11 @@ pub enum Error {
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.
     DepositTooLarge = 17,
+    /// No admin transfer is pending, so there is nothing to accept or cancel.
+    NoPendingAdminTransfer = 18,
+    /// The pending admin transfer is past its `expires_at` and can no longer
+    /// be accepted. The current admin must propose again.
+    AdminTransferExpired = 19,
+    /// The proposed admin is the current admin; a transfer must change hands.
+    InvalidAdmin = 20,
 }

@@ -42,8 +42,8 @@ Initialize the registry and appoint `admin`.
 - **State:** sets `Admin`; extends instance TTL.
 - **Events:** `registry_initialized { admin }`.
 - **Errors:** `AlreadyInitialized`.
-- **Notes:** the admin can only call `set_token` and `upgrade`. It cannot move
-  user funds.
+- **Notes:** the admin can only call `set_token`, `upgrade` and the
+  admin-rotation entry points below. It cannot move user funds.
 
 ### `set_token`
 
@@ -84,6 +84,56 @@ Install a new registry Wasm through the Soroban deployer.
 - **Notes:** the contract id, storage and balances are preserved, so an upgrade
   must never change the `DataKey` layout or the meaning of stored values. See
   [Deployment](deployment.md#upgrading).
+
+### `propose_admin`
+
+```rust
+pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<u64, Error>
+```
+
+Start a two-step admin hand-over to `new_admin` and return `expires_at`.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **Preconditions:** `new_admin != admin`.
+- **State:** stores `PendingAdmin { proposed_by, new_admin, proposed_at,
+  expires_at }` with `expires_at = now + ADMIN_TRANSFER_WINDOW_SECS` (7 days),
+  replacing any earlier proposal; extends instance TTL. The admin does **not**
+  change yet.
+- **Events:** `admin_transfer_proposed { admin, new_admin, expires_at }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `InvalidAdmin`, `Overflow`.
+
+### `cancel_admin_transfer`
+
+```rust
+pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), Error>
+```
+
+Withdraw the pending proposal, whether or not it has expired.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **State:** removes `PendingAdmin`; extends instance TTL.
+- **Events:** `admin_transfer_canceled { admin, new_admin }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingAdminTransfer`.
+
+### `accept_admin`
+
+```rust
+pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error>
+```
+
+Complete the hand-over and become the admin.
+
+- **Caller / auth:** `new_admin`, which must be the proposed address.
+- **Preconditions:** a proposal is pending, names `new_admin`, was made by the
+  admin still in office, and `now < expires_at`.
+- **State:** sets `Admin = new_admin`; removes `PendingAdmin`; extends instance
+  TTL. The previous admin loses every admin right in the same transaction.
+- **Events:** `admin_transfer_accepted { previous_admin, new_admin }`.
+- **Errors:** `NotInitialized`, `NoPendingAdminTransfer`, `Unauthorized`,
+  `AdminTransferExpired`.
+- **Notes:** `propose_admin` carries the outgoing admin's authorization and
+  `accept_admin` the incoming one's, so the hand-over as a whole needs both and
+  no third party can complete it.
 
 ---
 
@@ -338,6 +388,7 @@ performed one could not be used to price a read.
 | View | Signature | Returns |
 | --- | --- | --- |
 | `get_admin` | `(env) -> Result<Address, Error>` | stored admin, else `NotInitialized` |
+| `get_pending_admin` | `(env) -> Option<PendingAdminTransfer>` | pending hand-over, including an expired one, else `None` |
 | `get_token` | `(env) -> Result<Address, Error>` | escrow token, else `TokenNotSet` |
 | `version` | `(env) -> String` | version embedded by `contractmeta!` |
 | `service_count` | `(env) -> u64` | total services ever registered |
@@ -371,6 +422,9 @@ because topics are positional and indexers filter on them.
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 See [integration.md](./integration.md#event-schema-version) for how to branch on
 the version.
@@ -402,6 +456,13 @@ pub struct Lease {
 }
 
 pub enum LeaseStatus { Active = 0, Expired = 1, Settled = 2 }
+
+pub struct PendingAdminTransfer {
+    pub proposed_by: Address,
+    pub new_admin: Address,
+    pub proposed_at: u64,
+    pub expires_at: u64,
+}
 ```
 
 ## Storage layout
@@ -414,6 +475,7 @@ pub enum DataKey {
     LeaseCount,   // instance
     Service(u64), // persistent
     Lease(u64),   // persistent
+    PendingAdmin, // instance
 }
 ```
 
@@ -446,6 +508,9 @@ never reused.
 | 15 | `Overflow` | checked arithmetic failed |
 | 16 | `DurationTooLong` | lease duration above `MAX_LEASE_DURATION_SECS` |
 | 17 | `DepositTooLarge` | deposit above `MAX_LEASE_DEPOSIT` |
+| 18 | `NoPendingAdminTransfer` | `accept_admin` / `cancel_admin_transfer` with no proposal |
+| 19 | `AdminTransferExpired` | `accept_admin` at or after `expires_at` |
+| 20 | `InvalidAdmin` | `propose_admin` named the current admin |
 
 ## Invoking with the Stellar CLI
 

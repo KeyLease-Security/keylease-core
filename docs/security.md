@@ -44,11 +44,14 @@ take more than it is owed, and it cannot prevent the consumer's refund.
    the lease id is allocated and before the token is called. Checked arithmetic
    alone cannot catch this: a product can be perfectly representable and still
    be three orders of magnitude more than the consumer meant to lock.
-8. **The admin cannot touch user funds.** It can only call `set_token` and
-   `upgrade`.
-9. **Every mutation is authenticated.** No state-changing entry point trusts its
+8. **The admin cannot touch user funds.** It can only call `set_token`,
+   `upgrade` and the admin-rotation entry points.
+9. **The admin role changes hands only with both signatures.** `propose_admin`
+   needs the current admin, `accept_admin` needs the proposed address, and a
+   proposal expires after `ADMIN_TRANSFER_WINDOW_SECS` (7 days).
+10. **Every mutation is authenticated.** No state-changing entry point trusts its
    caller without `require_auth()`.
-10. **Every mutation is observable.** Each transition emits a typed Soroban event
+11. **Every mutation is observable.** Each transition emits a typed Soroban event
    with no secret material in it.
 
 ## Invariants
@@ -80,6 +83,9 @@ violation.
 | Duration overflow wraps expiry | `checked_add` → `Overflow` |
 | Long lease is evicted from storage | `DurationTooLong` + duration-aware TTL extension |
 | Fake "KeyLease" contract id | Only ids in [Deployments](deployments.md) are ours |
+| Third party takes over the admin role | `accept_admin` requires the proposed address's auth and a proposal made by the sitting admin; adversarial tests with real auth |
+| Admin role handed to a mistyped or unreachable address | Two-step hand-over: nothing changes until the successor signs `accept_admin` |
+| Forgotten proposal accepted months later | Proposals expire after 7 days (`AdminTransferExpired`); the admin can cancel at any time |
 | Silent logic change on upgrade | Admin-only, emits `contract_upgraded`, `contractmeta!` exposes the version |
 
 ## Known limitations
@@ -103,7 +109,10 @@ These are real and tracked as Drips Wave issues rather than hidden.
 
 - Only trust contract ids in [`docs/deployments.md`](deployments.md).
 - The admin key should be a cold or multisig Stellar account. It can change the
-  escrow token and upgrade the contract.
+  escrow token and upgrade the contract. Rotate it with `propose_admin` followed
+  by `accept_admin` from the new account; a key that is already lost cannot
+  propose, so rotate *before* retiring a key, and prefer a multisig admin whose
+  signers can be replaced at the account level.
 - Verify the deployed metadata and configuration after deploy:
 
 ```bash

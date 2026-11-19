@@ -4,12 +4,16 @@
 
 | Actor | Address | Can do |
 | --- | --- | --- |
-| **Admin** | one Stellar account | `init` once, `set_token`, `upgrade`. Cannot move escrowed funds. |
+| **Admin** | one Stellar account | `init` once, `set_token`, `upgrade`, `propose_admin` / `cancel_admin_transfer`. Cannot move escrowed funds. |
 | **Provider** | per service (account or contract address) | Register/pause services, settle leases it owns. |
 | **Consumer** | per lease (account or contract address) | Create leases, revoke expired unsettled leases. |
 
 The admin is a deployment role. It can point the registry at a token address and
-install a new Wasm, and nothing else. It has no path to user funds.
+install a new Wasm, and nothing else. It has no path to user funds. The role is
+rotated in two steps: the admin proposes a successor with `propose_admin`, and
+the successor takes over by calling `accept_admin` within seven days. Both
+signatures are required, so neither party (nor anyone else) can move the role
+alone.
 
 Because every actor is a Soroban `Address`, the same protocol works for classic
 Stellar accounts (`G…`), multisig accounts and smart contracts (`C…`).
@@ -151,6 +155,9 @@ spans a contract upgrade stays decodable (see
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 Events are the indexing contract between on-chain state and off-chain systems: a
 provider can settle from a projection built by subscribing to `lease_created`,
@@ -232,6 +239,7 @@ These must hold for every reachable state. They are asserted in tests.
 | Key | Storage | Notes |
 | --- | --- | --- |
 | `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
+| `PendingAdmin` | instance | at most one admin hand-over awaiting acceptance; cleared on accept or cancel |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
 | `Service(u64)` | persistent | TTL extended on save and by `bump_service` |
 | `Lease(u64)` | persistent | TTL extended on save and by `bump_lease`, never by a read |

@@ -1,19 +1,22 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{storage::Instance as _, Address as _, Events as _, Ledger as _},
+    testutils::{
+        storage::Instance as _, Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke,
+    },
     token, xdr, Address, BytesN, Env, Event, IntoVal, Map, Symbol, TryFromVal, Val, Vec,
 };
 
 use keylease_mock_token::{MockToken, MockTokenClient};
 
 use crate::events::{
-    EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled, ServiceRegistered,
-    ServiceStatusChanged, EVENT_SCHEMA_VERSION,
+    AdminTransferAccepted, AdminTransferCanceled, AdminTransferProposed, EscrowTokenSet,
+    LeaseCreated, LeaseRevoked, LeaseSettled, ServiceRegistered, ServiceStatusChanged,
+    EVENT_SCHEMA_VERSION,
 };
 use crate::storage::{self, LEDGER_BUMP_EXTEND, LEDGER_BUMP_THRESHOLD, MAX_ENTRY_TTL_LEDGERS};
 use crate::{
-    Error, KeyLeaseRegistry, KeyLeaseRegistryClient, Lease, LeaseStatus, MAX_LEASE_DEPOSIT,
-    MAX_LEASE_DURATION_SECS,
+    Error, KeyLeaseRegistry, KeyLeaseRegistryClient, Lease, LeaseStatus, PendingAdminTransfer,
+    ADMIN_TRANSFER_WINDOW_SECS, MAX_LEASE_DEPOSIT, MAX_LEASE_DURATION_SECS,
 };
 
 /// Per-call rate used across the tests.
@@ -1602,4 +1605,448 @@ fn test_lease_ttl_ask_follows_a_lowered_network_max_entry_ttl() {
         "the contract ceiling must yield to a lower network cap"
     );
     assert_eq!(ask, env.storage().max_ttl());
+}
+
+// ---------------------------------------------------------------------------
+// Two-step admin rotation
+// ---------------------------------------------------------------------------
+
+/// Assert that the last invocation was authorized by exactly `who`.
+fn assert_authorized_only_by(env: &Env, who: &Address) {
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1, "expected one authorizer, got {auths:?}");
+    assert_eq!(&auths[0].0, who);
+}
+
+#[test]
+fn test_admin_transfer_happy_path() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    let expires_at = ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    assert_eq!(expires_at, 1_000 + ADMIN_TRANSFER_WINDOW_SECS);
+    assert_authorized_only_by(&env, &ctx.admin);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &AdminTransferProposed {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: ctx.admin.clone(),
+            new_admin: new_admin.clone(),
+            expires_at,
+        },
+    );
+
+    // Proposing changes nothing yet.
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+    assert_eq!(
+        ctx.registry.get_pending_admin(),
+        Some(PendingAdminTransfer {
+            proposed_by: ctx.admin.clone(),
+            new_admin: new_admin.clone(),
+            proposed_at: 1_000,
+            expires_at,
+        })
+    );
+
+    ctx.registry.accept_admin(&new_admin);
+    assert_authorized_only_by(&env, &new_admin);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &AdminTransferAccepted {
+            schema_version: EVENT_SCHEMA_VERSION,
+            previous_admin: ctx.admin.clone(),
+            new_admin: new_admin.clone(),
+        },
+    );
+    assert_eq!(ctx.registry.get_admin(), new_admin);
+    assert_eq!(ctx.registry.get_pending_admin(), None);
+}
+
+#[test]
+fn test_admin_transfer_moves_every_admin_right() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+    let other_token = Address::generate(&env);
+    let wasm = BytesN::from_array(&env, &[9u8; 32]);
+
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    ctx.registry.accept_admin(&new_admin);
+
+    // The outgoing admin is locked out of every admin entry point...
+    assert_eq!(
+        ctx.registry.try_set_token(&ctx.admin, &other_token),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry.try_upgrade(&ctx.admin, &wasm),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_propose_admin(&ctx.admin, &Address::generate(&env)),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // ...and the incoming one holds them.
+    ctx.registry.set_token(&new_admin, &other_token);
+    assert_eq!(ctx.registry.get_token(), other_token);
+
+    // It can rotate again, including back to the original admin.
+    ctx.registry.propose_admin(&new_admin, &ctx.admin);
+    ctx.registry.accept_admin(&ctx.admin);
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+}
+
+#[test]
+fn test_propose_admin_is_admin_only() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let impostor = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry.try_propose_admin(&impostor, &impostor),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.registry.get_pending_admin(), None);
+}
+
+#[test]
+fn test_propose_admin_rejects_the_current_admin() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    assert_eq!(
+        ctx.registry.try_propose_admin(&ctx.admin, &ctx.admin),
+        Err(Ok(Error::InvalidAdmin))
+    );
+}
+
+#[test]
+fn test_propose_admin_requires_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let registry = KeyLeaseRegistryClient::new(&env, &env.register(KeyLeaseRegistry, ()));
+    let someone = Address::generate(&env);
+
+    assert_eq!(
+        registry.try_propose_admin(&someone, &Address::generate(&env)),
+        Err(Ok(Error::NotInitialized))
+    );
+    assert_eq!(
+        registry.try_accept_admin(&someone),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+#[test]
+fn test_third_party_cannot_accept_a_proposal() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+
+    // An attacker accepting for itself is not the proposed address...
+    assert_eq!(
+        ctx.registry.try_accept_admin(&attacker),
+        Err(Ok(Error::Unauthorized))
+    );
+    // ...nor is the outgoing admin.
+    assert_eq!(
+        ctx.registry.try_accept_admin(&ctx.admin),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+    assert!(ctx.registry.get_pending_admin().is_some());
+}
+
+#[test]
+fn test_accept_admin_without_proposal_is_rejected() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let attacker = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry.try_accept_admin(&attacker),
+        Err(Ok(Error::NoPendingAdminTransfer))
+    );
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+}
+
+/// With real (non-mocked) authorization, an attacker signing for itself cannot
+/// accept on behalf of the proposed admin, nor propose on behalf of the admin.
+#[test]
+fn test_admin_transfer_requires_the_real_signatures() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let registry_id = ctx.registry_id();
+
+    // Attacker signs a proposal that names the admin as the caller.
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &registry_id,
+            fn_name: "propose_admin",
+            args: (&ctx.admin, &attacker).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(ctx
+        .registry
+        .try_propose_admin(&ctx.admin, &attacker)
+        .is_err());
+    env.mock_all_auths();
+    assert_eq!(ctx.registry.get_pending_admin(), None);
+
+    // A genuine proposal to `new_admin`...
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+
+    // ...cannot be accepted with only the attacker's signature.
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &registry_id,
+            fn_name: "accept_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(ctx.registry.try_accept_admin(&new_admin).is_err());
+
+    // ...nor with only the outgoing admin's signature.
+    env.mock_auths(&[MockAuth {
+        address: &ctx.admin,
+        invoke: &MockAuthInvoke {
+            contract: &registry_id,
+            fn_name: "accept_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(ctx.registry.try_accept_admin(&new_admin).is_err());
+    env.mock_all_auths();
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+
+    // Control: the proposed admin's own signature succeeds.
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &registry_id,
+            fn_name: "accept_admin",
+            args: (&new_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    ctx.registry.accept_admin(&new_admin);
+    assert_eq!(ctx.registry.get_admin(), new_admin);
+}
+
+#[test]
+fn test_admin_can_cancel_a_pending_transfer() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    ctx.registry.cancel_admin_transfer(&ctx.admin);
+    assert_authorized_only_by(&env, &ctx.admin);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &AdminTransferCanceled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: ctx.admin.clone(),
+            new_admin: new_admin.clone(),
+        },
+    );
+    assert_eq!(ctx.registry.get_pending_admin(), None);
+
+    // A cancelled proposal can no longer be accepted.
+    assert_eq!(
+        ctx.registry.try_accept_admin(&new_admin),
+        Err(Ok(Error::NoPendingAdminTransfer))
+    );
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+}
+
+#[test]
+fn test_cancel_admin_transfer_is_admin_only() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    // Neither a third party nor the proposed admin can cancel.
+    assert_eq!(
+        ctx.registry
+            .try_cancel_admin_transfer(&Address::generate(&env)),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry.try_cancel_admin_transfer(&new_admin),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert!(ctx.registry.get_pending_admin().is_some());
+}
+
+#[test]
+fn test_cancel_without_proposal_is_rejected() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    assert_eq!(
+        ctx.registry.try_cancel_admin_transfer(&ctx.admin),
+        Err(Ok(Error::NoPendingAdminTransfer))
+    );
+}
+
+#[test]
+fn test_expired_proposal_cannot_be_accepted() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    let expires_at = ctx.registry.propose_admin(&ctx.admin, &new_admin);
+
+    // Last acceptable second is `expires_at - 1`; at `expires_at` it is stale.
+    env.ledger().set_timestamp(expires_at);
+    assert_eq!(
+        ctx.registry.try_accept_admin(&new_admin),
+        Err(Ok(Error::AdminTransferExpired))
+    );
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+
+    // The stale proposal stays visible and can be cleared by the admin.
+    assert!(ctx.registry.get_pending_admin().is_some());
+    ctx.registry.cancel_admin_transfer(&ctx.admin);
+    assert_eq!(ctx.registry.get_pending_admin(), None);
+}
+
+#[test]
+fn test_proposal_is_acceptable_until_just_before_expiry() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    let expires_at = ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    env.ledger().set_timestamp(expires_at - 1);
+    ctx.registry.accept_admin(&new_admin);
+    assert_eq!(ctx.registry.get_admin(), new_admin);
+}
+
+#[test]
+fn test_new_proposal_replaces_the_previous_one() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+
+    ctx.registry.propose_admin(&ctx.admin, &first);
+    env.ledger().set_timestamp(2_000);
+    let expires_at = ctx.registry.propose_admin(&ctx.admin, &second);
+    assert_eq!(expires_at, 2_000 + ADMIN_TRANSFER_WINDOW_SECS);
+
+    // The superseded successor can no longer take over.
+    assert_eq!(
+        ctx.registry.try_accept_admin(&first),
+        Err(Ok(Error::Unauthorized))
+    );
+    ctx.registry.accept_admin(&second);
+    assert_eq!(ctx.registry.get_admin(), second);
+}
+
+#[test]
+fn test_accepted_proposal_cannot_be_replayed() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    ctx.registry.accept_admin(&new_admin);
+    // Hand back to the original admin; the old proposal must not resurrect.
+    ctx.registry.propose_admin(&new_admin, &ctx.admin);
+    ctx.registry.accept_admin(&ctx.admin);
+
+    assert_eq!(
+        ctx.registry.try_accept_admin(&new_admin),
+        Err(Ok(Error::NoPendingAdminTransfer))
+    );
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+}
+
+#[test]
+fn test_proposal_from_a_previous_admin_is_ignored() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    // A proposal that names an admin no longer in office (as could survive an
+    // upgrade that rewrote `Admin`) must not be acceptable.
+    env.as_contract(&ctx.registry_id(), || {
+        storage::set_pending_admin(
+            &env,
+            &PendingAdminTransfer {
+                proposed_by: attacker.clone(),
+                new_admin: new_admin.clone(),
+                proposed_at: 0,
+                expires_at: u64::MAX,
+            },
+        );
+    });
+    assert_eq!(
+        ctx.registry.try_accept_admin(&new_admin),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+}
+
+#[test]
+fn test_admin_transfer_does_not_touch_escrow() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let escrow = ctx.token.balance(&ctx.registry_id());
+    let new_admin = Address::generate(&env);
+
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    ctx.registry.accept_admin(&new_admin);
+
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), escrow);
+    env.ledger().set_timestamp(3_601);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &10);
+    assert_eq!(ctx.token.balance(&ctx.provider), 10 * RATE);
+}
+
+#[test]
+fn test_admin_transfer_extends_instance_ttl() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    env.ledger()
+        .with_mut(|l| l.sequence_number += LEDGER_BUMP_EXTEND - 10);
+    ctx.registry.propose_admin(&ctx.admin, &new_admin);
+    let ttl = env.as_contract(&ctx.registry_id(), || env.storage().instance().get_ttl());
+    assert_eq!(ttl, LEDGER_BUMP_EXTEND);
+
+    env.ledger()
+        .with_mut(|l| l.sequence_number += LEDGER_BUMP_EXTEND - 10);
+    ctx.registry.accept_admin(&new_admin);
+    let ttl = env.as_contract(&ctx.registry_id(), || env.storage().instance().get_ttl());
+    assert_eq!(ttl, LEDGER_BUMP_EXTEND);
 }

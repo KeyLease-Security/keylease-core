@@ -66,3 +66,23 @@ impl LeaseStatus {
         }
     }
 }
+
+/// An admin hand-over that the current admin has proposed and the incoming
+/// admin has not yet accepted.
+///
+/// Stored under `DataKey::PendingAdmin` in instance storage, so it lives exactly
+/// as long as the registry configuration it would change. At most one proposal
+/// exists at a time; a new proposal replaces the previous one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminTransfer {
+    /// Admin that proposed the transfer. Must still be the stored admin when
+    /// the proposal is accepted.
+    pub proposed_by: Address,
+    /// Address that must call `accept_admin` to take over.
+    pub new_admin: Address,
+    /// Ledger timestamp at which the proposal was made.
+    pub proposed_at: u64,
+    /// Ledger timestamp from which the proposal can no longer be accepted.
+    pub expires_at: u64,
+}

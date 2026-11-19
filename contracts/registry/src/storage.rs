@@ -13,13 +13,14 @@
 //! | Call | Instance | Service entry | Lease entry |
 //! | --- | --- | --- | --- |
 //! | `init`, `upgrade`, `register_service` | extend | — | — |
+//! | `propose_admin`, `cancel_admin_transfer`, `accept_admin` | extend | — | — |
 //! | `set_token` | extend, unless the token is unchanged | — | — |
 //! | `set_service_active` | — | extend (save) | — |
 //! | `create_lease` | extend | extend | extend (save) |
 //! | `settle_lease`, `revoke_expired_lease` | — | — | extend (save) |
 //! | [`crate::KeyLeaseRegistry::bump_service`] | — | extend | — |
 //! | [`crate::KeyLeaseRegistry::bump_lease`] | — | — | extend |
-//! | `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance` | — | — | — |
+//! | `get_pending_admin`, `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance` | — | — | — |
 //!
 //! The last row is the read-only surface: it never extends anything, so a
 //! simulation of it costs instructions and no rent. A lease or service that is
@@ -29,7 +30,7 @@
 use soroban_sdk::{contracttype, Address, Env};
 
 use crate::errors::Error;
-use crate::types::{Lease, Service};
+use crate::types::{Lease, PendingAdminTransfer, Service};
 use crate::SETTLE_GRACE_PERIOD_SECS;
 
 /// Expected Stellar ledger close time, used to translate lease durations into
@@ -94,6 +95,12 @@ pub enum DataKey {
     Service(u64),
     /// `Lease` by id (persistent storage).
     Lease(u64),
+    /// Admin hand-over awaiting acceptance (instance storage).
+    ///
+    /// Kept in instance storage on purpose: it shares the configuration
+    /// entry's TTL, which every admin call extends, and it is bounded to a
+    /// single value, so it adds no new rent policy of its own.
+    PendingAdmin,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +117,20 @@ pub fn set_admin(env: &Env, admin: &Address) {
 
 pub fn get_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::Admin)
+}
+
+pub fn set_pending_admin(env: &Env, pending: &PendingAdminTransfer) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingAdmin, pending);
+}
+
+pub fn get_pending_admin(env: &Env) -> Option<PendingAdminTransfer> {
+    env.storage().instance().get(&DataKey::PendingAdmin)
+}
+
+pub fn clear_pending_admin(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingAdmin);
 }
 
 pub fn set_token(env: &Env, token: &Address) {

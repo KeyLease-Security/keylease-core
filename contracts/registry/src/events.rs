@@ -172,3 +172,45 @@ pub struct ContractUpgraded {
     /// Hash of the new Wasm installed by the Soroban deployer.
     pub new_wasm_hash: BytesN<32>,
 }
+
+/// Emitted when the admin proposes handing the registry to `new_admin`.
+///
+/// Nothing changes until `new_admin` accepts. A later proposal supersedes this
+/// one, so an indexer should treat the most recent `admin_transfer_proposed`
+/// as the only live proposal.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferProposed {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Current admin that authorized the proposal.
+    pub admin: Address,
+    /// Address that must accept to become admin.
+    pub new_admin: Address,
+    /// Ledger timestamp from which the proposal can no longer be accepted.
+    pub expires_at: u64,
+}
+
+/// Emitted when the admin withdraws a pending transfer before it is accepted.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferCanceled {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Current admin that authorized the cancellation.
+    pub admin: Address,
+    /// Address whose proposal was withdrawn.
+    pub new_admin: Address,
+}
+
+/// Emitted when the proposed admin accepts and the registry changes hands.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferAccepted {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Admin that proposed the transfer and no longer holds the role.
+    pub previous_admin: Address,
+    /// Address that authorized the acceptance and is now the admin.
+    pub new_admin: Address,
+}

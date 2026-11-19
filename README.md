@@ -106,6 +106,9 @@ keylease-core/
 | `init(admin)` | `admin` | One-time initialization; appoints the protocol admin. Emits `registry_initialized`. |
 | `set_token(admin, token)` | `admin` | Configure the SEP-41 escrow token (native SAC or custom). Emits `escrow_token_set`. |
 | `upgrade(admin, new_wasm_hash)` | `admin` | Install a new Wasm through the Soroban deployer. Emits `contract_upgraded`. |
+| `propose_admin(admin, new_admin) -> u64` | `admin` | Start a two-step admin hand-over; returns `expires_at` (now + 7 days). Replaces any pending proposal. Emits `admin_transfer_proposed`. |
+| `cancel_admin_transfer(admin)` | `admin` | Withdraw the pending proposal, expired or not. Emits `admin_transfer_canceled`. |
+| `accept_admin(new_admin)` | `new_admin` | Complete the hand-over before `expires_at`; the previous admin loses every admin right. Emits `admin_transfer_accepted`. |
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
@@ -113,7 +116,7 @@ keylease-core/
 | `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
 | `bump_service(service_id)` | — | Extend a service entry's TTL to its standard horizon. Permissionless; the caller pays the rent. |
 | `bump_lease(lease_id)` | — | Extend a live lease entry using the lease TTL policy. Permissionless; rejects a settled lease. |
-| `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. Never extend a TTL. |
+| `get_admin()`, `get_pending_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. Never extend a TTL. |
 | `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)` | — | Derived lifecycle queries. Never extend a TTL. |
 | `service_count()`, `lease_count()` | — | Monotonic counters. |
 
@@ -138,6 +141,9 @@ consumer of the stream should branch on it.
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 ```bash
 # Follow escrow from the ledger, no polling:
@@ -275,7 +281,8 @@ invariants:
 7. **Explicit authorization.** Every state-changing entry point calls
    `require_auth()` on the actor it claims to represent, and cross-checks that
    actor against stored ownership where relevant.
-8. **Bounded admin.** The admin can configure the token and upgrade the Wasm. It
+8. **Bounded admin.** The admin can configure the token, upgrade the Wasm and
+   hand the role over with a two-step `propose_admin` / `accept_admin`. It
    cannot move escrowed funds.
 
 ### Trusting the escrow token

@@ -28,6 +28,7 @@
 
 - [Deployments](deployments.md)
 - Design notes
+  - [Two-step admin transfer (#121)](design/121-admin-transfer.md)
   - [Provider staking and slashing (#137)](design/137-provider-staking.md)
   - [Revenue splits (#133)](design/133-revenue-splits.md)
 - [Release notes: v0.2.1](releases/v0.2.1.md)
