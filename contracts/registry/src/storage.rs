@@ -13,6 +13,7 @@
 //! | Call | Instance | Service entry | Lease entry |
 //! | --- | --- | --- | --- |
 //! | `init`, `upgrade`, `register_service` | extend | — | — |
+//! | `migrate` (when it migrates) | extend | — | — |
 //! | `set_token` | extend, unless the token is unchanged | — | — |
 //! | `set_service_active` | — | extend (save) | — |
 //! | `create_lease` | extend | extend | extend (save) |
@@ -25,8 +26,36 @@
 //! simulation of it costs instructions and no rent. A lease or service that is
 //! merely *read* for months has to be bumped explicitly, which is what the two
 //! `bump_*` entry points are for.
+//!
+//! # Schema version
+//!
+//! [`SCHEMA_VERSION`] names the `DataKey` layout and stored value shapes this
+//! Wasm reads and writes. `init` stamps it into instance storage, and every
+//! state-changing entry point refuses to run unless the stamp matches (see
+//! [`check_schema`]). After an upgrade to a Wasm with a newer schema the
+//! registry is therefore *stopped* until the admin runs `migrate`; an upgrade
+//! to an older schema (a downgrade) stays stopped until it is rolled back.
+//! `docs/deployment.md` documents how a migration is proposed, reviewed and
+//! executed.
 
 use soroban_sdk::{contracttype, Address, Env};
+
+/// Storage schema this Wasm reads and writes.
+///
+/// Bump it in the same change that alters a `DataKey` variant, a stored value
+/// shape or the meaning of a stored value, and add the matching step to
+/// [`migrate_step`]. Purely additive changes that old entries already satisfy
+/// (a new key that defaults when absent) do not need a bump.
+///
+/// | Version | Layout |
+/// | --- | --- |
+/// | `0` | v0.2.x and earlier: the v1 layout without a `SchemaVersion` entry |
+/// | `1` | `Admin`, `Token`, `ServiceCount`, `LeaseCount`, `Service(u64)`, `Lease(u64)`, `SchemaVersion` |
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Version reported for an initialized registry that has no `SchemaVersion`
+/// entry, i.e. one deployed before the schema was versioned.
+pub const LEGACY_SCHEMA_VERSION: u32 = 0;
 
 use crate::errors::Error;
 use crate::types::{Lease, Service};
@@ -94,6 +123,9 @@ pub enum DataKey {
     Service(u64),
     /// `Lease` by id (persistent storage).
     Lease(u64),
+    /// Storage schema version the stored data conforms to (instance storage).
+    /// See [`SCHEMA_VERSION`].
+    SchemaVersion,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +142,61 @@ pub fn set_admin(env: &Env, admin: &Address) {
 
 pub fn get_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::Admin)
+}
+
+// ---------------------------------------------------------------------------
+// Schema version
+// ---------------------------------------------------------------------------
+
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
+}
+
+pub fn has_schema_version(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::SchemaVersion)
+}
+
+/// Schema the stored data conforms to: the stamped version, or
+/// [`LEGACY_SCHEMA_VERSION`] for a registry initialized before stamping
+/// existed. `None` for a registry that holds no configuration yet.
+pub fn stored_schema_version(env: &Env) -> Option<u32> {
+    match env.storage().instance().get(&DataKey::SchemaVersion) {
+        Some(version) => Some(version),
+        None if is_initialized(env) => Some(LEGACY_SCHEMA_VERSION),
+        None => None,
+    }
+}
+
+/// Fail closed unless the stored data matches the schema this Wasm was built
+/// for.
+///
+/// A registry with no configuration has nothing to misread and passes.
+/// Older data needs `migrate` first; newer data means a downgrade, which this
+/// code cannot read safely and must not write over.
+pub fn check_schema(env: &Env) -> Result<(), Error> {
+    match stored_schema_version(env) {
+        None => Ok(()),
+        Some(v) if v == SCHEMA_VERSION => Ok(()),
+        Some(v) if v < SCHEMA_VERSION => Err(Error::SchemaMigrationRequired),
+        Some(_) => Err(Error::SchemaVersionUnsupported),
+    }
+}
+
+/// Apply the migration from schema `from` to `from + 1`.
+///
+/// Each arm must be bounded: it may rewrite instance storage, but it must not
+/// iterate over services or leases. A change to persistent entries is migrated
+/// lazily, by the accessor that reads them, and the arm only records that the
+/// new readers are in place. Unknown versions have no path and are rejected.
+pub fn migrate_step(_env: &Env, from: u32) -> Result<(), Error> {
+    match from {
+        // 0 -> 1: the layout is unchanged; versioning only adds the
+        // `SchemaVersion` stamp, which the caller writes after the last step.
+        0 => Ok(()),
+        _ => Err(Error::SchemaVersionUnsupported),
+    }
 }
 
 pub fn set_token(env: &Env, token: &Address) {

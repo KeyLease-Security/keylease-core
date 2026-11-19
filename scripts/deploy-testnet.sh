@@ -16,7 +16,10 @@
 #   1. cargo build --target wasm32v1-none --release --all
 #   2. stellar contract upload   (registry)  -> Wasm hash
 #   3. stellar contract invoke -- upgrade --admin <ADMIN> --new_wasm_hash <HASH>
-#   4. stellar contract invoke -- version  (verify)
+#   4. stellar contract invoke -- migrate --admin <ADMIN>
+#        (lifts the stop a schema-raising upgrade puts in place; a no-op when
+#        the storage schema is unchanged, and refused after a downgrade)
+#   5. stellar contract invoke -- version / schema_version  (verify)
 #
 # Prerequisites
 #   - Rust 1.84+ with `rustup target add wasm32v1-none`
@@ -141,6 +144,25 @@ if [ "$MODE" = "upgrade" ]; then
     --send=yes \
     -- upgrade --admin "$ADMIN" --new_wasm_hash "$WASM_HASH"
 
+  # State-changing calls stay stopped until the stored data matches the new
+  # Wasm's storage schema. `migrate` is a silent no-op when nothing changed and
+  # fails with SchemaVersionUnsupported after a downgrade, in which case the
+  # previous Wasm must be reinstalled instead.
+  step "Migrating storage schema"
+  stellar contract invoke \
+    --id "$REGISTRY" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" \
+    --send=yes \
+    -- migrate --admin "$ADMIN" \
+    || die "migrate failed: the installed Wasm cannot read this registry's storage schema; reinstall the previous Wasm hash"
+
+  SCHEMA="$(stellar contract invoke \
+    --id "$REGISTRY" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" \
+    -- schema_version | tail -n1)"
+
   step "Verifying on-chain version"
   VERSION="$(stellar contract invoke \
     --id "$REGISTRY" \
@@ -156,6 +178,7 @@ if [ "$MODE" = "upgrade" ]; then
  KEYLEASE_CONTRACT_ID=$REGISTRY
  KEYLEASE_NETWORK=$NETWORK
  version()            = $VERSION
+ schema_version()     = $SCHEMA
  wasm hash            = $WASM_HASH
 ============================================================================
  Next steps

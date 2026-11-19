@@ -120,6 +120,7 @@ claims to represent, and the consumer always has an exit.
 | Key | Storage | TTL policy |
 | --- | --- | --- |
 | `Admin`, `Token` | instance | extended on every state change (≈30 days) |
+| `SchemaVersion` | instance | stamped by `init`, rewritten by `migrate`; see [Storage schema migrations](deployment.md#storage-schema-migrations) |
 | `ServiceCount`, `LeaseCount` | instance | same as instance |
 | `Service(u64)` | persistent | extended on save and by `bump_service` (≈30 days) |
 | `Lease(u64)` | persistent | extended for the lease's remaining term **plus** the 24h grace window and a one-day read buffer, or by `bump_lease` |

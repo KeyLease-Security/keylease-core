@@ -39,9 +39,10 @@ Initialize the registry and appoint `admin`.
 - **Caller / auth:** `admin` must authorize.
 - **Trigger:** once, immediately after deploy.
 - **Preconditions:** the registry must not already be initialized.
-- **State:** sets `Admin`; extends instance TTL.
+- **State:** sets `Admin` and `SchemaVersion = SCHEMA_VERSION`; extends instance TTL.
 - **Events:** `registry_initialized { admin }`.
-- **Errors:** `AlreadyInitialized`.
+- **Errors:** `AlreadyInitialized`, also returned when a `SchemaVersion`
+  entry already exists without an admin (state this contract did not write).
 - **Notes:** the admin can only call `set_token` and `upgrade`. It cannot move
   user funds.
 
@@ -82,8 +83,42 @@ Install a new registry Wasm through the Soroban deployer.
 - **Events:** `contract_upgraded { admin, new_wasm_hash }`.
 - **Errors:** `NotInitialized`, `Unauthorized`.
 - **Notes:** the contract id, storage and balances are preserved, so an upgrade
-  must never change the `DataKey` layout or the meaning of stored values. See
-  [Deployment](deployment.md#upgrading).
+  must never change the `DataKey` layout or the meaning of stored values without
+  bumping the storage schema. See [Deployment](deployment.md#upgrading).
+- **Schema:** not gated on the schema check, so it stays callable while the
+  registry is stopped and a bad upgrade can always be reverted. An upgrade to a
+  Wasm with a higher `storageSchemaVersion` stops every state-changing entry
+  point until `migrate` runs.
+
+### `migrate`
+
+```rust
+pub fn migrate(env: Env, admin: Address) -> Result<u32, Error>
+```
+
+Migrate stored data to the running Wasm's storage schema (`SCHEMA_VERSION`) and
+return the version now in force.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **Trigger:** immediately after every `upgrade`.
+- **Effects:** applies each bounded `storage::migrate_step` from the stored
+  version up to `SCHEMA_VERSION`, writes the new `SchemaVersion` and extends
+  the instance TTL, all atomically. When the schema is already current, nothing
+  is written and no event is published.
+- **Events:** `schema_migrated { admin, from_version, to_version }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `SchemaVersionUnsupported`
+  (the stored schema is newer than this Wasm, or has no migration path).
+- **Notes:** see [Storage schema migrations](deployment.md#storage-schema-migrations)
+  for how a migration is proposed, reviewed and executed.
+
+### Schema gate
+
+`set_token`, `register_service`, `set_service_active`, `create_lease`,
+`settle_lease` and `revoke_expired_lease` first check that the stored schema
+equals `SCHEMA_VERSION`. Otherwise they return `SchemaMigrationRequired` (data
+older than the code) or `SchemaVersionUnsupported` (data newer than the code).
+`init`, `upgrade`, `migrate`, `bump_service`, `bump_lease` and every view are
+not gated.
 
 ---
 
@@ -340,6 +375,8 @@ performed one could not be used to price a read.
 | `get_admin` | `(env) -> Result<Address, Error>` | stored admin, else `NotInitialized` |
 | `get_token` | `(env) -> Result<Address, Error>` | escrow token, else `TokenNotSet` |
 | `version` | `(env) -> String` | version embedded by `contractmeta!` |
+| `schema_version` | `(env) -> Result<u32, Error>` | storage schema of the stored data (`0` = pre-versioning), else `NotInitialized` |
+| `code_schema_version` | `(env) -> u32` | storage schema the running Wasm was built for |
 | `service_count` | `(env) -> u64` | total services ever registered |
 | `lease_count` | `(env) -> u64` | total leases ever created |
 | `get_service` | `(env, service_id: u64) -> Result<Service, Error>` | the `Service`, else `ServiceNotFound` |
@@ -371,6 +408,7 @@ because topics are positional and indexers filter on them.
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `schema_migrated` | — | `schema_version`, `admin`, `from_version`, `to_version` |
 
 See [integration.md](./integration.md#event-schema-version) for how to branch on
 the version.
@@ -414,6 +452,7 @@ pub enum DataKey {
     LeaseCount,   // instance
     Service(u64), // persistent
     Lease(u64),   // persistent
+    SchemaVersion, // instance, u32: see SCHEMA_VERSION
 }
 ```
 
@@ -446,6 +485,8 @@ never reused.
 | 15 | `Overflow` | checked arithmetic failed |
 | 16 | `DurationTooLong` | lease duration above `MAX_LEASE_DURATION_SECS` |
 | 17 | `DepositTooLarge` | deposit above `MAX_LEASE_DEPOSIT` |
+| 18 | `SchemaMigrationRequired` | stored data predates this Wasm's schema; run `migrate` |
+| 19 | `SchemaVersionUnsupported` | stored data is newer than this Wasm (downgrade), or no migration path |
 
 ## Invoking with the Stellar CLI
 

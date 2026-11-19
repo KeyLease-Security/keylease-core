@@ -81,6 +81,8 @@ violation.
 | Long lease is evicted from storage | `DurationTooLong` + duration-aware TTL extension |
 | Fake "KeyLease" contract id | Only ids in [Deployments](deployments.md) are ours |
 | Silent logic change on upgrade | Admin-only, emits `contract_upgraded`, `contractmeta!` exposes the version |
+| Upgrade installs code that misreads the stored layout | Storage schema stamp; state-changing calls stop (`SchemaMigrationRequired`) until an explicit, bounded `migrate` |
+| Downgrade to code that cannot read newer data | Stopped with `SchemaVersionUnsupported`; `migrate` refuses, only re-upgrading resumes |
 
 ## Known limitations
 

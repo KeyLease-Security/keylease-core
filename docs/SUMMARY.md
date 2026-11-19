@@ -28,6 +28,7 @@
 
 - [Deployments](deployments.md)
 - Design notes
+  - [Storage schema versioning (#123)](design/123-storage-schema-versioning.md)
   - [Provider staking and slashing (#137)](design/137-provider-staking.md)
   - [Revenue splits (#133)](design/133-revenue-splits.md)
 - [Release notes: v0.2.1](releases/v0.2.1.md)

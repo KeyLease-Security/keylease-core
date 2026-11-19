@@ -151,6 +151,7 @@ spans a contract upgrade stays decodable (see
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `schema_migrated` | — | `schema_version`, `admin`, `from_version`, `to_version` |
 
 Events are the indexing contract between on-chain state and off-chain systems: a
 provider can settle from a projection built by subscribing to `lease_created`,
@@ -233,6 +234,7 @@ These must hold for every reachable state. They are asserted in tests.
 | --- | --- | --- |
 | `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
+| `SchemaVersion` | instance | storage schema the data conforms to; state-changing calls stop while it differs from the running Wasm's |
 | `Service(u64)` | persistent | TTL extended on save and by `bump_service` |
 | `Lease(u64)` | persistent | TTL extended on save and by `bump_lease`, never by a read |
 

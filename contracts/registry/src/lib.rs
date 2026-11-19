@@ -52,6 +52,8 @@
 //!   keep an entry alive on their own terms (see [`storage`]).
 //! * **Wasm upgrades** — the admin can install a new Wasm through the Soroban
 //!   deployer, and `contractmeta!` identifies the running version on-chain.
+//!   The storage schema is versioned: state-changing calls stop until the
+//!   admin runs `migrate` after an upgrade, and a downgrade is rejected.
 
 mod errors;
 mod events;
@@ -66,8 +68,10 @@ use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
 pub use crate::errors::Error;
 pub use crate::events::{
     ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
-    RegistryInitialized, ServiceRegistered, ServiceStatusChanged, EVENT_SCHEMA_VERSION,
+    RegistryInitialized, SchemaMigrated, ServiceRegistered, ServiceStatusChanged,
+    EVENT_SCHEMA_VERSION,
 };
+pub use crate::storage::SCHEMA_VERSION;
 pub use crate::types::{Lease, LeaseStatus, Service};
 
 // On-chain contract metadata, readable from the ledger without the source.
@@ -76,6 +80,10 @@ soroban_sdk::contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
 // The event payload schema is versioned independently of the release: `version`
 // moves on every deploy, this only when an event gains or loses a field.
 soroban_sdk::contractmeta!(key = "eventSchemaVersion", val = "1");
+// The storage schema this Wasm reads and writes (`storage::SCHEMA_VERSION`),
+// readable before the Wasm is installed, so a reviewer can tell from the
+// uploaded artifact whether an upgrade will need `migrate`.
+soroban_sdk::contractmeta!(key = "storageSchemaVersion", val = "1");
 soroban_sdk::contractmeta!(
     key = "description",
     val = "Time-bound micro-leases for API/RPC access, escrowed with SEP-41 tokens on Stellar."
@@ -137,10 +145,13 @@ impl KeyLeaseRegistry {
     /// contract via [`Self::upgrade`].
     pub fn init(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
-        if storage::is_initialized(&env) {
+        // A stamped schema without an admin can only come from foreign or
+        // corrupted state; refuse it rather than adopt data we did not write.
+        if storage::is_initialized(&env) || storage::has_schema_version(&env) {
             return Err(Error::AlreadyInitialized);
         }
         storage::set_admin(&env, &admin);
+        storage::set_schema_version(&env, SCHEMA_VERSION);
         storage::extend_instance_ttl(&env);
         RegistryInitialized {
             schema_version: EVENT_SCHEMA_VERSION,
@@ -165,6 +176,7 @@ impl KeyLeaseRegistry {
     pub fn set_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
+        storage::check_schema(&env)?;
 
         // Guard the early return with the authorization above: an unauthorized
         // caller must still get `Unauthorized`, never a silent `Ok(())`.
@@ -187,7 +199,15 @@ impl KeyLeaseRegistry {
     ///
     /// `new_wasm_hash` is the hash produced by `stellar contract upload`. The
     /// contract id stays the same; storage, balances and in-flight leases are
-    /// preserved, which is why upgrades must never change the storage layout.
+    /// preserved, which is why a layout change must bump
+    /// [`SCHEMA_VERSION`] and ship a migration.
+    ///
+    /// Deliberately **not** gated on the schema check: if an upgrade installs
+    /// the wrong Wasm (for example an older schema, which stops the registry
+    /// with `SchemaVersionUnsupported`), the admin must still be able to
+    /// install the right one. After an upgrade that raises the schema, every
+    /// state-changing entry point returns `SchemaMigrationRequired` until
+    /// [`Self::migrate`] runs.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
@@ -200,6 +220,49 @@ impl KeyLeaseRegistry {
         }
         .publish(&env);
         Ok(())
+    }
+
+    /// Migrate stored data to [`SCHEMA_VERSION`] and lift the post-upgrade
+    /// stop. Admin only. Returns the schema version now in force.
+    ///
+    /// Runs every step from the stored version up to the code's version, then
+    /// stamps the new version, all in one transaction: either the whole path
+    /// applies or nothing does. Steps are bounded (see `storage::migrate_step`),
+    /// so a migration never iterates over leases or services.
+    ///
+    /// - **Auth:** `admin`, which must be the stored admin.
+    /// - **Already current:** no-op; nothing is written and no event is
+    ///   published, so it is safe to call after every upgrade.
+    /// - **Stored schema newer than this Wasm:** `SchemaVersionUnsupported`;
+    ///   the upgrade was a downgrade and must be rolled back, not migrated.
+    /// - **Events:** `schema_migrated { admin, from_version, to_version }`.
+    /// - **Errors:** `NotInitialized`, `Unauthorized`,
+    ///   `SchemaVersionUnsupported`.
+    pub fn migrate(env: Env, admin: Address) -> Result<u32, Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        let from = storage::stored_schema_version(&env).ok_or(Error::NotInitialized)?;
+        if from == SCHEMA_VERSION {
+            return Ok(SCHEMA_VERSION);
+        }
+        if from > SCHEMA_VERSION {
+            return Err(Error::SchemaVersionUnsupported);
+        }
+
+        // Bounded by the compile-time distance between two schema versions.
+        for version in from..SCHEMA_VERSION {
+            storage::migrate_step(&env, version)?;
+        }
+        storage::set_schema_version(&env, SCHEMA_VERSION);
+        storage::extend_instance_ttl(&env);
+        SchemaMigrated {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            from_version: from,
+            to_version: SCHEMA_VERSION,
+        }
+        .publish(&env);
+        Ok(SCHEMA_VERSION)
     }
 
     // -----------------------------------------------------------------------
@@ -218,6 +281,7 @@ impl KeyLeaseRegistry {
         endpoint_hash: BytesN<32>,
     ) -> Result<u64, Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         if rate_per_call <= 0 {
             return Err(Error::InvalidRate);
@@ -255,6 +319,7 @@ impl KeyLeaseRegistry {
         is_active: bool,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let mut service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -300,6 +365,7 @@ impl KeyLeaseRegistry {
         duration_secs: u64,
     ) -> Result<u64, Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         if requested_calls == 0 {
             return Err(Error::InvalidCalls);
@@ -397,6 +463,7 @@ impl KeyLeaseRegistry {
         verified_calls: u32,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let mut lease = storage::get_lease(&env, lease_id)?;
         if lease.settled {
@@ -464,6 +531,7 @@ impl KeyLeaseRegistry {
     /// strand escrowed funds.
     pub fn revoke_expired_lease(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let mut lease = storage::get_lease(&env, lease_id)?;
         if lease.consumer != consumer {
@@ -531,6 +599,10 @@ impl KeyLeaseRegistry {
     /// their own transaction fee, the horizon is fixed by the storage policy
     /// rather than by the caller, and no lease or balance changes. Bumping a
     /// service you do not own is a donation of rent, not an attack.
+    ///
+    /// Not gated on the schema check: it changes no stored value, and keeping
+    /// entries alive is exactly what a stopped registry awaiting `migrate`
+    /// needs.
     pub fn bump_service(env: Env, service_id: u64) -> Result<(), Error> {
         // A miss must be an error rather than a silent no-op: `extend_ttl` on a
         // non-existent key would otherwise leave the caller paying for nothing.
@@ -616,6 +688,22 @@ impl KeyLeaseRegistry {
     pub fn lease_status(env: Env, lease_id: u64) -> Result<LeaseStatus, Error> {
         let lease = storage::get_lease(&env, lease_id)?;
         Ok(LeaseStatus::of(&lease, env.ledger().timestamp()))
+    }
+
+    /// Storage schema the stored data conforms to. Pure read.
+    ///
+    /// `0` for a registry deployed before the schema was versioned. When this
+    /// differs from [`Self::code_schema_version`], state-changing calls are
+    /// stopped until the admin runs [`Self::migrate`]. `NotInitialized` before
+    /// `init`.
+    pub fn schema_version(env: Env) -> Result<u32, Error> {
+        storage::stored_schema_version(&env).ok_or(Error::NotInitialized)
+    }
+
+    /// Storage schema the running Wasm was built for ([`SCHEMA_VERSION`]).
+    /// Pure read.
+    pub fn code_schema_version(_env: Env) -> u32 {
+        SCHEMA_VERSION
     }
 
     /// Number of calls still available on a lease (zero once settled/expired).

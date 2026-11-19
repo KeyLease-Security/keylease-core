@@ -44,4 +44,10 @@ pub enum Error {
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.
     DepositTooLarge = 17,
+    /// Stored data predates the schema this Wasm was built for. The registry
+    /// is stopped until the admin runs `migrate`.
+    SchemaMigrationRequired = 18,
+    /// Stored data was written by a newer schema than this Wasm understands
+    /// (a downgrade), or no migration path exists. Roll the upgrade back.
+    SchemaVersionUnsupported = 19,
 }

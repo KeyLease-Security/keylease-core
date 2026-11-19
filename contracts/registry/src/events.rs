@@ -161,6 +161,21 @@ pub struct LeaseRevoked {
     pub refund: i128,
 }
 
+/// Emitted when the admin migrates stored data to the running Wasm's schema,
+/// lifting the stop that an upgrade put in place.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaMigrated {
+    /// Payload schema version; see the module docs. (Not the storage schema.)
+    pub schema_version: u32,
+    /// Admin that authorized the migration.
+    pub admin: Address,
+    /// Storage schema the data conformed to before the migration.
+    pub from_version: u32,
+    /// Storage schema the data conforms to now.
+    pub to_version: u32,
+}
+
 /// Emitted when the admin upgrades the registry's Wasm.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
