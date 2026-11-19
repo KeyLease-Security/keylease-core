@@ -151,7 +151,9 @@ Two consequences worth stating plainly:
 
 - A revoke leaves `used_calls` at `0`, so a revoked lease is book-keeping-wise a
   lease that was never paid for; a settlement always satisfies
-  `payout + refund == locked_deposit`.
+  `payout + refund == locked_deposit`. The same ambiguity, with the read that
+  separates the two paths, is tabulated in
+  [`LeaseStatus` and the `settled` flag](contract-reference.md#telling-the-two-paths-apart).
 - The grace window ends the provider's *guarantee*, not the provider's *option*:
   `settle_lease` has no upper deadline, so after `expires_at + 24h` either actor
   can still finish the lease and the first transaction to land wins. That is why
