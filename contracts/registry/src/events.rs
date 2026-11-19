@@ -8,7 +8,9 @@
 //! Example topics for a settlement:
 //!
 //! ```text
-//! ("lease_settled", lease_id)  ->  { provider, verified_calls, payout, refund }
+//! ("lease_settled", lease_id)  ->  {
+//!     provider, verified_calls, payout, protocol_fee, refund
+//! }
 //! ```
 //!
 //! Events never carry secret material: `endpoint_hash` is already a commitment.
@@ -31,6 +33,18 @@ pub struct EscrowTokenSet {
     pub admin: Address,
     /// SEP-41 token contract (SAC or custom) used for deposits and payouts.
     pub token: Address,
+}
+
+/// Emitted when the admin updates the protocol fee configuration.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolFeeSet {
+    /// Admin that authorized the change.
+    pub admin: Address,
+    /// Fee in basis points (10,000 basis points = 100%).
+    pub fee_bps: u32,
+    /// Recipient of non-zero settlement fees, if configured.
+    pub fee_recipient: Option<Address>,
 }
 
 /// Emitted when a provider publishes a leasable service.
@@ -91,8 +105,10 @@ pub struct LeaseSettled {
     pub provider: Address,
     /// Calls the provider reported as consumed.
     pub verified_calls: u32,
-    /// Amount paid to the provider.
+    /// Net amount paid to the provider after the protocol fee.
     pub payout: i128,
+    /// Protocol fee withheld from the gross amount earned.
+    pub protocol_fee: i128,
     /// Amount refunded to the consumer.
     pub refund: i128,
 }

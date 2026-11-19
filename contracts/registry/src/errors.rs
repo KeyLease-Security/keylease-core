@@ -40,4 +40,12 @@ pub enum Error {
     /// Lease duration exceeds `MAX_LEASE_DURATION_SECS`, so its storage entry
     /// could not be kept alive for the whole term.
     DurationTooLong = 16,
+    /// A token transfer did not debit and credit the requested amount exactly.
+    InvalidTokenBehavior = 17,
+    /// The configured protocol fee exceeds `MAX_PROTOCOL_FEE_BPS`.
+    FeeTooHigh = 18,
+    /// A non-zero protocol fee requires a configured recipient.
+    FeeRecipientNotSet = 19,
+    /// The registry itself cannot receive protocol fees.
+    InvalidFeeRecipient = 20,
 }

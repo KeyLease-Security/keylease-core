@@ -91,8 +91,10 @@ stellar contract invoke \
   --send=yes -- settle_lease --provider $PROVIDER --lease_id 1 --verified_calls 320
 ```
 
-The registry pays you `verified_calls × rate_per_call`, refunds the rest to the
-consumer, and emits `lease_settled { lease_id, provider, verified_calls, payout,
+The registry calculates gross earnings as `verified_calls × rate_per_call`,
+deducts the protocol fee active at settlement, pays you the net amount, and
+refunds the unused balance to the consumer. It emits
+`lease_settled { lease_id, provider, verified_calls, payout, protocol_fee,
 refund }`.
 
 Settle with `verified_calls = 0` to return the entire deposit for a lease you
@@ -115,8 +117,9 @@ could not serve.
 funds on your behalf after settlement, and there is no yield or custody to
 manage.
 
-- **Revenue recognised:** `verified_calls × rate_per_call` per settlement,
-  published in the `lease_settled` event.
+- **Gross revenue:** `verified_calls × rate_per_call` per settlement. The
+  provider's net payment is gross revenue minus `protocol_fee`; both amounts
+  are published in `lease_settled`.
 - **Unused consumer balance:** refunded by you at settlement, or by the consumer
   via `revoke_expired_lease` after the 24h grace window.
 - **Disputes:** there is no dispute mechanism. The consumer's protection is the

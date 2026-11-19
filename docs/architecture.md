@@ -48,14 +48,18 @@ what the endpoint does, or who is calling it. It knows `service_id`,
 ### SEP-41 token
 
 The registry holds no privileged token logic. It calls the standard SEP-41
-`transfer` on the token configured by the admin:
+`transfer` and `balance` methods on the token configured by the admin:
 
 - the **native Stellar Asset Contract** wraps XLM (the usual Testnet choice),
-- any custom SEP-41 asset works without a contract change,
+- custom SEP-41 assets must report truthful, stable balances and transfer exact
+  amounts; fee-on-transfer and rebasing tokens are unsupported,
 - `contracts/mock_token` exists only for tests and local sandboxes.
 
-The token boundary is a cross-contract call, so the money paths follow
-checks-effects-interactions and are tested against a re-entrant token.
+Every inbound and outbound transfer is checked for an exact sender debit and
+recipient credit. A mismatch fails atomically with `InvalidTokenBehavior`. The
+token boundary is a cross-contract call, so the money paths follow
+checks-effects-interactions and are tested against fee-on-transfer and
+re-entrant tokens.
 
 ### Consumers of the ledger
 
@@ -94,7 +98,7 @@ sequenceDiagram
         P-->>C: 401 / 403 / 429
     end
     P->>R: settle_lease(provider, lease_id, verified_calls)
-    R->>T: payout + refund
+    R->>T: provider payment + protocol fee + refund
     R-->>P: lease_settled event
 ```
 

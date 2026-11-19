@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype,
+    contract, contracterror, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger as _},
     token, Address, BytesN, Env, Event, Vec,
 };
@@ -7,11 +7,12 @@ use soroban_sdk::{
 use keylease_mock_token::{MockToken, MockTokenClient};
 
 use crate::events::{
-    EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled, ServiceRegistered,
+    EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled, ProtocolFeeSet, ServiceRegistered,
     ServiceStatusChanged,
 };
 use crate::{
     Error, KeyLeaseRegistry, KeyLeaseRegistryClient, LeaseStatus, MAX_LEASE_DURATION_SECS,
+    MAX_PROTOCOL_FEE_BPS,
 };
 
 /// Per-call rate used across the tests.
@@ -98,6 +99,7 @@ fn test_init_configures_admin_and_token() {
     assert_eq!(ctx.registry.get_token(), ctx.token.address);
     assert_eq!(ctx.registry.service_count(), 0);
     assert_eq!(ctx.registry.lease_count(), 0);
+    assert_eq!(ctx.registry.get_protocol_fee(), (0, None));
 }
 
 #[test]
@@ -240,6 +242,23 @@ fn test_create_lease_locks_deposit_and_records_terms() {
 }
 
 #[test]
+fn test_fee_on_transfer_deposit_is_rejected_atomically() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    ctx.token.set_transfer_fee_bps(&ctx.admin, &1_000);
+
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &10, &3_600),
+        Err(Ok(Error::InvalidTokenBehavior))
+    );
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert_eq!(ctx.registry.lease_count(), 0);
+}
+
+#[test]
 fn test_create_lease_rejects_zero_calls() {
     let env = Env::default();
     let ctx = setup(&env);
@@ -311,6 +330,7 @@ fn test_full_usage_can_settle_before_expiry() {
     env.ledger().set_timestamp(1_000);
     let ctx = setup(&env);
     let service_id = register_default_service(&env, &ctx);
+    ctx.registry.set_protocol_fee(&ctx.admin, &0, &None);
     let lease_id = ctx
         .registry
         .create_lease(&ctx.consumer, &service_id, &10, &3_600);
@@ -353,6 +373,192 @@ fn test_partial_settle_after_expiry_refunds_remainder() {
     let lease = ctx.registry.get_lease(&lease_id);
     assert_eq!(lease.used_calls, 6);
     assert!(lease.settled);
+}
+
+#[test]
+fn test_fee_on_transfer_payout_is_rejected_without_settling_lease() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    ctx.token.set_transfer_fee_bps(&ctx.admin, &1_000);
+    env.ledger().set_timestamp(4_601);
+
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &lease_id, &10),
+        Err(Ok(Error::InvalidTokenBehavior))
+    );
+    assert!(!ctx.registry.get_lease(&lease_id).settled);
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), RATE * 10);
+}
+
+#[test]
+fn test_fee_on_transfer_settlement_and_revoke_refunds_are_rejected() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    ctx.token.set_transfer_fee_bps(&ctx.admin, &1_000);
+    env.ledger().set_timestamp(1_101);
+
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &lease_id, &0),
+        Err(Ok(Error::InvalidTokenBehavior))
+    );
+
+    env.ledger().set_timestamp(1_100 + GRACE);
+    assert_eq!(
+        ctx.registry
+            .try_revoke_expired_lease(&ctx.consumer, &lease_id),
+        Err(Ok(Error::InvalidTokenBehavior))
+    );
+    assert!(!ctx.registry.get_lease(&lease_id).settled);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - RATE * 10);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), RATE * 10);
+}
+
+#[test]
+fn test_protocol_fee_splits_earned_amount_and_preserves_consumer_refund() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let fee_recipient = Address::generate(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    ctx.registry
+        .set_protocol_fee(&ctx.admin, &250, &Some(fee_recipient.clone()));
+    env.ledger().set_timestamp(4_601);
+
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &6);
+
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseSettled {
+            lease_id,
+            provider: ctx.provider.clone(),
+            verified_calls: 6,
+            payout: 585,
+            protocol_fee: 15,
+            refund: 400,
+        },
+    );
+    // Gross earned is 600; 2.5% is 15. The unused 400 is refunded in full.
+    assert_eq!(ctx.token.balance(&ctx.provider), 585);
+    assert_eq!(ctx.token.balance(&fee_recipient), 15);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - 600);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert_eq!(585 + 15 + 400, RATE * 10);
+    assert_eq!(ctx.registry.get_protocol_fee(), (250, Some(fee_recipient)));
+}
+
+#[test]
+fn test_maximum_fee_is_capped_and_rounds_down_for_small_amounts() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let recipient = Address::generate(&env);
+    let service_id = ctx
+        .registry
+        .register_service(&ctx.provider, &1, &endpoint_hash(&env));
+    ctx.registry
+        .set_protocol_fee(&ctx.admin, &MAX_PROTOCOL_FEE_BPS, &Some(recipient.clone()));
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &11, &100);
+    env.ledger().set_timestamp(1_101);
+
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &10);
+
+    // At the 10% cap, 10 units earned yield a 1-unit fee.
+    assert_eq!(ctx.token.balance(&ctx.provider), 9);
+    assert_eq!(ctx.token.balance(&recipient), 1);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - 10);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+}
+
+#[test]
+fn test_protocol_fee_rounds_down_for_small_amounts() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let recipient = Address::generate(&env);
+    let service_id = ctx
+        .registry
+        .register_service(&ctx.provider, &1, &endpoint_hash(&env));
+    ctx.registry
+        .set_protocol_fee(&ctx.admin, &MAX_PROTOCOL_FEE_BPS, &Some(recipient.clone()));
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &2, &100);
+    env.ledger().set_timestamp(1_101);
+
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &1);
+
+    assert_eq!(ctx.token.balance(&ctx.provider), 1);
+    assert_eq!(ctx.token.balance(&recipient), 0);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - 1);
+}
+
+#[test]
+fn test_invalid_protocol_fee_configurations_are_rejected() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let recipient = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry.try_set_protocol_fee(
+            &ctx.admin,
+            &(MAX_PROTOCOL_FEE_BPS + 1),
+            &Some(recipient.clone())
+        ),
+        Err(Ok(Error::FeeTooHigh))
+    );
+    assert_eq!(
+        ctx.registry.try_set_protocol_fee(&ctx.admin, &1, &None),
+        Err(Ok(Error::FeeRecipientNotSet))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_set_protocol_fee(&ctx.admin, &1, &Some(ctx.registry_id())),
+        Err(Ok(Error::InvalidFeeRecipient))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_set_protocol_fee(&recipient, &100, &Some(recipient.clone())),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.registry.get_protocol_fee(), (0, None));
+}
+
+#[test]
+fn test_revoked_lease_never_pays_protocol_fee() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let recipient = Address::generate(&env);
+    ctx.registry
+        .set_protocol_fee(&ctx.admin, &250, &Some(recipient.clone()));
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    env.ledger().set_timestamp(1_100 + GRACE);
+
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&recipient), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
 }
 
 #[test]
@@ -749,7 +955,28 @@ fn test_lease_lifecycle_emits_events() {
             provider: ctx.provider.clone(),
             verified_calls: 6,
             payout: RATE * 6,
+            protocol_fee: 0,
             refund: RATE * 4,
+        },
+    );
+}
+
+#[test]
+fn test_protocol_fee_configuration_emits_event() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let fee_recipient = Address::generate(&env);
+
+    ctx.registry
+        .set_protocol_fee(&ctx.admin, &250, &Some(fee_recipient.clone()));
+
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &ProtocolFeeSet {
+            admin: ctx.admin.clone(),
+            fee_bps: 250,
+            fee_recipient: Some(fee_recipient),
         },
     );
 }
@@ -789,7 +1016,7 @@ fn test_version_matches_contract_metadata() {
 
     assert_eq!(
         ctx.registry.version(),
-        soroban_sdk::String::from_str(&env, "0.2.1")
+        soroban_sdk::String::from_str(&env, "0.3.0")
     );
 }
 
@@ -901,6 +1128,16 @@ enum ReentryKey {
     LeaseId,
     Armed,
     Blocked,
+    Balance(Address),
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ReentrantTokenError {
+    InsufficientBalance = 1,
+    InvalidAmount = 2,
+    Overflow = 3,
 }
 
 /// A hostile SEP-41-shaped token that re-enters `settle_lease` from `transfer`.
@@ -927,14 +1164,39 @@ impl ReentrantToken {
         env.storage().instance().set(&ReentryKey::Blocked, &false);
     }
 
-    pub fn transfer(env: Env, _from: Address, _to: Address, _amount: i128) {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&ReentryKey::Balance(to.clone()))
+            .unwrap_or(0);
+        let balance = balance.checked_add(amount).unwrap();
+        env.storage()
+            .persistent()
+            .set(&ReentryKey::Balance(to), &balance);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        read_reentrant_balance(&env, &id)
+    }
+
+    pub fn transfer(
+        env: Env,
+        from: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), ReentrantTokenError> {
+        from.require_auth();
+        if amount <= 0 {
+            return Err(ReentrantTokenError::InvalidAmount);
+        }
         let armed: bool = env
             .storage()
             .instance()
             .get(&ReentryKey::Armed)
             .unwrap_or(false);
         if !armed {
-            return;
+            return move_reentrant_balance(&env, &from, &to, amount);
         }
 
         // Disarm so the attack is attempted exactly once per settlement.
@@ -947,6 +1209,7 @@ impl ReentrantToken {
         let client = KeyLeaseRegistryClient::new(&env, &registry);
         let blocked = client.try_settle_lease(&provider, &lease_id, &0).is_err();
         env.storage().instance().set(&ReentryKey::Blocked, &blocked);
+        move_reentrant_balance(&env, &from, &to, amount)
     }
 
     pub fn blocked(env: Env) -> bool {
@@ -955,6 +1218,36 @@ impl ReentrantToken {
             .get(&ReentryKey::Blocked)
             .unwrap_or(false)
     }
+}
+
+fn move_reentrant_balance(
+    env: &Env,
+    from: &Address,
+    to: &Address,
+    amount: i128,
+) -> Result<(), ReentrantTokenError> {
+    let from_balance = read_reentrant_balance(env, from);
+    if from_balance < amount {
+        return Err(ReentrantTokenError::InsufficientBalance);
+    }
+    let to_balance = read_reentrant_balance(env, to);
+    let new_to_balance = to_balance
+        .checked_add(amount)
+        .ok_or(ReentrantTokenError::Overflow)?;
+    env.storage()
+        .persistent()
+        .set(&ReentryKey::Balance(from.clone()), &(from_balance - amount));
+    env.storage()
+        .persistent()
+        .set(&ReentryKey::Balance(to.clone()), &new_to_balance);
+    Ok(())
+}
+
+fn read_reentrant_balance(env: &Env, id: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&ReentryKey::Balance(id.clone()))
+        .unwrap_or(0)
 }
 
 #[test]
@@ -974,6 +1267,7 @@ fn test_reentrant_token_cannot_settle_a_lease_twice() {
     let registry = KeyLeaseRegistryClient::new(&env, &registry_id);
     registry.init(&admin);
     registry.set_token(&admin, &token_id);
+    token_client.mint(&consumer, &(RATE * 10));
 
     let service_id = registry.register_service(&provider, &RATE, &endpoint_hash(&env));
     let lease_id = registry.create_lease(&consumer, &service_id, &10, &3_600);

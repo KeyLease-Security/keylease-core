@@ -28,9 +28,11 @@ off-chain before you escrow anything.
 
 ## 2. Fund your account
 
-Any SEP-41 token the registry is configured with can be escrowed. On Testnet the
-native asset's SAC is the usual choice, and Friendbot funds accounts with
-**10,000 fake XLM**.
+Only a compatible SEP-41 token with truthful, stable balances and exact
+transfer semantics can be escrowed; fee-on-transfer and rebasing tokens are
+unsupported and transactions using them roll back. On Testnet the native
+asset's SAC is the usual choice, and Friendbot funds accounts with **10,000
+fake XLM**.
 
 ```bash
 # Testnet only: create + fund in one step

@@ -4,12 +4,13 @@
 
 | Actor | Address | Can do |
 | --- | --- | --- |
-| **Admin** | one Stellar account | `init` once, `set_token`, `upgrade`. Cannot move escrowed funds. |
+| **Admin** | one Stellar account | `init` once, `set_token`, `set_protocol_fee`, `upgrade`. Cannot move escrowed funds. |
 | **Provider** | per service (account or contract address) | Register/pause services, settle leases it owns. |
 | **Consumer** | per lease (account or contract address) | Create leases, revoke expired unsettled leases. |
 
-The admin is a deployment role. It can point the registry at a token address and
-install a new Wasm, and nothing else. It has no path to user funds.
+The admin is a deployment role. It can point the registry at a token address,
+configure the protocol fee, and install a new Wasm. It has no path to user
+funds.
 
 Because every actor is a Soroban `Address`, the same protocol works for classic
 Stellar accounts (`G…`), multisig accounts and smart contracts (`C…`).
@@ -115,8 +116,9 @@ remaining fields.
 | `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `provider`, `is_active` |
 | `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
-| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `protocol_fee`, `refund` |
 | `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `protocol_fee_set` | — | `admin`, `fee_bps`, `fee_recipient` |
 | `contract_upgraded` | — | `admin`, `new_wasm_hash` |
 
 Events are the indexing contract between on-chain state and off-chain systems: a
@@ -143,7 +145,23 @@ required_deposit = rate_per_call × requested_calls
 The registry transfers `500_000_000` from the consumer into escrow and sets
 `expires_at = now + 3600`.
 
+The admin-configured protocol fee defaults to zero. If configured, it is
+calculated only on the amount earned for verified calls, not on the unused
+consumer refund. It is floored to whole token units at a maximum of 1,000 bps
+(10%). The fee rate and recipient active at settlement apply, including to
+leases created before the latest configuration update. For 320 calls at a
+1,000-bps fee:
+
+```
+gross earned = 320_000_000
+fee          =  32_000_000
+provider     = 288_000_000
+refund       = 180_000_000
+```
+
 **2a. `settle_lease` after 1 hour with 320 calls consumed**
+
+The calculation below assumes the default zero-fee configuration:
 
 ```
 payout = 1_000_000 × 320 = 320_000_000   (32 XLM to the provider)
@@ -183,7 +201,9 @@ thirty-day default.
 
 These must hold for every reachable state. They are asserted in tests.
 
-1. **Conservation.** For every lease, `payout + refund == locked_deposit`.
+1. **Conservation.** For every settlement,
+   `provider_payment + protocol_fee + refund == locked_deposit`. For revocation,
+   the full deposit is refunded and no fee is charged.
 2. **Single release.** A settled lease can never be settled or revoked again
    (`LeaseAlreadySettled`), and `settled` is persisted before any token call.
 3. **Bounded claim.** A provider can never receive more than
@@ -198,7 +218,7 @@ These must hold for every reachable state. They are asserted in tests.
 
 | Key | Storage | Notes |
 | --- | --- | --- |
-| `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
+| `Admin`, `Token`, `ProtocolFeeBps`, `FeeRecipient` | instance | configuration; fee keys default to zero / none on older deployments; instance TTL is bumped on every state change |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
 | `Service(u64)` | persistent | TTL extended on save and on read |
 | `Lease(u64)` | persistent | TTL extended on save and on read to cover term + grace |
