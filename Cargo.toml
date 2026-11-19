@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["contracts/registry", "contracts/mock_token"]
+exclude = ["examples/indexer"]
 
 [workspace.package]
 version = "0.2.1"

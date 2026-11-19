@@ -31,9 +31,12 @@ that you cannot explain; CI will fail the PR if a signature matches.
 
 ## Local security checks
 
-CI's dependency policy and malware scan can be reproduced locally:
+CI's dependency policy, security audit, and malware scan can be reproduced locally:
 
 ```bash
+cargo install cargo-audit --locked  # one-time
+cargo audit
+
 cargo install cargo-deny --locked   # one-time
 cargo deny check
 
@@ -42,8 +45,8 @@ sudo freshclam                      # one-time ClamAV signature update
 ```
 
 `scan-malware.sh` scans the working tree and any built Wasm. Pass a path to scan
-a downloaded artifact, and see `--help` for the other flags. The policy lives in
-[`deny.toml`](./deny.toml).
+a downloaded artifact, and see `--help` for the other flags. The advisory ignore
+policy lives in [`deny.toml`](./deny.toml) and [`audit.toml`](./audit.toml).
 
 ## Text and documentation checks
 

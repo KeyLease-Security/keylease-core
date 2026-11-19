@@ -877,11 +877,224 @@ fn test_upgrade_is_admin_only() {
     );
 }
 
-// A successful upgrade installs a real Wasm uploaded with
-// `stellar contract upload`, which the unit-test host cannot fabricate (it
-// requires a valid `contractspecv0` metadata section). The success path is
-// exercised end to end by `scripts/deploy-testnet.sh --upgrade` against
-// Testnet; here we pin the authorization guard.
+/// Verify that upgrading the contract via `update_current_contract_wasm`
+/// preserves all existing instance and persistent storage:
+/// - Admin address (`get_admin`)
+/// - Escrow token address (`get_token`)
+/// - Service and lease monotonic counters (`service_count`, `lease_count`)
+/// - Existing service entries (`get_service`)
+/// - Existing in-flight lease entries (`get_lease`)
+///
+/// Wasm fixture: `contracts/registry/test_fixtures/upgrade_fixture.wasm`
+/// Produced by building the release contract for wasm32v1-none:
+///   `cargo build --target wasm32v1-none --release -p keylease-registry`
+/// and copying `target/wasm32v1-none/release/keylease_registry.wasm` to
+/// `contracts/registry/test_fixtures/upgrade_fixture.wasm`.
+#[test]
+fn test_upgrade_preserves_storage() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    let wasm_bytes = include_bytes!("../test_fixtures/upgrade_fixture.wasm");
+    let wasm_bytes_val = soroban_sdk::Bytes::from_slice(&env, wasm_bytes);
+    let new_wasm_hash = env.deployer().upload_contract_wasm(wasm_bytes_val);
+
+    ctx.registry.upgrade(&ctx.admin, &new_wasm_hash);
+
+    // Verify admin and token configuration are preserved
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+    assert_eq!(ctx.registry.get_token(), ctx.token.address);
+
+    // Verify counters are preserved
+    assert_eq!(ctx.registry.service_count(), 1);
+    assert_eq!(ctx.registry.lease_count(), 1);
+
+    // Verify existing registered service is preserved
+    let service = ctx.registry.get_service(&service_id);
+    assert_eq!(service.provider, ctx.provider);
+    assert_eq!(service.rate_per_call, RATE);
+    assert!(service.is_active);
+
+    // Verify existing in-flight lease is preserved
+    let lease = ctx.registry.get_lease(&lease_id);
+    assert_eq!(lease.service_id, service_id);
+    assert_eq!(lease.consumer, ctx.consumer);
+    assert_eq!(lease.allocated_calls, 10);
+    assert_eq!(lease.used_calls, 0);
+    assert_eq!(lease.locked_deposit, RATE * 10);
+    assert_eq!(lease.expires_at, 1_000 + 3_600);
+    assert!(!lease.settled);
+}
+
+// ---------------------------------------------------------------------------
+// Admin emergency pause (#120)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pause_and_unpause_transitions_and_events() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    // Initially unpaused
+    assert!(!ctx.registry.is_paused());
+
+    // Pause contract and assert event immediately
+    ctx.registry.pause(&ctx.admin);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &EmergencyPaused {
+            admin: ctx.admin.clone(),
+        },
+    );
+    assert!(ctx.registry.is_paused());
+
+    // Unpause contract and assert event immediately
+    ctx.registry.unpause(&ctx.admin);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &EmergencyUnpaused {
+            admin: ctx.admin.clone(),
+        },
+    );
+    assert!(!ctx.registry.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause_are_admin_only() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let impostor = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry.try_pause(&impostor),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    ctx.registry.pause(&ctx.admin);
+
+    assert_eq!(
+        ctx.registry.try_unpause(&impostor),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
+fn test_paused_contract_blocks_services_and_leases() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+
+    let service_id = register_default_service(&env, &ctx);
+
+    // Pause the contract
+    ctx.registry.pause(&ctx.admin);
+
+    // 1. register_service must fail while paused
+    let dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
+    assert_eq!(
+        ctx.registry
+            .try_register_service(&ctx.provider, &RATE, &dummy_hash),
+        Err(Ok(Error::ContractPaused))
+    );
+
+    // 2. set_service_active must fail while paused
+    assert_eq!(
+        ctx.registry
+            .try_set_service_active(&ctx.provider, &service_id, &false),
+        Err(Ok(Error::ContractPaused))
+    );
+
+    // 3. create_lease must fail while paused
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &10, &3_600),
+        Err(Ok(Error::ContractPaused))
+    );
+
+    // Unpause and verify all blocked operations now succeed
+    ctx.registry.unpause(&ctx.admin);
+
+    let new_service_id = ctx
+        .registry
+        .register_service(&ctx.provider, &RATE, &dummy_hash);
+    assert_eq!(new_service_id, 2);
+
+    ctx.registry
+        .set_service_active(&ctx.provider, &service_id, &false);
+    assert!(!ctx.registry.get_service(&service_id).is_active);
+
+    ctx.registry
+        .set_service_active(&ctx.provider, &service_id, &true);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    assert_eq!(lease_id, 1);
+}
+
+#[test]
+fn test_paused_contract_allows_settlement_and_consumer_revocation() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+
+    let service_id = register_default_service(&env, &ctx);
+
+    // Create lease 1 for settlement test
+    let lease_settle_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    // Create lease 2 for revocation test
+    let lease_revoke_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    // Emergency pause is triggered
+    ctx.registry.pause(&ctx.admin);
+    assert!(ctx.registry.is_paused());
+
+    // Invariant: settle_lease MUST SUCCEED even while paused!
+    // Provider reports 4 verified calls out of 10.
+    env.ledger().set_timestamp(1_000 + 3_600);
+    let settle_res = ctx
+        .registry
+        .try_settle_lease(&ctx.provider, &lease_settle_id, &4);
+    assert_eq!(settle_res, Ok(Ok(())));
+
+    let settled_lease = ctx.registry.get_lease(&lease_settle_id);
+    assert!(settled_lease.settled);
+    assert_eq!(settled_lease.used_calls, 4);
+
+    // Provider got paid 4 * RATE = 400
+    assert_eq!(ctx.token.balance(&ctx.provider), 400);
+
+    // Invariant: revoke_expired_lease MUST SUCCEED even while paused!
+    // Advance past expiry (1000 + 3600) + GRACE (24h)
+    env.ledger().set_timestamp(1_000 + 3_600 + GRACE + 1);
+    let consumer_bal_before = ctx.token.balance(&ctx.consumer);
+
+    let revoke_res = ctx
+        .registry
+        .try_revoke_expired_lease(&ctx.consumer, &lease_revoke_id);
+    assert_eq!(revoke_res, Ok(Ok(())));
+
+    let revoked_lease = ctx.registry.get_lease(&lease_revoke_id);
+    assert!(revoked_lease.settled);
+
+    // Consumer got full refund of deposit: 10 * RATE = 1000
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        consumer_bal_before + (RATE * 10)
+    );
+}
 
 #[test]
 fn test_duration_above_max_is_rejected() {

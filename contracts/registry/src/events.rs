@@ -172,3 +172,19 @@ pub struct ContractUpgraded {
     /// Hash of the new Wasm installed by the Soroban deployer.
     pub new_wasm_hash: BytesN<32>,
 }
+
+/// Emitted when the admin triggers an emergency pause.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyPaused {
+    /// Admin that authorized the pause.
+    pub admin: Address,
+}
+
+/// Emitted when the admin unpauses the registry.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyUnpaused {
+    /// Admin that authorized the unpause.
+    pub admin: Address,
+}

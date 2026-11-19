@@ -238,6 +238,52 @@ whose funds have already moved. Settlement itself and `create_lease` keep the
 entries they touch alive on their own; you only need an explicit bump for state
 that is being read and not written for the length of its horizon.
 
+### Runnable Event Indexer Example
+
+An example event indexer is provided in [`examples/indexer`](../examples/indexer).
+It polls Soroban RPC `getEvents` for `lease_created` and `lease_settled` contract events,
+maintains a local file-based lease ledger (`lease_ledger.json`), and prints payouts and refunds
+when leases settle.
+
+Because indexing relies purely on reading historical and live RPC event logs,
+**no secret keys or transaction signing are required**—any read-only identity or anonymous client
+can run the indexer.
+
+#### Running against Testnet
+
+```bash
+# Build the indexer
+cargo build --manifest-path examples/indexer/Cargo.toml
+
+# Run against Stellar Testnet starting from a recent ledger
+cargo run --manifest-path examples/indexer/Cargo.toml -- \
+  --rpc-url https://soroban-testnet.stellar.org \
+  --contract-id <REGISTRY_CONTRACT_ID> \
+  --start-ledger <LEDGER_SEQUENCE> \
+  --ledger-file lease_ledger.json
+```
+
+Options:
+- `--rpc-url <URL>`: Soroban RPC endpoint (default: `https://soroban-testnet.stellar.org`).
+- `--contract-id <ID>`: The KeyLease registry contract address (`C...`).
+- `--start-ledger <N>`: Ledger sequence number to start indexing from.
+- `--ledger-file <PATH>`: Path to persist the JSON lease ledger (default: `lease_ledger.json`).
+- `--poll-interval <SECS>`: Interval between RPC polls in seconds (default: 5).
+- `--once`: Run a single poll cycle and exit.
+- `--fixture <PATH>`: Offline mode: replay a JSON array of `getEvents` event responses without network access.
+
+#### Topic Layout and Filtering
+
+The indexer matches on the contract's real event structure:
+- **Topic 0**: Event name symbol (`lease_created` or `lease_settled`).
+- **Topic 1**: Lease identifier (`u64`).
+- **Value**: Event data map containing:
+  - `lease_created`: `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit`.
+  - `lease_settled`: `provider`, `verified_calls`, `payout`, `refund`.
+
+When a `lease_settled` event is observed, the indexer reconciles the stored record, updates its status
+to `Settled`, and outputs the recorded payout and refund amounts.
+
 ## Settling
 
 Settlement is one signed transaction from the provider account, at or after
