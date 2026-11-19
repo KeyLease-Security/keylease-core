@@ -22,10 +22,14 @@
 - [Consumer guide](consumer-guide.md)
 - [Developer guide](developer-guide.md)
 - [Deployment](deployment.md)
+- [Troubleshooting](troubleshooting.md)
 
 ## Project
 
 - [Deployments](deployments.md)
+- Design notes
+  - [Provider staking and slashing (#137)](design/137-provider-staking.md)
+  - [Revenue splits (#133)](design/133-revenue-splits.md)
 - [Release notes: v0.2.1](releases/v0.2.1.md)
 - [Release notes: v0.2.0](releases/v0.2.0.md)
 - [Release notes: v0.1.0](releases/v0.1.0.md)

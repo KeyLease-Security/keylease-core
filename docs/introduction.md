@@ -25,7 +25,7 @@ lease against Stellar instead of trusting a password, settles once with a
 verified call count, and is paid from escrow. Unused balance refunds
 automatically.
 
-```
+```text
 consumer                         registry                        provider
    |                                |                                |
    |-- create_lease(calls, secs) -->|                                |
@@ -58,7 +58,7 @@ primitive:
 | Prove who created or settled a lease | `Address` authorization; accounts (`G…`) and contracts (`C…`) both work, including Stellar multisig |
 | Know when a lease expires | Ledger timestamp, not an operator's clock |
 | Prove what happened | Typed Soroban contract events (`lease_created`, `lease_settled`, …) |
-| Keep escrow claimable | Persistent-storage TTL, extended per lease for its term + grace window |
+| Keep escrow claimable | Persistent-storage TTL, extended for the lease's term + grace window on every state change and by the permissionless `bump_lease` |
 | Identify the deployed code | `contractmeta!` (name, version, description, repository) and `version()` |
 | Fix a deployed bug | `upgrade(admin, new_wasm_hash)` through the Soroban deployer |
 

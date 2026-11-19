@@ -1,3 +1,31 @@
+//! Persistent storage layout and the TTL policy that guards it.
+//!
+//! # Who extends a TTL
+//!
+//! An extension moves the entry's `liveUntilLedgerSeq`, which the host books as
+//! a rent bump and bills the caller for across the whole extended horizon. In
+//! this package's tests that is 48,684 of the 48,798 stroops `bump_lease`
+//! estimates, against 113 for the same call with the bump removed (see
+//! `contracts/registry/src/test.rs`), which is why nothing on the read-only path
+//! extends anything.
+//! Only the calls below write, and only these calls extend a TTL:
+//!
+//! | Call | Instance | Service entry | Lease entry |
+//! | --- | --- | --- | --- |
+//! | `init`, `upgrade`, `register_service` | extend | — | — |
+//! | `set_token` | extend, unless the token is unchanged | — | — |
+//! | `set_service_active` | — | extend (save) | — |
+//! | `create_lease` | extend | extend | extend (save) |
+//! | `settle_lease`, `revoke_expired_lease` | — | — | extend (save) |
+//! | [`crate::KeyLeaseRegistry::bump_service`] | — | extend | — |
+//! | [`crate::KeyLeaseRegistry::bump_lease`] | — | — | extend |
+//! | `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance` | — | — | — |
+//!
+//! The last row is the read-only surface: it never extends anything, so a
+//! simulation of it costs instructions and no rent. A lease or service that is
+//! merely *read* for months has to be bumped explicitly, which is what the two
+//! `bump_*` entry points are for.
+
 use soroban_sdk::{contracttype, Address, Env};
 
 use crate::errors::Error;
@@ -10,8 +38,45 @@ pub const LEDGER_CLOSE_SECS: u64 = 5;
 
 /// Ledger count below which a persistent entry is extended (~1 day @ 5s ledgers).
 pub const LEDGER_BUMP_THRESHOLD: u32 = 17_280;
-/// Ledger count that persistent entries are extended to (~30 days @ 5s ledgers).
+/// Ledger count that service and instance entries are extended to (~30 days).
 pub const LEDGER_BUMP_EXTEND: u32 = 518_400;
+
+/// The longest lifetime this contract will ever ask for an entry, in ledgers
+/// (~90 days @ 5s ledgers).
+///
+/// Every extension in this module is clamped to this constant, and the clamp is
+/// a policy bound rather than a workaround: it caps how much rent a single call
+/// can create and how long a stale entry can squat in the ledger, independent of
+/// whatever `expires_at` happens to say. It also matters if
+/// [`crate::MAX_LEASE_DURATION_SECS`] is ever raised or a lease is migrated in by
+/// an upgrade, because the lease policy below is derived from `expires_at` and
+/// would otherwise grow without limit.
+///
+/// The value sits between the largest legitimate request and the network's
+/// `maxEntryTtl` ledger setting (6,312,000 ledgers on Pubnet and Testnet). The
+/// longest lease is `MAX_LEASE_DURATION_SECS` (30 days), whose policy asks for
+/// its term plus the settlement grace window plus one buffer day, i.e. 552,960
+/// ledgers, so a 90-day ceiling never truncates a real lease while staying well
+/// below the network maximum.
+///
+/// Note on what the clamp is *not*: `soroban-test` does not enforce
+/// `maxEntryTtl` on `extend_ttl` — it accepts an extension past the network cap,
+/// including `u32::MAX`, and does not evict entries as the ledger advances. So
+/// this bound cannot be demonstrated as "prevents a revert" in the test host, and
+/// the tests here assert the clamped value, not a host rejection.
+pub const MAX_ENTRY_TTL_LEDGERS: u32 = (90 * 24 * 60 * 60 / LEDGER_CLOSE_SECS) as u32;
+
+/// The largest extension this deployment may ask for right now: the contract
+/// ceiling, narrowed by whatever lifetime the network currently publishes.
+///
+/// Reading the live `max_ttl` rather than hard-coding the network cap means an
+/// operator that lowers `maxEntryTtl` is respected instead of contradicted. The
+/// test host accepts an over-cap extension without complaint, so the clamp that
+/// tests can actually pin down is [`MAX_ENTRY_TTL_LEDGERS`]; this line is the
+/// same discipline applied against a live network setting.
+fn ttl_ceiling(env: &Env) -> u32 {
+    MAX_ENTRY_TTL_LEDGERS.min(env.storage().max_ttl())
+}
 
 /// Storage keys for the registry.
 #[contracttype]
@@ -70,9 +135,10 @@ pub fn set_paused(env: &Env, paused: bool) {
 
 /// Bump the TTL of the instance (configuration) storage entry.
 pub fn extend_instance_ttl(env: &Env) {
+    let extend_to = LEDGER_BUMP_EXTEND.min(ttl_ceiling(env));
     env.storage()
         .instance()
-        .extend_ttl(LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        .extend_ttl(LEDGER_BUMP_THRESHOLD, extend_to);
 }
 
 // ---------------------------------------------------------------------------
@@ -109,34 +175,66 @@ pub fn lease_count(env: &Env) -> u64 {
 // Services
 // ---------------------------------------------------------------------------
 
+/// Persist a service and keep its entry alive for the standard horizon.
+///
+/// Every write path (`register_service`, `set_service_active`) goes through
+/// here, so a service that is being maintained never needs an explicit bump.
 pub fn save_service(env: &Env, service: &Service) {
     let key = DataKey::Service(service.service_id);
     env.storage().persistent().set(&key, service);
+    let extend_to = LEDGER_BUMP_EXTEND.min(ttl_ceiling(env));
     env.storage()
         .persistent()
-        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, extend_to);
 }
 
-pub fn get_service(env: &Env, service_id: u64) -> Result<Service, Error> {
+/// Bump a service entry's TTL without reading it back to the caller.
+///
+/// This is the only path that extends a service's lifetime other than saving
+/// it; [`get_service`] is a pure lookup.
+pub fn extend_service_ttl(env: &Env, service_id: u64) {
     let key = DataKey::Service(service_id);
-    let service = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .ok_or(Error::ServiceNotFound)?;
+    let extend_to = LEDGER_BUMP_EXTEND.min(ttl_ceiling(env));
     env.storage()
         .persistent()
-        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
-    Ok(service)
+        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, extend_to);
+}
+
+/// Pure lookup: reads a service and touches no storage metadata.
+///
+/// Reads must not extend TTL: a "view" that bumps an entry bills the caller for
+/// the whole extended horizon, which is why `get_service` costs 113 stroops and
+/// `bump_service` over it costs tens of thousands.
+pub fn get_service(env: &Env, service_id: u64) -> Result<Service, Error> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Service(service_id))
+        .ok_or(Error::ServiceNotFound)
 }
 
 // ---------------------------------------------------------------------------
 // Leases
 // ---------------------------------------------------------------------------
 
+/// Persist a lease and extend its entry for as long as the lease can matter.
 pub fn save_lease(env: &Env, lease: &Lease) {
     let key = DataKey::Lease(lease.lease_id);
     env.storage().persistent().set(&key, lease);
+    env.storage().persistent().extend_ttl(
+        &key,
+        LEDGER_BUMP_THRESHOLD,
+        lease_ttl_extend(env, lease),
+    );
+}
+
+/// Bump a lease entry's TTL to whatever its own policy asks for.
+///
+/// Separated from [`get_lease`] so that keeping an entry alive is an explicit,
+/// metered operation rather than a side effect of reading it. Soroban's
+/// `extend_ttl` can only raise `liveUntilLedgerSeq`, so this never shortens a
+/// lease that was already extended further.
+pub fn extend_lease_ttl(env: &Env, lease: &Lease) {
+    let key = DataKey::Lease(lease.lease_id);
     env.storage().persistent().extend_ttl(
         &key,
         LEDGER_BUMP_THRESHOLD,
@@ -152,9 +250,13 @@ pub fn save_lease(env: &Env, lease: &Lease) {
 /// leases on Testnet; the buffer here keeps the entry alive through expiry, the
 /// 24-hour grace window, and a day of slack for the consumer's revoke call.
 ///
-/// `create_lease` caps `duration_secs` at `MAX_LEASE_DURATION_SECS`, so this is
-/// always bounded and a locked deposit can never outlive its lease entry.
-fn lease_ttl_extend(env: &Env, lease: &Lease) -> u32 {
+/// `create_lease` caps `duration_secs` at `MAX_LEASE_DURATION_SECS`, so a
+/// well-formed lease can never ask for more than 552,960 ledgers and the clamp
+/// below never truncates one. What it does bound is a lease whose `expires_at`
+/// says otherwise — an entry carried in by an upgrade, or one created after a
+/// future raise of the duration cap — whose ask would otherwise grow in
+/// proportion to a value no caller can police.
+pub(crate) fn lease_ttl_extend(env: &Env, lease: &Lease) -> u32 {
     let now = env.ledger().timestamp();
     let remaining_secs = lease
         .expires_at
@@ -162,20 +264,16 @@ fn lease_ttl_extend(env: &Env, lease: &Lease) -> u32 {
         .saturating_add(SETTLE_GRACE_PERIOD_SECS);
     let ledgers = remaining_secs / LEDGER_CLOSE_SECS;
     let extend = ledgers.saturating_add(LEDGER_BUMP_THRESHOLD as u64);
-    extend.min(u32::MAX as u64) as u32
+    extend.min(ttl_ceiling(env) as u64) as u32
 }
 
+/// Pure lookup: reads a lease and touches no storage metadata.
+///
+/// A lease that needs to outlive its current horizon is kept alive by
+/// [`crate::KeyLeaseRegistry::bump_lease`], not by looking at it.
 pub fn get_lease(env: &Env, lease_id: u64) -> Result<Lease, Error> {
-    let key = DataKey::Lease(lease_id);
-    let lease = env
-        .storage()
+    env.storage()
         .persistent()
-        .get(&key)
-        .ok_or(Error::LeaseNotFound)?;
-    env.storage().persistent().extend_ttl(
-        &key,
-        LEDGER_BUMP_THRESHOLD,
-        lease_ttl_extend(env, &lease),
-    );
-    Ok(lease)
+        .get(&DataKey::Lease(lease_id))
+        .ok_or(Error::LeaseNotFound)
 }

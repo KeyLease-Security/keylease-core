@@ -130,6 +130,139 @@ both patterns when adding money paths.
 Every security-sensitive change needs an adversarial test — an attempt to steal,
 strand, or double-spend.
 
+## Releasing a version
+
+A release is four things: a version bump, a notes page, a check run and an
+annotated tag. Nothing in `.github/workflows/` publishes a crate, builds a
+GitHub Release or cuts a tag — `ci.yml` only gates commits and `docs.yml` only
+builds the site on push to `main` — so the steps below are the whole process.
+
+### 1. Bump the version
+
+`Cargo.toml` carries the only version this repository reports. Both crates
+inherit it (`version.workspace = true`), so one edit covers the workspace — but
+two more files have to follow it.
+
+| File | What changes |
+| --- | --- |
+| `Cargo.toml` | `[workspace.package] version = "X.Y.Z"` |
+| `contracts/registry/Cargo.toml` | the `version = "X.Y.Z"` pin on the `keylease-mock-token` dev-dependency |
+| `Cargo.lock` | the `keylease-registry` and `keylease-mock-token` entries — regenerate with `cargo check --all` and commit the diff |
+
+No other file carries a version string, because the version reaches the rest of
+the system through the build:
+
+- `contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"))` embeds the
+  new value in the Wasm, so `stellar contract info meta` reports it.
+- `version()` reads that same value, so the on-chain contract identifies itself
+  after the upgrade — the check in [Deployment](deployment.md#verifying-a-deployment).
+
+Use the convention the existing releases already follow. `0.x.0` is a release
+that changes what the world sees — a new entry point, a new event, a new error
+code, new storage. `0.x.1` is a release that changes none of those (v0.2.1 only
+changed the lease TTL policy). Error codes are append-only, so a new code alone
+is never a major-version event.
+
+### 2. Write the notes page
+
+Add `docs/releases/vX.Y.Z.md`, then register it in **both** tables of contents —
+`mkdocs.yml` under `nav:` → `Project:` and `docs/SUMMARY.md` under
+`## Project`. The newest page keeps the `Release notes` label and the previous
+ones are relabelled to their version:
+
+```yaml
+  - Project:
+      - Deployments: deployments.md
+      - Release notes: releases/v0.2.2.md   # new
+      - v0.2.1: releases/v0.2.1.md          # relabelled
+      - v0.2.0: releases/v0.2.0.md
+      - v0.1.0: releases/v0.1.0.md
+```
+
+Copy the shape from an existing page rather than inventing one:
+
+| Example | What it shows |
+| --- | --- |
+| [v0.2.1](releases/v0.2.1.md) | a behavior-only patch: the problem it solved, a short "What changed", compatibility stated as "no ABI, event, storage-key or error-code changes" |
+| [v0.2.0](releases/v0.2.0.md) | an additive release: new events and `upgrade`, a full "Interface at this tag" table, and an "Upgrading from v0.1.0" section |
+| [v0.1.0](releases/v0.1.0.md) | the first release, and the banner pattern a superseded page uses to point at the current interface |
+
+A notes page needs these sections, in this order:
+
+1. **Heading and lead** — `# keylease-core vX.Y.Z` then one paragraph saying what
+   the release is and, when there is a reason, why it exists.
+2. **Highlights** or **What changed** — one bullet per user-visible change, each
+   naming the entry point, constant or error code it touched.
+3. **Contracts** — the package → Wasm table.
+4. **Interface at this tag** — the entry points and their auth requirements, so
+   the page stays readable after the reference moves on.
+5. **Compatibility** — Rust, `soroban-sdk`, Wasm target, the error-code range, and
+   an explicit statement about storage keys and events.
+6. **Upgrading from vX.Y.Z** — required whenever a deployed network is running an
+   older build; say whether `upgrade` is safe in place.
+7. **Known limitations**, **Verification** (the four commands), **License**.
+
+Never put a secret, seed or raw credential in a notes page — including a
+deployer's secret key. Addresses and ledger numbers are fine and useful.
+
+### 3. Run the checks a release is gated on
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all
+cargo build --target wasm32v1-none --release --all
+cargo deny check
+./scripts/scan-malware.sh
+pip install -r requirements-docs.txt && mkdocs build --strict
+```
+
+The first four are the CI jobs every commit must pass; `cargo deny check` and
+`./scripts/scan-malware.sh` are the Dependency Policy and Malware Scan jobs run
+locally. `mkdocs build --strict` is the one that bites at release time: the docs
+workflow only runs on `main`, so a notes page missing from `nav:` or a dangling
+anchor goes red *after* the release commit has landed.
+
+### 4. Tag the release commit on `main`
+
+Tag the merge-base commit on `main` that carries both the version bump and the
+notes page — not a branch tip that has not merged. `v0.1.0` is an annotated tag,
+so stay annotated:
+
+```bash
+git fetch origin
+git tag -a vX.Y.Z -m "keylease-core vX.Y.Z" origin/main
+git push origin vX.Y.Z
+```
+
+The tag is what makes the recorded hashes meaningful: it is the revision anyone
+can rebuild from to reproduce the deployed Wasm.
+
+### 5. Record the artifacts
+
+Deploying is covered in [Deployment](deployment.md); what a release must
+*record* is in [Deployments](deployments.md), whose
+[Recording a deployment](deployments.md#recording-a-deployment) steps this table
+feeds.
+
+| Artifact | How to obtain it | Where it is recorded |
+| --- | --- | --- |
+| Contract id | `stellar contract deploy` prints it | Testnet table, `KeyLeaseRegistry` |
+| Built Wasm digest | `sha256sum target/wasm32v1-none/release/keylease_registry.wasm` | "Verifying a listed address" |
+| On-chain Wasm hash | `stellar contract upload` prints it; `stellar contract info hash --id $REGISTRY` reads it back | Testnet table, "Wasm hash" |
+| Version, as the chain sees it | `… -- version` and `stellar contract info meta --id $REGISTRY` | Testnet table + "On-chain metadata" (`rssdkver` included) |
+| Deploy-ledger trail | ledger and tx hash for `init`, `set_token`, `register_service`, or the `upgrade` | Testnet table rows |
+| Pre/post counters | `service_count`, `lease_count`, `get_service`, `get_lease` | release notes "Verified on-chain" bullet |
+| Signer addresses | admin, provider, demo consumer, escrow token | Testnet table |
+| Source revision | the tag cut in step 4 | Testnet table, "Deployed from" |
+
+The built digest and the on-chain hash are the same value only if the build is
+reproducible: check out the tag, run
+`cargo build --target wasm32v1-none --release --all` and compare against
+`stellar contract info hash`. If they differ, the release is not verifiable from
+source — say so in the notes page rather than recording a hash you cannot
+reproduce.
+
 ## Upgrading a deployment
 
 ```bash

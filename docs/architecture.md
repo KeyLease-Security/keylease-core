@@ -121,14 +121,47 @@ claims to represent, and the consumer always has an exit.
 | --- | --- | --- |
 | `Admin`, `Token` | instance | extended on every state change (≈30 days) |
 | `ServiceCount`, `LeaseCount` | instance | same as instance |
-| `Service(u64)` | persistent | extended on save and on read (≈30 days) |
-| `Lease(u64)` | persistent | extended for the lease's remaining term **plus** the 24h grace window and a one-day read buffer |
+| `Service(u64)` | persistent | extended on save and by `bump_service` (≈30 days) |
+| `Lease(u64)` | persistent | extended for the lease's remaining term **plus** the 24h grace window and a one-day read buffer, or by `bump_lease` |
+
+### What extends a TTL, and what does not
+
+An extension moves the entry's `liveUntilLedgerSeq`, which the host books as a
+rent bump and bills the caller for across the whole extended horizon. Only these
+calls extend anything:
+`init`, `set_token`, `upgrade`, `register_service`, `set_service_active`,
+`create_lease`, `settle_lease`, `revoke_expired_lease`, `bump_service` and
+`bump_lease` — and, since PR #152, `set_token` only when it actually changes the
+configured token. Every read-only view — `get_service`, `get_lease`,
+`lease_status`, `remaining_calls`, `locked_balance` — is pure, so a simulation of
+a view costs instructions and no rent. At the ledger where an extension is due,
+`get_lease` estimates at 113 stroops (all instructions) against 48,798 for
+`bump_lease`, of which 48,684 is persistent rent.
+
+Because reads stopped bumping, state that is only ever looked at has to be kept
+alive deliberately, and `create_lease` therefore extends the service it leases
+from: an actively leased service never goes stale under its own leases.
 
 `create_lease` caps `duration_secs` at `MAX_LEASE_DURATION_SECS` (30 days), so
 the TTL extension is bounded and a locked deposit can never outlive its entry.
 Only the time a lease can be acted on is paid for, so Soroban rent does not
-dominate short leases. The host still clamps TTL to its minimum persistent TTL
-(≈7 days on Testnet).
+dominate short leases.
+
+Three bounds sit on top of each other, and each one is deliberately below the
+next:
+
+| Bound | Ledgers | Set by |
+| --- | --- | --- |
+| longest lease's policy ask (30-day term + 24h grace + 1-day buffer) | 552,960 | `MAX_LEASE_DURATION_SECS` |
+| contract ceiling for any single extension | 1,555,200 (90 days) | `MAX_ENTRY_TTL_LEDGERS` |
+| network `maxEntryTtl` | 6,312,000 | Stellar protocol |
+
+The ceiling is above every horizon a valid lease can produce, so it never
+truncates one; what it bounds is an entry whose `expires_at` was not produced by
+today's `create_lease` — one migrated in by an upgrade, or one created after the
+duration cap is raised. Each extension also takes the minimum of that ceiling and
+`env.storage().max_ttl()`, so a network that lowers `maxEntryTtl` is followed
+rather than contradicted.
 
 ## Repository layout
 

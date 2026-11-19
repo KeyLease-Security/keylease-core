@@ -42,10 +42,14 @@
 //! * **`Address` auth** — every actor is a Stellar account (`G...`) or contract
 //!   (`C...`) address authenticated by the host's `require_auth()`.
 //! * **Contract events** — every transition emits a typed Soroban event (see
-//!   [`events`]) so indexers can follow escrow without polling.
+//!   [`events`]) so indexers can follow escrow without polling. Every payload
+//!   carries a `schema_version` key so a stream that spans an upgrade stays
+//!   decodable.
 //! * **Ledger time** — expiry is measured in ledger timestamps, not wall clocks.
-//! * **Persistent storage TTL** — lease entries are extended for their full
-//!   duration plus the grace period, so escrow cannot fall off the ledger.
+//! * **Persistent storage TTL** — a lease entry is extended for its full
+//!   duration plus the grace period whenever it is written, so escrow cannot
+//!   fall off the ledger. Reads never extend: `bump_lease` and `bump_service`
+//!   keep an entry alive on their own terms (see [`storage`]).
 //! * **Wasm upgrades** — the admin can install a new Wasm through the Soroban
 //!   deployer, and `contractmeta!` identifies the running version on-chain.
 
@@ -61,14 +65,17 @@ use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
 
 pub use crate::errors::Error;
 pub use crate::events::{
-    ContractUpgraded, EmergencyPaused, EmergencyUnpaused, EscrowTokenSet, LeaseCreated,
-    LeaseRevoked, LeaseSettled, RegistryInitialized, ServiceRegistered, ServiceStatusChanged,
+    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
+    RegistryInitialized, ServiceRegistered, ServiceStatusChanged, EVENT_SCHEMA_VERSION,
 };
 pub use crate::types::{Lease, LeaseStatus, Service};
 
 // On-chain contract metadata, readable from the ledger without the source.
 soroban_sdk::contractmeta!(key = "name", val = "KeyLeaseRegistry");
 soroban_sdk::contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
+// The event payload schema is versioned independently of the release: `version`
+// moves on every deploy, this only when an event gains or loses a field.
+soroban_sdk::contractmeta!(key = "eventSchemaVersion", val = "1");
 soroban_sdk::contractmeta!(
     key = "description",
     val = "Time-bound micro-leases for API/RPC access, escrowed with SEP-41 tokens on Stellar."
@@ -86,9 +93,33 @@ pub const SETTLE_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60;
 ///
 /// Persistent entries are extended to cover the full lease term, the 24-hour
 /// grace window and a one-day read buffer, so this bound guarantees a lease can
-/// never outlive its storage entry. At thirty days the resulting TTL (~32 days)
-/// is well under the network's maximum entry TTL (180 days on Testnet).
+/// never outlive its storage entry: the largest extension it asks for is
+/// 552,960 ledgers, against `storage::MAX_ENTRY_TTL_LEDGERS` (1,555,200) and
+/// the network's own `maxEntryTtl` (6,312,000 ledgers on Pubnet and Testnet).
 pub const MAX_LEASE_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Largest deposit a single lease may escrow, in the escrow token's base unit.
+///
+/// `required_deposit` is `rate_per_call * requested_calls`, so one extra zero in
+/// either input is multiplied straight into an escrow transfer. Checked
+/// arithmetic only rejects a product that does not fit `i128`; it cannot tell a
+/// deliberate wholesale lease from a fat-fingered one. This bound is the second
+/// guard, and it is what stops a token-scale change — a deployment pointed at a
+/// token with more decimals than the native asset — from turning a small lease
+/// into a large one.
+///
+/// One trillion base units is 100,000 of a seven-decimal token — XLM in every
+/// documented deployment — which is 2,000 times the largest amount in the
+/// worked protocol examples (500,000,000 base units). No documented lease shape
+/// reaches it, so the bound is invisible in normal use. Because it is denominated
+/// in base units and not in whole tokens, a deployment that switches to a token
+/// with more decimals gets a tighter ceiling in real terms, which is the
+/// direction the guard should fail in.
+///
+/// It is a compile-time constant rather than admin storage on purpose: the guard
+/// protects consumers from the contract's own arithmetic, so raising it should
+/// cost a Wasm upgrade and a release note, not one unsigned transaction.
+pub const MAX_LEASE_DEPOSIT: i128 = 1_000_000_000_000;
 
 #[contract]
 pub struct KeyLeaseRegistry;
@@ -112,6 +143,7 @@ impl KeyLeaseRegistry {
         storage::set_admin(&env, &admin);
         storage::extend_instance_ttl(&env);
         RegistryInitialized {
+            schema_version: EVENT_SCHEMA_VERSION,
             admin: admin.clone(),
         }
         .publish(&env);
@@ -123,12 +155,27 @@ impl KeyLeaseRegistry {
     /// Kept as a separate, admin-gated entry point so that deployments can point
     /// the registry at the native Stellar asset contract (SAC) or a custom SEP-41
     /// token without redeploying the registry logic.
+    ///
+    /// Repeating the call with the token that is already configured is a **no-op**:
+    /// nothing is written, the instance TTL is not extended and no
+    /// `escrow_token_set` event is published, so an idempotent retry can never be
+    /// mistaken for a token migration. The no-op is decided *after*
+    /// `require_auth()` and the stored-admin check, so it cannot be used to probe
+    /// or bypass either of them.
     pub fn set_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
+
+        // Guard the early return with the authorization above: an unauthorized
+        // caller must still get `Unauthorized`, never a silent `Ok(())`.
+        if storage::get_token(&env) == Some(token.clone()) {
+            return Ok(());
+        }
+
         storage::set_token(&env, &token);
         storage::extend_instance_ttl(&env);
         EscrowTokenSet {
+            schema_version: EVENT_SCHEMA_VERSION,
             admin: admin.clone(),
             token: token.clone(),
         }
@@ -147,6 +194,7 @@ impl KeyLeaseRegistry {
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         ContractUpgraded {
+            schema_version: EVENT_SCHEMA_VERSION,
             admin: admin.clone(),
             new_wasm_hash,
         }
@@ -214,6 +262,7 @@ impl KeyLeaseRegistry {
         storage::extend_instance_ttl(&env);
         ServiceRegistered {
             service_id,
+            schema_version: EVENT_SCHEMA_VERSION,
             provider,
             rate_per_call,
             endpoint_hash,
@@ -246,6 +295,7 @@ impl KeyLeaseRegistry {
         storage::save_service(&env, &service);
         ServiceStatusChanged {
             service_id,
+            schema_version: EVENT_SCHEMA_VERSION,
             provider,
             is_active,
         }
@@ -267,6 +317,10 @@ impl KeyLeaseRegistry {
     /// is a Soroban storage constraint: the lease's persistent entry is extended
     /// for the whole term plus the grace window, so a longer lease could be
     /// evicted while escrow is still locked.
+    ///
+    /// The resulting `rate_per_call * requested_calls` deposit must not exceed
+    /// `MAX_LEASE_DEPOSIT`; the bound is checked before the escrow token is
+    /// called, so an over-large lease moves nothing.
     ///
     /// Returns the new `lease_id`.
     pub fn create_lease(
@@ -306,6 +360,13 @@ impl KeyLeaseRegistry {
         if required_deposit <= 0 {
             return Err(Error::InvalidRate);
         }
+        // Bound the escrow before any state or token interaction. This runs
+        // after the checked multiplication on purpose: `Overflow` means the
+        // product does not fit `i128`, `DepositTooLarge` means it fits and is
+        // still more than a lease is allowed to lock.
+        if required_deposit > MAX_LEASE_DEPOSIT {
+            return Err(Error::DepositTooLarge);
+        }
 
         // A lease with no token configured can never be funded or settled, so
         // fail before mutating state.
@@ -333,6 +394,9 @@ impl KeyLeaseRegistry {
         // called, and the whole transaction reverts if the transfer does.
         storage::save_lease(&env, &lease);
         storage::extend_instance_ttl(&env);
+        // `get_service` above is a pure read, so an actively-leased service is
+        // kept alive by the lease that consumes it.
+        storage::extend_service_ttl(&env, service_id);
         token::Client::new(&env, &token_addr).transfer(
             &consumer,
             env.current_contract_address(),
@@ -341,6 +405,7 @@ impl KeyLeaseRegistry {
 
         LeaseCreated {
             lease_id,
+            schema_version: EVENT_SCHEMA_VERSION,
             service_id,
             consumer,
             allocated_calls: requested_calls,
@@ -415,6 +480,7 @@ impl KeyLeaseRegistry {
 
         LeaseSettled {
             lease_id,
+            schema_version: EVENT_SCHEMA_VERSION,
             provider,
             verified_calls,
             payout,
@@ -473,11 +539,69 @@ impl KeyLeaseRegistry {
 
         LeaseRevoked {
             lease_id,
+            schema_version: EVENT_SCHEMA_VERSION,
             consumer,
             refund,
         }
         .publish(&env);
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage maintenance
+    // -----------------------------------------------------------------------
+
+    /// Extend the storage entry of a registered service to its standard
+    /// horizon. Permissionless.
+    ///
+    /// Reads stopped extending TTLs (a view that writes the ledger charges the
+    /// caller rent and cannot run read-only), so a service that is neither
+    /// created nor updated for 30 days would otherwise be evicted and start
+    /// answering `ServiceNotFound` while its leases are still live. This is the
+    /// explicit way to prevent that. `create_lease` bumps the service it leases
+    /// from, so an actively-used service never needs this call.
+    ///
+    /// There is no authorisation: the caller pays for the extension out of
+    /// their own transaction fee, the horizon is fixed by the storage policy
+    /// rather than by the caller, and no lease or balance changes. Bumping a
+    /// service you do not own is a donation of rent, not an attack.
+    pub fn bump_service(env: Env, service_id: u64) -> Result<(), Error> {
+        // A miss must be an error rather than a silent no-op: `extend_ttl` on a
+        // non-existent key would otherwise leave the caller paying for nothing.
+        let _ = storage::get_service(&env, service_id)?;
+        storage::extend_service_ttl(&env, service_id);
+        Ok(())
+    }
+
+    /// Extend the storage entry of a live lease using the existing lease TTL
+    /// policy. Permissionless.
+    ///
+    /// A lease survives `expires_at` plus the settlement grace window plus a
+    /// buffer day, and once that horizon is in the past the policy stops
+    /// shrinking: it keeps asking for the grace window plus the buffer, about
+    /// two days per bump, so nobody has to keep a long-lived lease alive by hand
+    /// for the whole term. This call exists for the tail: a consumer who cannot
+    /// get a revoke in before the horizon, or an indexer that wants the record to
+    /// stay readable. It never settles, refunds, or moves a lease.
+    ///
+    /// # Abuse bound
+    ///
+    /// * The extension comes from `lease_ttl_extend` alone — the caller supplies
+    ///   only a `lease_id`, so the horizon cannot be pushed past what the
+    ///   lease's own `expires_at` justifies, and `extend_ttl` only ever raises
+    ///   `liveUntilLedgerSeq`, never lowers it.
+    /// * The rent is charged to the caller's transaction, not to the lease.
+    /// * A settled lease is rejected with `LeaseAlreadySettled`: its funds have
+    ///   moved, so keeping the entry alive is pure state growth, and refusing
+    ///   closes the one griefing shape this call has.
+    /// * No `require_auth`: nothing here is authorised on anyone's behalf.
+    pub fn bump_lease(env: Env, lease_id: u64) -> Result<(), Error> {
+        let lease = storage::get_lease(&env, lease_id)?;
+        if lease.settled {
+            return Err(Error::LeaseAlreadySettled);
+        }
+        storage::extend_lease_ttl(&env, &lease);
         Ok(())
     }
 
@@ -510,23 +634,27 @@ impl KeyLeaseRegistry {
         storage::lease_count(&env)
     }
 
-    /// Fetch a registered service.
+    /// Fetch a registered service. Pure read: never extends a TTL.
     pub fn get_service(env: Env, service_id: u64) -> Result<Service, Error> {
         storage::get_service(&env, service_id)
     }
 
-    /// Fetch a lease.
+    /// Fetch a lease. Pure read: never extends a TTL.
+    ///
+    /// Use [`Self::bump_lease`] to keep an entry alive.
     pub fn get_lease(env: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&env, lease_id)
     }
 
     /// Derive the lifecycle status of a lease at the current ledger time.
+    /// Pure read.
     pub fn lease_status(env: Env, lease_id: u64) -> Result<LeaseStatus, Error> {
         let lease = storage::get_lease(&env, lease_id)?;
         Ok(LeaseStatus::of(&lease, env.ledger().timestamp()))
     }
 
     /// Number of calls still available on a lease (zero once settled/expired).
+    /// Pure read.
     pub fn remaining_calls(env: Env, lease_id: u64) -> Result<u32, Error> {
         let lease = storage::get_lease(&env, lease_id)?;
         let now = env.ledger().timestamp();
@@ -536,7 +664,8 @@ impl KeyLeaseRegistry {
         Ok(lease.allocated_calls.saturating_sub(lease.used_calls))
     }
 
-    /// Escrow balance owed to a lease, in token stroops, at the current ledger time.
+    /// Escrow balance owed to a lease, in token stroops, at the current ledger
+    /// time. Pure read.
     pub fn locked_balance(env: Env, lease_id: u64) -> Result<i128, Error> {
         let lease = storage::get_lease(&env, lease_id)?;
         if lease.settled {

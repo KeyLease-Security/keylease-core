@@ -70,6 +70,37 @@ stateDiagram-v2
 
 Discriminants are **stable on the wire**. They will never be renumbered.
 
+### `Settled` is one state, reached two ways
+
+`settled` records that escrow has left the contract — it does not record *why*.
+Both terminal transitions set it: `settle_lease` after paying the provider, and
+`revoke_expired_lease` after refunding the consumer in full. So `Settled` is the
+answer to "is this lease finished?", never to "did the provider earn?", and
+`Error::LeaseAlreadySettled` (7) likewise means "already settled or revoked".
+
+The two paths are separable, but not from the status:
+
+- `used_calls` is written only by `settle_lease`, so `settled && used_calls > 0`
+  is a provider settlement.
+- `settled && used_calls == 0` is ambiguous: a revocation, **or** a settlement
+  reported with `verified_calls = 0`, which is the provider's legitimate way of
+  refunding a lease it could not serve. The two leave identical storage.
+- The published event is the only discriminator — `lease_settled` versus
+  `lease_revoked` for that `lease_id`.
+
+| Lifecycle event | `settled` | `used_calls` | `lease_status` |
+| --- | --- | --- | --- |
+| `create_lease` | `false` | `0` | `Active` |
+| `settle_lease(320)` of 500, after expiry | `true` | `320` | `Settled` |
+| `settle_lease(0)` of 500, after expiry | `true` | `0` | `Settled` |
+| `revoke_expired_lease` after the grace window | `true` | `0` | `Settled` |
+
+The full state-by-event table, including `remaining_calls` and
+`locked_balance`, is in
+[`LeaseStatus` and the `settled` flag](contract-reference.md#leasestatus-and-the-settled-flag),
+and how to consume the two events is in
+[Following the event stream](integration.md#following-the-event-stream).
+
 ### When can a lease be settled?
 
 `settle_lease` reverts with `LeaseNotSettleable` unless **either**:
@@ -87,7 +118,7 @@ After expiry there is a 24-hour window (`SETTLE_GRACE_PERIOD_SECS = 86_400`)
 during which **only the provider** can settle. Once it elapses, the consumer may
 call `revoke_expired_lease` and reclaim the entire deposit.
 
-```
+```text
 expires_at ────────────────────┬─────────────────────────────┬──────────────▶ time
                                │                             │
                         expiry reached              expires_at + 24h
@@ -106,18 +137,20 @@ consumer's exit bounded at 24 hours.
 
 Every transition publishes a typed Soroban event. Event names are the first
 topic, followed by the id fields marked `#[topic]`; the payload is a map of the
-remaining fields.
+remaining fields. Each payload also carries `schema_version`, so a stream that
+spans a contract upgrade stays decodable (see
+[Integration → Event schema version](integration.md#event-schema-version)).
 
 | Event | Topics | Data |
 | --- | --- | --- |
-| `registry_initialized` | — | `admin` |
-| `escrow_token_set` | — | `admin`, `token` |
-| `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
-| `service_status_changed` | `service_id` | `provider`, `is_active` |
-| `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
-| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
-| `lease_revoked` | `lease_id` | `consumer`, `refund` |
-| `contract_upgraded` | — | `admin`, `new_wasm_hash` |
+| `registry_initialized` | — | `schema_version`, `admin` |
+| `escrow_token_set` | — | `schema_version`, `admin`, `token` |
+| `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
+| `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
+| `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
+| `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
 
 Events are the indexing contract between on-chain state and off-chain systems: a
 provider can settle from a projection built by subscribing to `lease_created`,
@@ -134,7 +167,7 @@ per call), and a consumer buys 500 calls for 1 hour.
 
 **1. `create_lease`**
 
-```
+```text
 required_deposit = rate_per_call × requested_calls
                  = 1_000_000 × 500
                  = 500_000_000        (50 XLM)
@@ -145,7 +178,7 @@ The registry transfers `500_000_000` from the consumer into escrow and sets
 
 **2a. `settle_lease` after 1 hour with 320 calls consumed**
 
-```
+```text
 payout = 1_000_000 × 320 = 320_000_000   (32 XLM to the provider)
 refund = 500_000_000 − 320_000_000
        = 180_000_000                     (18 XLM back to the consumer)
@@ -153,7 +186,7 @@ refund = 500_000_000 − 320_000_000
 
 **2b. Provider goes dark; consumer calls `revoke_expired_lease` after 24h**
 
-```
+```text
 refund = locked_deposit = 500_000_000    (50 XLM, the full deposit)
 ```
 
@@ -161,7 +194,7 @@ refund = locked_deposit = 500_000_000    (50 XLM, the full deposit)
 
 `settle_lease` is immediately allowed (`verified_calls == allocated_calls`):
 
-```
+```text
 payout = 1_000_000 × 500 = 500_000_000   (50 XLM)
 refund = 0
 ```
@@ -200,16 +233,23 @@ These must hold for every reachable state. They are asserted in tests.
 | --- | --- | --- |
 | `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
-| `Service(u64)` | persistent | TTL extended on save and on read |
-| `Lease(u64)` | persistent | TTL extended on save and on read to cover term + grace |
+| `Service(u64)` | persistent | TTL extended on save and by `bump_service` |
+| `Lease(u64)` | persistent | TTL extended on save and by `bump_lease`, never by a read |
 
 `LEDGER_BUMP_THRESHOLD = 17_280` ledgers (~1 day at 5s ledgers) and
 `LEDGER_BUMP_EXTEND = 518_400` ledgers (~30 days). For leases, `save_lease` and
-`get_lease` extend to `(expires_at − now + 24h) / 5s + LEDGER_BUMP_THRESHOLD`
+`bump_lease` extend to `(expires_at − now + 24h) / 5s + LEDGER_BUMP_THRESHOLD`
 ledgers, so the escrow stays claimable for the whole lease, the provider's grace
 window and a one-day read buffer — without paying rent for unused storage time.
-The host clamps persistent TTL to its network minimum (120,960 ledgers ≈ 7 days
-on Testnet), so very short leases pay that floor rather than a month.
+Once a lease is past its term and grace window that ask settles at about two
+days, so keeping a dead lease alive costs rent per bump rather than per month.
+
+Rent scales with that ask: at the ledger where an extension is due, `bump_lease`
+estimates 48,684 stroops of persistent rent for a 30-day-term lease against zero
+for `get_lease`, which is why reads do not extend. `MAX_ENTRY_TTL_LEDGERS`
+(1,555,200 ledgers ≈ 90 days) caps any single extension, and the cap is also
+taken against the network's live `maxEntryTtl`, so an entry's horizon is never
+derived from stored `expires_at` alone.
 
 ## Read next
 

@@ -34,6 +34,12 @@ stellar contract invoke \
 native asset, so `1000000` = `0.1 XLM` per call). The command prints the new
 `service_id` — record it.
 
+`register_service` accepts any positive rate, but `MAX_LEASE_DEPOSIT` caps the
+product: at your rate, the largest lease a consumer can open is
+`MAX_LEASE_DEPOSIT ÷ rate_per_call` calls. A rate of `1000000` leaves room for
+1,000,000 calls; a rate of `100000000` caps them at 10,000. Price the whole
+allotment your typical customer wants before you pick one.
+
 The registration emits `service_registered { service_id, provider, rate_per_call,
 endpoint_hash }`, so your own indexer can pick it up without a separate query.
 

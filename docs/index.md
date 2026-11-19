@@ -25,6 +25,7 @@ the Stellar ledger holds the truth about every lease.
 | buy metered access to an API | [Consumer guide](consumer-guide.md) |
 | build on, test or upgrade the contract | [Developer guide](developer-guide.md) |
 | deploy with the Stellar CLI | [Deployment](deployment.md) |
+| fix a call that failed | [Troubleshooting](troubleshooting.md) |
 | understand the trust assumptions | [Security model](security.md) |
 
 ## The Stellar loop

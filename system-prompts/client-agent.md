@@ -35,7 +35,9 @@ The ABI is **not** what you may remember:
   expires_at, locked_deposit, settled }`. There is **no** `active` flag and
   **no** `calls_limit` / `calls_used`; use `settled`, `allocated_calls`,
   `used_calls`.
-- Error codes 1–16 are stable; `16 = DurationTooLong`.
+- Error codes 1–17 are stable; `16 = DurationTooLong`, `17 = DepositTooLarge`.
+  `create_lease` also rejects a `rate_per_call × requested_calls` product above
+  `MAX_LEASE_DEPOSIT` (1,000,000,000,000 base units).
 - Storage key for a lease is `Vec[Symbol("Lease"), u64(id)]`
   (`#[contracttype]` enums encode as `SCV_VEC` with the variant name as the first
   `SCV_SYMBOL` element). Services use `Symbol("Service")`. Prefer `get_lease`

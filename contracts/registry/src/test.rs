@@ -1,17 +1,19 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Events as _, Ledger as _},
-    token, Address, BytesN, Env, Event, Vec,
+    testutils::{storage::Instance as _, Address as _, Events as _, Ledger as _},
+    token, xdr, Address, BytesN, Env, Event, IntoVal, Map, Symbol, TryFromVal, Val, Vec,
 };
 
 use keylease_mock_token::{MockToken, MockTokenClient};
 
 use crate::events::{
-    EmergencyPaused, EmergencyUnpaused, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
-    ServiceRegistered, ServiceStatusChanged,
+    EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled, ServiceRegistered,
+    ServiceStatusChanged, EVENT_SCHEMA_VERSION,
 };
+use crate::storage::{self, LEDGER_BUMP_EXTEND, LEDGER_BUMP_THRESHOLD, MAX_ENTRY_TTL_LEDGERS};
 use crate::{
-    Error, KeyLeaseRegistry, KeyLeaseRegistryClient, LeaseStatus, MAX_LEASE_DURATION_SECS,
+    Error, KeyLeaseRegistry, KeyLeaseRegistryClient, Lease, LeaseStatus, MAX_LEASE_DEPOSIT,
+    MAX_LEASE_DURATION_SECS,
 };
 
 /// Per-call rate used across the tests.
@@ -126,6 +128,65 @@ fn test_set_token_is_admin_only() {
 // ---------------------------------------------------------------------------
 // Service registration
 // ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_token_first_time_and_change_are_recorded() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let registry_id = env.register(KeyLeaseRegistry, ());
+    let registry = KeyLeaseRegistryClient::new(&env, &registry_id);
+    registry.init(&admin);
+
+    // First configuration: stored and announced. Assert the event before any
+    // other contract call, because `env.events()` reflects the last invocation.
+    let first = env.register(MockToken, ());
+    registry.set_token(&admin, &first);
+    assert_single_event(
+        &env,
+        &registry_id,
+        &EscrowTokenSet {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: admin.clone(),
+            token: first.clone(),
+        },
+    );
+    assert_eq!(registry.get_token(), first);
+
+    // A genuine migration to a different token is still recorded and announced.
+    let second = env.register(MockToken, ());
+    registry.set_token(&admin, &second);
+    assert_single_event(
+        &env,
+        &registry_id,
+        &EscrowTokenSet {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: admin.clone(),
+            token: second.clone(),
+        },
+    );
+    assert_eq!(registry.get_token(), second);
+}
+
+#[test]
+fn test_set_token_is_a_noop_when_unchanged() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    let registry_id = ctx.registry_id();
+    let ttl_before = env.as_contract(&registry_id, || env.storage().instance().get_ttl());
+
+    // `setup` already configured this exact token; repeating it must not write
+    // storage, bump the TTL, or publish a misleading `escrow_token_set` event.
+    ctx.registry.set_token(&ctx.admin, &ctx.token.address);
+
+    // Check the event first: another contract call would replace this buffer.
+    assert_eq!(env.events().all(), Vec::new(&env));
+    let ttl_after = env.as_contract(&registry_id, || env.storage().instance().get_ttl());
+    assert_eq!(ttl_after, ttl_before);
+    assert_eq!(ctx.registry.get_token(), ctx.token.address);
+}
 
 #[test]
 fn test_register_service_assigns_incrementing_ids() {
@@ -577,19 +638,23 @@ fn test_large_but_valid_deposit_is_accepted() {
     env.ledger().set_timestamp(1_000);
     let ctx = setup(&env);
 
-    // (2^62) * 2 fits comfortably in i128, so the lease must be accepted.
-    let rate: i128 = 1i128 << 62;
+    // This test used `(1i128 << 62) * 2`, which fits `i128` with room to spare.
+    // `MAX_LEASE_DEPOSIT` now sits far below that, so "large but valid" means
+    // "large and still inside the bound": one unit under the cap, which is the
+    // last amount the protocol accepts. The cap itself and `cap + 1` are covered
+    // by the `MAX_LEASE_DEPOSIT` tests below.
+    let rate: i128 = MAX_LEASE_DEPOSIT - 1;
     let service_id = ctx
         .registry
         .register_service(&ctx.provider, &rate, &endpoint_hash(&env));
 
-    // Fund the consumer for the full deposit (rate * 2).
-    ctx.token.mint(&ctx.consumer, &(rate * 2));
+    // Fund the consumer for the full deposit (rate * 1).
+    ctx.token.mint(&ctx.consumer, &rate);
     let lease_id = ctx
         .registry
-        .create_lease(&ctx.consumer, &service_id, &2, &3_600);
+        .create_lease(&ctx.consumer, &service_id, &1, &3_600);
 
-    assert_eq!(ctx.registry.get_lease(&lease_id).locked_deposit, rate * 2);
+    assert_eq!(ctx.registry.get_lease(&lease_id).locked_deposit, rate);
 }
 
 #[test]
@@ -669,6 +734,7 @@ fn test_set_token_emits_event() {
         &env,
         &ctx.registry_id(),
         &EscrowTokenSet {
+            schema_version: EVENT_SCHEMA_VERSION,
             admin: ctx.admin.clone(),
             token: ctx.token.address.clone(),
         },
@@ -686,6 +752,7 @@ fn test_service_registration_emits_event() {
         &env,
         &ctx.registry_id(),
         &ServiceRegistered {
+            schema_version: EVENT_SCHEMA_VERSION,
             service_id,
             provider: ctx.provider.clone(),
             rate_per_call: RATE,
@@ -707,6 +774,7 @@ fn test_service_status_change_emits_event() {
         &env,
         &ctx.registry_id(),
         &ServiceStatusChanged {
+            schema_version: EVENT_SCHEMA_VERSION,
             service_id,
             provider: ctx.provider.clone(),
             is_active: false,
@@ -729,6 +797,7 @@ fn test_lease_lifecycle_emits_events() {
         &env,
         &ctx.registry_id(),
         &LeaseCreated {
+            schema_version: EVENT_SCHEMA_VERSION,
             lease_id,
             service_id,
             consumer: ctx.consumer.clone(),
@@ -745,6 +814,7 @@ fn test_lease_lifecycle_emits_events() {
         &env,
         &ctx.registry_id(),
         &LeaseSettled {
+            schema_version: EVENT_SCHEMA_VERSION,
             lease_id,
             provider: ctx.provider.clone(),
             verified_calls: 6,
@@ -771,6 +841,7 @@ fn test_revoke_emits_event() {
         &env,
         &ctx.registry_id(),
         &LeaseRevoked {
+            schema_version: EVENT_SCHEMA_VERSION,
             lease_id,
             consumer: ctx.consumer.clone(),
             refund: RATE * 10,
@@ -1061,6 +1132,99 @@ fn test_max_duration_is_accepted() {
 }
 
 // ---------------------------------------------------------------------------
+// Maximum deposit bound (MAX_LEASE_DEPOSIT)
+// ---------------------------------------------------------------------------
+
+/// Register a service at an explicit rate and return its id. The deposit bound
+/// lives in the `rate × requested_calls` product, so these tests need rates far
+/// outside the `RATE` the rest of the suite uses.
+fn register_service_at(env: &Env, ctx: &Ctx, rate: i128) -> u64 {
+    ctx.registry
+        .register_service(&ctx.provider, &rate, &endpoint_hash(env))
+}
+
+#[test]
+fn test_deposit_exactly_at_max_is_accepted() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_service_at(&env, &ctx, MAX_LEASE_DEPOSIT);
+    ctx.token.mint(&ctx.consumer, &MAX_LEASE_DEPOSIT);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &1, &3_600);
+
+    assert_eq!(
+        ctx.registry.get_lease(&lease_id).locked_deposit,
+        MAX_LEASE_DEPOSIT
+    );
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+}
+
+#[test]
+fn test_deposit_one_above_max_is_rejected() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_service_at(&env, &ctx, MAX_LEASE_DEPOSIT + 1);
+    // Fund the lease the bound is meant to stop: the consumer could otherwise
+    // afford it, and a passing assertion would only be proving poverty.
+    ctx.token.mint(&ctx.consumer, &(MAX_LEASE_DEPOSIT + 1));
+    let funded = ctx.token.balance(&ctx.consumer);
+    let leases_before = ctx.registry.lease_count();
+
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &1, &3_600),
+        Err(Ok(Error::DepositTooLarge))
+    );
+    assert_eq!(ctx.token.balance(&ctx.consumer), funded);
+    assert_eq!(
+        ctx.registry.lease_count(),
+        leases_before,
+        "the bound must reject before the lease id is allocated"
+    );
+}
+
+#[test]
+fn test_deposit_bound_applies_to_the_product_not_the_rate() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    // Every input is well under the bound; only their product crosses it, which
+    // is the case a rate-only check would let through.
+    let service_id = register_service_at(&env, &ctx, 1_000_000);
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &1_000_001, &3_600),
+        Err(Ok(Error::DepositTooLarge))
+    );
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+}
+
+#[test]
+fn test_deposit_bound_rejects_before_the_overflow_path() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_service_at(&env, &ctx, i128::MAX / 2);
+    // `2 × (i128::MAX / 2)` fits in `i128`, so this is not an arithmetic
+    // failure — it is the bound doing its job, and the two errors stay
+    // distinguishable for clients.
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &2, &3_600),
+        Err(Ok(Error::DepositTooLarge))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &3, &3_600),
+        Err(Ok(Error::Overflow))
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Stellar Asset Contract (SAC) integration
 // ---------------------------------------------------------------------------
 
@@ -1200,4 +1364,455 @@ fn test_reentrant_token_cannot_settle_a_lease_twice() {
         "re-entrant settle_lease should have been rejected"
     );
     assert!(registry.get_lease(&lease_id).settled);
+}
+
+// ---------------------------------------------------------------------------
+// Event schema versioning
+// ---------------------------------------------------------------------------
+
+/// The `schema_version` an indexer actually sees: decoded out of the event's
+/// XDR payload map rather than from the Rust struct that produced it.
+fn wire_schema_version(env: &Env, event: &xdr::ContractEvent) -> Option<u32> {
+    let xdr::ContractEventBody::V0(body) = &event.body;
+    let data = Val::try_from_val(env, &body.data).ok()?;
+    let payload = Map::<Symbol, Val>::try_from_val(env, &data).ok()?;
+    let raw = payload.get(Symbol::new(env, "schema_version"))?;
+    u32::try_from_val(env, &raw).ok()
+}
+
+/// Assert every event the registry published in the last invocation carries the
+/// current schema version in its payload. Panics when the registry published
+/// nothing, so this can never pass by accident.
+///
+/// The expected value is a literal, not `EVENT_SCHEMA_VERSION`: a test that read
+/// the constant back would pass even if the constant were raised on its own,
+/// which is exactly the drift this has to catch. `contractmeta!` takes no path
+/// expression, so the metadata literal in `lib.rs` is the third copy of this
+/// number and has to move with it.
+fn assert_events_are_versioned(env: &Env, registry: &Address) {
+    let all = env.events().all();
+    let mut published = 0u32;
+    for event in all.filter_by_contract(registry).events() {
+        assert_eq!(
+            wire_schema_version(env, event),
+            Some(1),
+            "registry event without the published payload version: {:?}",
+            event.body
+        );
+        published += 1;
+    }
+    assert!(published > 0, "expected the registry to publish an event");
+}
+
+#[test]
+fn test_init_event_is_versioned_on_the_wire() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let registry_id = env.register(KeyLeaseRegistry, ());
+
+    KeyLeaseRegistryClient::new(&env, &registry_id).init(&admin);
+
+    assert_events_are_versioned(&env, &registry_id);
+}
+
+#[test]
+fn test_service_and_lease_events_are_versioned() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let registry_id = ctx.registry_id();
+
+    // `set_token` is repeatable, so EscrowTokenSet is reachable without a
+    // second registry deployment.
+    let placeholder = Address::generate(&env);
+    ctx.registry.set_token(&ctx.admin, &placeholder);
+    assert_events_are_versioned(&env, &registry_id);
+    ctx.registry.set_token(&ctx.admin, &ctx.token.address);
+
+    let service_id = register_default_service(&env, &ctx);
+    assert_events_are_versioned(&env, &registry_id);
+
+    ctx.registry
+        .set_service_active(&ctx.provider, &service_id, &false);
+    assert_events_are_versioned(&env, &registry_id);
+    ctx.registry
+        .set_service_active(&ctx.provider, &service_id, &true);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    assert_events_are_versioned(&env, &registry_id);
+
+    env.ledger().set_timestamp(3_601);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &4);
+    assert_events_are_versioned(&env, &registry_id);
+}
+
+#[test]
+fn test_revoke_event_is_versioned() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    env.ledger().set_timestamp(3_601 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    assert_events_are_versioned(&env, &ctx.registry_id());
+}
+
+#[test]
+fn test_schema_version_is_payload_only_topics_stay_put() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    // Topics are positional: an indexer reads `lease_created` at index 0 and the
+    // `lease_id` at index 1. Versioning had to go in the payload map, where a
+    // new key is additive, so pin the topic layout against a future "just add a
+    // topic" change.
+    let all = env.events().all();
+    let events = all.filter_by_contract(&ctx.registry_id());
+    let xdr::ContractEventBody::V0(body) = &events.events()[0].body;
+    assert_eq!(body.topics.len(), 2);
+    let name: Val = Symbol::new(&env, "lease_created").into_val(&env);
+    let id: Val = lease_id.into_val(&env);
+    assert_eq!(
+        body.topics.first(),
+        Some(&xdr::ScVal::try_from_val(&env, &name).unwrap())
+    );
+    assert_eq!(
+        body.topics.get(1),
+        Some(&xdr::ScVal::try_from_val(&env, &id).unwrap())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TTL maintenance: pure reads and explicit bumps
+// ---------------------------------------------------------------------------
+
+/// Advance the ledger to the first moment an entry created `horizon` ledgers ago
+/// is due for an extension, i.e. one ledger inside the bump threshold.
+///
+/// Every "reads must not bump" assertion has to be taken here: at any earlier
+/// point there is nothing to bump, and the assertion would hold vacuously.
+fn advance_until_bump_is_due(env: &Env, horizon: u32) {
+    let seq = env.ledger().sequence();
+    env.ledger()
+        .set_sequence_number(seq + horizon - LEDGER_BUMP_THRESHOLD + 1);
+}
+
+/// Ledger effects of the invocation that just ran, as
+/// `(persistent rent bumps, ledger writes, rent fee in stroops)`.
+fn last_invocation(env: &Env) -> (u32, u32, i64) {
+    let resources = env.cost_estimate().resources();
+    let fee = env.cost_estimate().fee();
+    (
+        resources.persistent_entry_rent_bumps,
+        resources.write_entries,
+        fee.persistent_entry_rent,
+    )
+}
+
+#[test]
+fn test_lease_reads_never_extend_ttl() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    // One lease per view, each read at the exact moment its own entry is due for
+    // an extension. `lease_ttl_extend` is the policy that sized the entry, so
+    // recomputing it here is what tells us when the bump would have fired.
+    let views: [&str; 4] = [
+        "get_lease",
+        "lease_status",
+        "remaining_calls",
+        "locked_balance",
+    ];
+    for view in views {
+        let lease_id = ctx
+            .registry
+            .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+        let horizon = storage::lease_ttl_extend(&env, &ctx.registry.get_lease(&lease_id));
+        advance_until_bump_is_due(&env, horizon);
+
+        match view {
+            "get_lease" => {
+                ctx.registry.get_lease(&lease_id);
+            }
+            "lease_status" => {
+                ctx.registry.lease_status(&lease_id);
+            }
+            "remaining_calls" => {
+                ctx.registry.remaining_calls(&lease_id);
+            }
+            _ => {
+                ctx.registry.locked_balance(&lease_id);
+            }
+        }
+
+        let (bumps, writes, rent) = last_invocation(&env);
+        assert_eq!(bumps, 0, "{view} extended a storage TTL");
+        assert_eq!(writes, 0, "{view} wrote the ledger");
+        assert_eq!(rent, 0, "{view} charged the caller rent");
+    }
+}
+
+#[test]
+fn test_service_read_never_extends_and_bump_service_does() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    advance_until_bump_is_due(&env, LEDGER_BUMP_EXTEND);
+
+    ctx.registry.get_service(&service_id);
+    let (bumps, writes, rent) = last_invocation(&env);
+    assert_eq!(bumps, 0, "get_service extended a storage TTL");
+    assert_eq!(writes, 0, "get_service wrote the ledger");
+    assert_eq!(rent, 0, "get_service charged the caller rent");
+
+    ctx.registry.bump_service(&service_id);
+    let (bumps, _, _) = last_invocation(&env);
+    assert_eq!(bumps, 1, "bump_service must pay for the extension");
+}
+
+#[test]
+fn test_bump_service_rejects_an_unknown_service() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    // `extend_ttl` on a key that does not exist is a silent no-op, so the
+    // caller would pay for a bump that keeps nothing alive.
+    assert_eq!(
+        ctx.registry.try_bump_service(&404),
+        Err(Ok(Error::ServiceNotFound))
+    );
+}
+
+#[test]
+fn test_bump_lease_is_where_the_rent_lives() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    let horizon = storage::lease_ttl_extend(&env, &ctx.registry.get_lease(&lease_id));
+    advance_until_bump_is_due(&env, horizon);
+
+    ctx.registry.get_lease(&lease_id);
+    let read = env.cost_estimate().fee();
+
+    ctx.registry.bump_lease(&lease_id);
+    let resources = env.cost_estimate().resources();
+    let bump = env.cost_estimate().fee();
+
+    // Precondition: an extension really was due at this ledger, otherwise the
+    // comparison below compares two no-ops.
+    assert_eq!(resources.persistent_entry_rent_bumps, 1);
+    assert_eq!(read.persistent_entry_rent, 0);
+    assert!(bump.persistent_entry_rent > 0);
+    // Measured on this policy: the pure read is 113 stroops of instructions and
+    // the bump is 48,798, of which 48,684 is the persistent rent for the horizon
+    // it bought. The ratio is a floor, not a target: the rent half grows with the
+    // lease term, so a tight bound here would only register a regression.
+    assert!(
+        bump.total > read.total * 50,
+        "expected the bumping call to dominate a pure read, read={} bump={}",
+        read.total,
+        bump.total
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Explicit lease bumping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_bump_lease_needs_no_authorization() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry.bump_lease(&lease_id);
+    assert!(
+        env.auths().is_empty(),
+        "bump_lease demanded authorization: {:?}",
+        env.auths()
+    );
+
+    // Control: settlement is authorized, so an empty list above is not the
+    // host failing to record anything.
+    env.ledger().set_timestamp(3_601);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &10);
+    assert!(!env.auths().is_empty());
+}
+
+#[test]
+fn test_bump_lease_rejects_an_unknown_lease() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    assert_eq!(
+        ctx.registry.try_bump_lease(&404),
+        Err(Ok(Error::LeaseNotFound))
+    );
+}
+
+#[test]
+fn test_bump_lease_rejects_a_settled_lease() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    env.ledger().set_timestamp(3_601);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &10);
+
+    // Its funds have moved; keeping the entry alive is pure state growth.
+    assert_eq!(
+        ctx.registry.try_bump_lease(&lease_id),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+}
+
+#[test]
+fn test_bump_lease_cannot_shorten_a_live_lease() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    // Twenty days rather than the maximum, so the entry's horizon stays inside
+    // the instance entry's own thirty-day horizon: past that the host starts
+    // reviving the instance too and the bump count stops meaning one thing.
+    const TERM: u64 = 20 * 24 * 60 * 60;
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &TERM);
+
+    let lease = ctx.registry.get_lease(&lease_id);
+    let horizon = storage::lease_ttl_extend(&env, &lease);
+    assert_eq!(horizon, 380_160);
+
+    // Age the lease far past its grace window. The policy now asks for about two
+    // days, which is much less than the horizon the entry already holds.
+    env.ledger()
+        .set_timestamp(lease.expires_at + 10 * 365 * 24 * 60 * 60);
+    ctx.registry.bump_lease(&lease_id);
+    let (bumps, writes, _) = last_invocation(&env);
+    assert_eq!(bumps, 0);
+    assert_eq!(writes, 0, "a bump that lowered the TTL would rewrite it");
+
+    // And the long horizon survived the short ask: just inside it, an extension
+    // is still due on an entry that is alive rather than resurrected. Had the
+    // bump shortened the horizon, the entry would be past its lifetime here and
+    // the host would pay to bring it back.
+    advance_until_bump_is_due(&env, horizon);
+    ctx.registry.bump_lease(&lease_id);
+    let (bumps, writes, _) = last_invocation(&env);
+    assert_eq!(bumps, 1, "the entry should still be live and due to extend");
+    assert_eq!(writes, 0, "the entry should not have needed restoring");
+}
+
+// ---------------------------------------------------------------------------
+// Lease TTL clamp
+// ---------------------------------------------------------------------------
+
+/// A lease whose only TTL-relevant field is `expires_at`.
+fn lease_expiring_at(env: &Env, expires_at: u64) -> Lease {
+    Lease {
+        lease_id: 1,
+        service_id: 1,
+        consumer: Address::generate(env),
+        allocated_calls: 1,
+        used_calls: 0,
+        expires_at,
+        locked_deposit: RATE,
+        settled: false,
+    }
+}
+
+#[test]
+fn test_ttl_ceiling_is_named_and_below_the_network_limit() {
+    let env = Env::default();
+
+    // ~90 days at five-second ledgers.
+    assert_eq!(MAX_ENTRY_TTL_LEDGERS, 1_555_200);
+    assert!(
+        MAX_ENTRY_TTL_LEDGERS < env.storage().max_ttl(),
+        "the contract ceiling must sit under the network's maxEntryTtl"
+    );
+    // That the ceiling also sits above the longest lease any caller can create
+    // is pinned at runtime by `test_longest_lease_is_below_the_clamp`.
+}
+
+#[test]
+fn test_longest_lease_is_below_the_clamp() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+
+    let lease = lease_expiring_at(&env, 1_000 + MAX_LEASE_DURATION_SECS);
+    let ask = storage::lease_ttl_extend(&env, &lease);
+
+    // 30-day term + 24h grace + a one-day buffer, at five-second ledgers.
+    assert_eq!(ask, 552_960);
+    assert!(
+        ask < MAX_ENTRY_TTL_LEDGERS,
+        "the clamp must never truncate a lease the contract itself issued"
+    );
+}
+
+#[test]
+fn test_lease_ttl_ask_floors_once_the_grace_window_is_past() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+
+    // A timestamp far past expiry: the remaining term saturates at zero, so the
+    // ask is the grace window plus the buffer, and never goes negative.
+    let lease = lease_expiring_at(&env, 1_000);
+    assert_eq!(storage::lease_ttl_extend(&env, &lease), 34_560);
+
+    let long_past = lease_expiring_at(&env, 0);
+    assert_eq!(
+        storage::lease_ttl_extend(&env, &long_past),
+        storage::lease_ttl_extend(&env, &lease)
+    );
+}
+
+#[test]
+fn test_lease_ttl_ask_is_clamped_for_an_unreachable_horizon() {
+    let env = Env::default();
+
+    let lease = lease_expiring_at(&env, u64::MAX);
+    assert_eq!(
+        storage::lease_ttl_extend(&env, &lease),
+        MAX_ENTRY_TTL_LEDGERS
+    );
+}
+
+#[test]
+fn test_lease_ttl_ask_follows_a_lowered_network_max_entry_ttl() {
+    let env = Env::default();
+    env.ledger().set_max_entry_ttl(100_000);
+
+    let lease = lease_expiring_at(&env, u64::MAX);
+    let ask = storage::lease_ttl_extend(&env, &lease);
+
+    assert!(
+        ask < MAX_ENTRY_TTL_LEDGERS,
+        "the contract ceiling must yield to a lower network cap"
+    );
+    assert_eq!(ask, env.storage().max_ttl());
 }

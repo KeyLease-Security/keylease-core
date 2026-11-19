@@ -39,11 +39,16 @@ take more than it is owed, and it cannot prevent the consumer's refund.
    `MAX_LEASE_DURATION_SECS` (30 days) revert with `DurationTooLong`, and the
    persistent entry is extended for the term plus the grace window, so escrow
    cannot be evicted while it is claimable.
-7. **The admin cannot touch user funds.** It can only call `set_token` and
+7. **A single lease cannot escrow an unbounded amount.** A deposit that fits
+   `i128` but exceeds `MAX_LEASE_DEPOSIT` reverts with `DepositTooLarge`, before
+   the lease id is allocated and before the token is called. Checked arithmetic
+   alone cannot catch this: a product can be perfectly representable and still
+   be three orders of magnitude more than the consumer meant to lock.
+8. **The admin cannot touch user funds.** It can only call `set_token` and
    `upgrade`.
-8. **Every mutation is authenticated.** No state-changing entry point trusts its
+9. **Every mutation is authenticated.** No state-changing entry point trusts its
    caller without `require_auth()`.
-9. **Every mutation is observable.** Each transition emits a typed Soroban event
+10. **Every mutation is observable.** Each transition emits a typed Soroban event
    with no secret material in it.
 
 ## Invariants
@@ -70,6 +75,8 @@ violation.
 | Provider strands funds by never settling | 24h grace, then full consumer refund |
 | Consumer races the provider at expiry | 24h grace window reserved for the provider |
 | Rate overflow creates a cheap lease | `checked_mul` → `Overflow` |
+| Typo locks a consumer into an enormous deposit | `MAX_LEASE_DEPOSIT` → `DepositTooLarge` |
+| Escrow token has more decimals than assumed | `MAX_LEASE_DEPOSIT` is in base units, so the ceiling tightens as the scale grows |
 | Duration overflow wraps expiry | `checked_add` → `Overflow` |
 | Long lease is evicted from storage | `DurationTooLong` + duration-aware TTL extension |
 | Fake "KeyLease" contract id | Only ids in [Deployments](deployments.md) are ours |

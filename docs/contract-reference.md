@@ -8,11 +8,16 @@ as authoritative.
 - **Wasm:** `target/wasm32v1-none/release/keylease_registry.wasm`
 - **Network target:** Stellar (`wasm32v1-none`), `soroban-sdk 26`
 - **Constants:** `SETTLE_GRACE_PERIOD_SECS = 86_400` (24 hours),
-  `MAX_LEASE_DURATION_SECS = 2_592_000` (30 days)
-- **Storage TTL:** `LEDGER_BUMP_THRESHOLD = 17_280`, `LEDGER_BUMP_EXTEND = 518_400`;
-  leases extend to term + 24h grace + a 1-day buffer
+  `MAX_LEASE_DURATION_SECS = 2_592_000` (30 days),
+  `MAX_LEASE_DEPOSIT = 1_000_000_000_000` base units (100,000 of a
+  seven-decimal token such as XLM)
+- **Storage TTL:** `LEDGER_BUMP_THRESHOLD = 17_280`, `LEDGER_BUMP_EXTEND = 518_400`,
+  `MAX_ENTRY_TTL_LEDGERS = 1_555_200` (90 days); leases extend to term + 24h
+  grace + a 1-day buffer, clamped to `MAX_ENTRY_TTL_LEDGERS` and to the network's
+  live `maxEntryTtl`. Only writes and the two `bump_*` entry points extend a TTL;
+  reads never do.
 - **On-chain metadata:** `name = KeyLeaseRegistry`, `version`,
-  `description`, `repository`, embedded with `contractmeta!`
+  `eventSchemaVersion`, `description`, `repository`, embedded with `contractmeta!`
 
 Every state-changing entry point calls `require_auth()` on the actor it
 represents. Errors are returned as `Result<_, Error>`; codes are stable and never
@@ -51,10 +56,16 @@ Point the registry at the SEP-41 token used for every deposit and payout.
 - **Caller / auth:** `admin`, and `admin` must match the stored admin.
 - **Trigger:** once at setup; again only to migrate the escrow asset.
 - **State:** sets `Token`; extends instance TTL.
-- **Events:** `escrow_token_set { admin, token }`.
+- **Events:** `escrow_token_set { admin, token }` — only when the token actually
+  changes.
 - **Errors:** `NotInitialized`, `Unauthorized`.
 - **Notes:** the native Stellar Asset Contract (SAC) is the usual value. Changing
   the token while leases are unsettled is a migration hazard — settle first.
+- **Idempotent:** calling `set_token` with the token that is already configured
+  returns `Ok(())` and does nothing — no storage write, no TTL extension and no
+  event — so a repeated call cannot be mistaken for a migration. Auth and the
+  stored-admin check still run first, so an unauthorized caller receives
+  `Unauthorized` either way.
 
 ### `upgrade`
 
@@ -144,7 +155,8 @@ Lock a deposit and mint a time-bound lease.
 - **Caller / auth:** `consumer` must authorize.
 - **Trigger:** a developer purchases metered access.
 - **Preconditions:** `requested_calls > 0`, `0 < duration_secs ≤
-  MAX_LEASE_DURATION_SECS`, the service exists and `is_active`, and `Token` is
+  MAX_LEASE_DURATION_SECS`, `rate_per_call × requested_calls ≤
+  MAX_LEASE_DEPOSIT`, the service exists and `is_active`, and `Token` is
   set.
 - **Effects:** `transfer(consumer → contract, rate_per_call × requested_calls)`.
 - **Returns:** the new `lease_id` (monotonic, starts at `1`).
@@ -152,7 +164,14 @@ Lock a deposit and mint a time-bound lease.
   duration_secs` and a TTL covering the term plus grace; increments `LeaseCount`.
 - **Events:** `lease_created { lease_id, service_id, consumer, allocated_calls, expires_at, locked_deposit }`.
 - **Errors:** `InvalidCalls`, `InvalidDuration`, `DurationTooLong`,
-  `ServiceNotFound`, `ServiceInactive`, `InvalidRate`, `TokenNotSet`, `Overflow`.
+  `ServiceNotFound`, `ServiceInactive`, `InvalidRate`, `TokenNotSet`, `Overflow`,
+  `DepositTooLarge`.
+
+The deposit is bounded twice, and the two rejections mean different things.
+`Overflow` says `rate_per_call × requested_calls` does not fit `i128`.
+`DepositTooLarge` says it fits and is still more than one lease may lock. The
+bound is checked after the multiplication and before the lease id is allocated
+or the token is called, so a rejected lease moves nothing and consumes no id.
 
 ### `settle_lease`
 
@@ -206,9 +225,115 @@ Reclaim the **full** deposit when the provider never settled.
 
 ---
 
+## Storage maintenance
+
+Reads no longer keep entries alive, so extending a lifetime is an explicit,
+metered call of its own. Both entry points are permissionless: the caller pays
+for the extension with their own transaction fee, and the horizon comes from the
+contract's policy rather than from the caller.
+
+### `bump_service`
+
+```rust
+pub fn bump_service(env: Env, service_id: u64) -> Result<(), Error>
+```
+
+Extend a service entry to `LEDGER_BUMP_EXTEND` ledgers.
+
+- **Caller / auth:** anyone.
+- **Errors:** `ServiceNotFound` — a miss is an error, not a silent no-op, so a
+  caller never pays for an extension that kept nothing alive.
+- **Notes:** `create_lease` extends the service it leases from, so an actively
+  used service does not need this. It exists for a published-but-idle service.
+
+### `bump_lease`
+
+```rust
+pub fn bump_lease(env: Env, lease_id: u64) -> Result<(), Error>
+```
+
+Extend a lease entry using the lease TTL policy (remaining term + 24h grace + a
+1-day buffer, clamped to `MAX_ENTRY_TTL_LEDGERS` and the network's
+`maxEntryTtl`).
+
+- **Caller / auth:** anyone.
+- **Errors:** `LeaseNotFound`, `LeaseAlreadySettled`.
+- **Notes:** the extension can only raise the entry's lifetime, never lower it,
+  and stops once the remaining term is exhausted: a long-expired lease is bumped
+  by about two days at a time, not by its original term. A settled lease is
+  rejected because its funds have already moved.
+
+---
+
+## `LeaseStatus` and the `settled` flag
+
+`LeaseStatus::of` (`contracts/registry/src/types.rs`) reads exactly two fields:
+
+```rust
+if lease.settled { LeaseStatus::Settled }
+else if now >= lease.expires_at { LeaseStatus::Expired }
+else { LeaseStatus::Active }
+```
+
+`settled` is the **escrow-release flag**, not the reason the funds left.
+`settle_lease` sets it after a provider payout, and `revoke_expired_lease` sets
+it after a full refund, so both terminal paths report `Settled` (discriminant
+`2`) and `lease_status` cannot tell them apart. The same collapse shows up in the
+error: `LeaseAlreadySettled` (`7`) means "already settled **or** revoked".
+
+### Telling the two paths apart
+
+`used_calls` is written by `settle_lease` only — `revoke_expired_lease` never
+touches it — so for most leases one read separates the paths:
+
+| Signal after `settled == true` | Meaning |
+| --- | --- |
+| `used_calls > 0` | `settle_lease` paid the provider for that many calls. |
+| `used_calls == 0` | **ambiguous**: a revoke, or a settle reported with `verified_calls = 0`. |
+| `lease_revoked` exists for this `lease_id` | the consumer reclaimed the deposit. |
+| `lease_settled` exists for this `lease_id` | the provider settled; read `payout`/`refund`. |
+
+The ambiguity is real and not an edge case: a provider that could not serve a
+lease at all settles it with `verified_calls = 0`, which refunds the whole
+deposit and leaves `used_calls` at `0` — a storage state identical to a
+revocation. Only the published event distinguishes the two, so anything that
+reports provider reliability or revenue **must** consume the event stream rather
+than poll `get_lease`: see
+[Topics, payloads and filters](integration.md#topics-payloads-and-filters).
+
+### Status by lifecycle event
+
+Worked terms: `rate_per_call = 1_000_000`, `allocated_calls = 500`,
+`duration_secs = 3600`, so `locked_deposit = 500_000_000`.
+
+| Lifecycle point | `settled` | `used_calls` | `lease_status` | `remaining_calls` | `locked_balance` |
+| --- | --- | --- | --- | --- | --- |
+| `create_lease` | `false` | `0` | `Active` | `500` | `500_000_000` |
+| 120 calls served, not yet expired | `false` | `0` | `Active` | `500` | `500_000_000` |
+| `settle_lease(320)` before expiry | *rejected* — `LeaseNotSettleable` | `0` | `Active` | `500` | `500_000_000` |
+| expiry reached, nobody acted | `false` | `0` | `Expired` | `0` | `500_000_000` |
+| `settle_lease(320)` inside the 24h grace | `true` | `320` | `Settled` | `0` | `0` |
+| `settle_lease(500)` (all calls used) | `true` | `500` | `Settled` | `0` | `0` |
+| `settle_lease(0)` inside the 24h grace | `true` | `0` | `Settled` | `0` | `0` |
+| `revoke_expired_lease` after the grace | `true` | `0` | `Settled` | `0` | `0` |
+
+Two things to read off that table:
+
+- `used_calls` and `remaining_calls` describe the **settled** allotment, not live
+  usage. Providers report call counts at settlement, so mid-term rows keep
+  `used_calls = 0`; per-request enforcement is the provider's own counter,
+  bounded on chain by `allocated_calls` (see
+  [the verification pipeline](integration.md#the-verification-pipeline)).
+- The last four rows are indistinguishable by `lease_status` alone. Distinguish
+  them by `used_calls`, then by the event, never by the status code.
+
+---
+
 ## Read-only views
 
-These require no authorization.
+These require no authorization, and none of them extends a TTL. An extension
+bills the caller for rent across the whole extended horizon, so a "view" that
+performed one could not be used to price a read.
 
 | View | Signature | Returns |
 | --- | --- | --- |
@@ -232,16 +357,23 @@ These require no authorization.
 Events are part of the ABI. Each event name is a `Symbol` topic, followed by the
 `#[topic]` fields; the payload is a map keyed by field name.
 
+Every payload carries `schema_version` (`EVENT_SCHEMA_VERSION`, currently `1`) as
+its first map key. Topics are frozen: a version is never added as a topic,
+because topics are positional and indexers filter on them.
+
 | Event | Topics | Payload fields |
 | --- | --- | --- |
-| `registry_initialized` | — | `admin` |
-| `escrow_token_set` | — | `admin`, `token` |
-| `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
-| `service_status_changed` | `service_id` | `provider`, `is_active` |
-| `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
-| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
-| `lease_revoked` | `lease_id` | `consumer`, `refund` |
-| `contract_upgraded` | — | `admin`, `new_wasm_hash` |
+| `registry_initialized` | — | `schema_version`, `admin` |
+| `escrow_token_set` | — | `schema_version`, `admin`, `token` |
+| `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
+| `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
+| `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
+| `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+
+See [integration.md](./integration.md#event-schema-version) for how to branch on
+the version.
 
 ```bash
 stellar events --id $REGISTRY --network testnet --start-ledger 123456
@@ -313,6 +445,7 @@ never reused.
 | 14 | `TokenNotSet` | escrow token not configured |
 | 15 | `Overflow` | checked arithmetic failed |
 | 16 | `DurationTooLong` | lease duration above `MAX_LEASE_DURATION_SECS` |
+| 17 | `DepositTooLarge` | deposit above `MAX_LEASE_DEPOSIT` |
 
 ## Invoking with the Stellar CLI
 

@@ -65,6 +65,12 @@ unused calls, those calls are not usable — `remaining_calls` drops to `0` at
 Under-buy with a generous duration, then renew, rather than over-buying with a
 short one.
 
+`rate_per_call × requested_calls` also has a ceiling: `MAX_LEASE_DEPOSIT`
+(1,000,000,000,000 base units, so 100,000 of a seven-decimal token). A lease
+above it reverts with `DepositTooLarge` before the token is called, so an
+over-typed call count cannot escrow the wrong amount even when your balance
+would cover it.
+
 > **Order of arguments matters.** `consumer` is the first argument. This is the
 > exact ABI; older documentation that shows `service` first is wrong.
 

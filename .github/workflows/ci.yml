@@ -63,6 +63,28 @@ jobs:
       - name: Build Soroban contracts
         run: cargo build --target wasm32v1-none --release --all
 
+  spellcheck:
+    name: Spell Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Docs, README and Rust comments, over every tracked file. The version is
+      # pinned to match the tool contributors run locally, and `_typos.toml` in
+      # the repository root holds the project dictionary, so a local `typos` run
+      # reports exactly what this job reports. Findings fail the job.
+      - uses: crate-ci/typos@v1.52.2
+
+  markdown:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Globs and rule settings come from `.markdownlint-cli2.jsonc`, the same
+      # file `markdownlint-cli2` reads in the repository root. Headings, links
+      # and list style are checked here; `mkdocs build --strict` (docs.yml)
+      # keeps checking navigation and anchors.
+      - uses: DavidAnson/markdownlint-cli2-action@v25
+
   deny:
     name: Dependency Policy
     runs-on: ubuntu-latest

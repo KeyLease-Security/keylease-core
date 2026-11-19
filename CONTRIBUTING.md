@@ -48,6 +48,39 @@ sudo freshclam                      # one-time ClamAV signature update
 a downloaded artifact, and see `--help` for the other flags. The advisory ignore
 policy lives in [`deny.toml`](./deny.toml) and [`audit.toml`](./audit.toml).
 
+## Text and documentation checks
+
+Three non-Rust checks run in CI, and each reads its configuration from this
+repository, so the local command below is the same check and fails the same way:
+
+| Check | Command | Config | CI job |
+| --- | --- | --- | --- |
+| Spell check | `typos` | [`_typos.toml`](./_typos.toml) | `Spell Check` |
+| Markdown lint | `npx markdownlint-cli2@0.24.0` | [`.markdownlint-cli2.jsonc`](./.markdownlint-cli2.jsonc) | `Markdown Lint` |
+| Nav, anchors, links | `mkdocs build --strict` | [`mkdocs.yml`](./mkdocs.yml) | `Docs → Build & deploy` |
+
+```bash
+cargo install typos-cli --locked            # one-time
+typos
+
+pip install -r requirements-docs.txt        # one-time
+mkdocs build --strict
+```
+
+`typos` with no arguments walks the tracked text files and excludes `Cargo.lock`
+(see `[files] extend-exclude`); add a new domain term to
+`[default.extend-words]` instead of weakening the check. `markdownlint-cli2`
+picks up the glob and rule tuning from the `.jsonc` file, so running it with no
+arguments lints exactly what CI lints. `mkdocs build --strict` promotes a broken
+nav entry or a missing in-page anchor to an error, which is why internal links
+must target real heading slugs.
+
+The Docs workflow runs on `push` to `main` and `workflow_dispatch` only, so a
+broken anchor will not fail your PR — run `mkdocs build --strict` locally before
+opening one. The checks that guard your branch are the CI jobs `Format`,
+`Clippy`, `Test`, `Build (wasm32v1-none)`, `Spell Check`, `Markdown Lint`,
+`Dependency Policy` and the required `Malware Scan`.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -137,7 +170,7 @@ A maintainer will approve the note before you begin coding.
 
 Use the imperative mood and explain the *why*:
 
-```
+```text
 Guard against double settlement in settle_lease
 
 The payout path could be re-entered before `settled` was persisted,
