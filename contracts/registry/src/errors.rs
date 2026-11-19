@@ -44,4 +44,7 @@ pub enum Error {
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.
     DepositTooLarge = 17,
+    /// A page size outside `1..=MAX_PAGE_SIZE`, so serving it would read an
+    /// unbounded number of ledger entries in one transaction.
+    InvalidLimit = 18,
 }

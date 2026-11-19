@@ -108,8 +108,10 @@ Publish a new leasable service.
   - `rate_per_call` — price per metered call in token stroops; must be `> 0`.
   - `endpoint_hash` — 32-byte commitment to the off-chain descriptor.
 - **Returns:** the new `service_id` (monotonic, starts at `1`).
-- **State:** writes `Service(service_id)`, increments `ServiceCount`, extends
-  instance TTL.
+- **State:** writes `Service(service_id)` and appends it to
+  `ProviderServices(provider)`, increments `ServiceCount`, extends instance TTL.
+  Both persistent entries are extended to the same clamped horizon, in the same
+  call.
 - **Events:** `service_registered { service_id, provider, rate_per_call, endpoint_hash }`.
 - **Errors:** `InvalidRate`, `Overflow`.
 
@@ -128,7 +130,10 @@ Pause or resume **new** leases for a service.
 
 - **Caller / auth:** `provider`, and it must own the service.
 - **Trigger:** maintenance, incident response, or retirement.
-- **State:** updates `Service(service_id).is_active`.
+- **State:** updates `Service(service_id).is_active`. Because this goes through
+  `save_service`, it also re-extends that provider's `ProviderServices` index
+  without appending to it — the only way to keep a catalogue discoverable without
+  registering anything new.
 - **Events:** `service_status_changed { service_id, provider, is_active }`.
 - **Errors:** `ServiceNotFound`, `Unauthorized`.
 - **Notes:** existing leases stay valid and settleable. Deactivation only blocks
@@ -343,7 +348,9 @@ performed one could not be used to price a read.
 | `service_count` | `(env) -> u64` | total services ever registered |
 | `lease_count` | `(env) -> u64` | total leases ever created |
 | `get_service` | `(env, service_id: u64) -> Result<Service, Error>` | the `Service`, else `ServiceNotFound` |
+| `services_for_provider` | `(env, provider: Address, after: u32, limit: u32) -> Result<ProviderServicePage, Error>` | one bounded page of the provider's service ids, else `InvalidLimit` |
 | `get_lease` | `(env, lease_id: u64) -> Result<Lease, Error>` | the `Lease`, else `LeaseNotFound` |
+| `quote_lease` | `(env, service_id: u64, requested_calls: u32, duration_secs: u64) -> Result<LeaseQuote, Error>` | the `locked_deposit` and `expires_at` `create_lease` would produce |
 | `lease_status` | `(env, lease_id: u64) -> Result<LeaseStatus, Error>` | derived status at current ledger time |
 | `remaining_calls` | `(env, lease_id: u64) -> Result<u32, Error>` | calls left; `0` once settled **or** expired |
 | `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; `0` once settled |
@@ -351,6 +358,26 @@ performed one could not be used to price a read.
 > `remaining_calls` returns `0` as soon as the lease expires, even if calls were
 > never consumed. A caller that wants the raw allotment should read
 > `get_lease().allocated_calls`.
+>
+> `quote_lease` repeats `create_lease`'s validation in the same order, so the
+> error it returns is the error `create_lease` would return for the same
+> arguments — the `test_quote_lease_reports_the_same_errors_as_create_lease` test
+> asserts that parity. It needs no authorization and moves no funds, but two
+> things are still not guaranteed: `expires_at` is derived from the current
+> ledger time, so it drifts by one ledger per close, and the registry never reads
+> the consumer's balance, so a quote you can read is not a quote you can afford.
+>
+> `services_for_provider` walks a per-provider index of service ids, oldest
+> first. `limit` must be in `1..=MAX_PAGE_SIZE` (`100`); each entry consumed
+> costs a ledger read, which is why an unbounded page is an error rather than a
+> slow call. Page by passing `next` back as `after` until `done` is `true`.
+> `next` counts index entries consumed, not ids returned, so a page can be short
+> without being final: an id whose `Service` record now names a different
+> provider is skipped, because `Service.provider` is the authority and the index
+> is derived state. A provider that has never registered gets an empty page with
+> `next == 0` and `done == true`, not an error. This is a pure read: it extends no
+> TTL at all, neither the listed `Service` records nor the provider's own index
+> entry — see [protocol.md](protocol.md#the-provider-index).
 
 ## Events
 
@@ -402,18 +429,34 @@ pub struct Lease {
 }
 
 pub enum LeaseStatus { Active = 0, Expired = 1, Settled = 2 }
+
+/// Returned by `quote_lease`; the two fields mirror the `Lease` they predict.
+pub struct LeaseQuote {
+    pub locked_deposit: i128,
+    pub expires_at: u64,
+}
+
+/// Returned by `services_for_provider`.
+pub struct ProviderServicePage {
+    pub service_ids: Vec<u64>,
+    /// Index entries consumed; pass back as `after`.
+    pub next: u32,
+    /// `true` once the index is exhausted.
+    pub done: bool,
+}
 ```
 
 ## Storage layout
 
 ```rust
 pub enum DataKey {
-    Admin,        // instance
-    Token,        // instance
-    ServiceCount, // instance
-    LeaseCount,   // instance
-    Service(u64), // persistent
-    Lease(u64),   // persistent
+    Admin,                     // instance
+    Token,                     // instance
+    ServiceCount,              // instance
+    LeaseCount,                // instance
+    Service(u64),              // persistent
+    Lease(u64),                // persistent
+    ProviderServices(Address), // persistent: service ids, oldest first
 }
 ```
 
@@ -446,6 +489,7 @@ never reused.
 | 15 | `Overflow` | checked arithmetic failed |
 | 16 | `DurationTooLong` | lease duration above `MAX_LEASE_DURATION_SECS` |
 | 17 | `DepositTooLarge` | deposit above `MAX_LEASE_DEPOSIT` |
+| 18 | `InvalidLimit` | page size outside `1..=MAX_PAGE_SIZE` |
 
 ## Invoking with the Stellar CLI
 
@@ -456,6 +500,21 @@ stellar contract invoke --id $REGISTRY --source-account provider --network testn
      --provider $PROVIDER \
      --rate_per_call 1000000 \
      --endpoint_hash 0707070707070707070707070707070707070707070707070707070707070707
+
+# list a provider's services, one page at a time (read-only)
+# pass `next` back as --after until the response reports done: true
+stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
+  -- services_for_provider \
+     --provider $PROVIDER \
+     --after 0 \
+     --limit 100
+
+# quote before you buy (read-only: no auth, no transfer)
+stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
+  -- quote_lease \
+     --service_id 1 \
+     --requested_calls 500 \
+     --duration_secs 3600
 
 # create a lease
 stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \

@@ -87,7 +87,17 @@ done <<< "$LABELS_OF"
 PROTECTION='{
   "required_status_checks": {
     "strict": true,
-    "contexts": ["Format", "Clippy", "Test", "Build (wasm32v1-none)", "Dependency Policy", "Malware Scan"]
+    "contexts": [
+      "Format",
+      "Shellcheck",
+      "Clippy",
+      "Test",
+      "Build (wasm32v1-none)",
+      "Spell Check",
+      "Markdown Lint",
+      "Dependency Policy",
+      "Malware Scan"
+    ]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": {
@@ -104,7 +114,9 @@ PROTECTION='{
 echo "==> Branch protection on $BRANCH"
 if [ "$DRY_RUN" = "1" ]; then
   echo "  [dry-run] PUT /repos/$REPO/branches/$BRANCH/protection"
-  echo "$PROTECTION" | sed 's/^/            /'
+  while IFS= read -r payload_line; do
+    printf '            %s\n' "$payload_line"
+  done <<< "$PROTECTION"
 elif printf '%s' "$PROTECTION" | gh api -X PUT \
        "repos/$REPO/branches/$BRANCH/protection" \
        -H "Accept: application/vnd.github+json" --input - >/dev/null 2>&1; then

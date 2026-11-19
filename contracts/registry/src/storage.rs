@@ -19,17 +19,23 @@
 //! | `settle_lease`, `revoke_expired_lease` | — | — | extend (save) |
 //! | [`crate::KeyLeaseRegistry::bump_service`] | — | extend | — |
 //! | [`crate::KeyLeaseRegistry::bump_lease`] | — | — | extend |
-//! | `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance` | — | — | — |
+//! | `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance`, `services_for_provider` | — | — | — |
 //!
 //! The last row is the read-only surface: it never extends anything, so a
 //! simulation of it costs instructions and no rent. A lease or service that is
 //! merely *read* for months has to be bumped explicitly, which is what the two
 //! `bump_*` entry points are for.
+//!
+//! `ProviderServices(address)`, the service-id index behind
+//! [`crate::KeyLeaseRegistry::services_for_provider`], follows the service rule
+//! rather than the lease one: [`save_service`] extends it beside the record it
+//! indexes, so any write to any of a provider's services keeps that provider's
+//! catalogue alive, and no read extends it.
 
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::Error;
-use crate::types::{Lease, Service};
+use crate::types::{Lease, ProviderServicePage, Service};
 use crate::SETTLE_GRACE_PERIOD_SECS;
 
 /// Expected Stellar ledger close time, used to translate lease durations into
@@ -94,6 +100,14 @@ pub enum DataKey {
     Service(u64),
     /// `Lease` by id (persistent storage).
     Lease(u64),
+    /// Service ids registered by a provider, oldest first (persistent storage).
+    ///
+    /// Derived state, appended to by [`save_service`]: `Service.provider` stays
+    /// the authority on who owns what, and the read path re-checks every id it
+    /// returns. An entry here can therefore only ever make a page shorter or
+    /// contain an id the provider no longer owns — never report a service that
+    /// belongs to someone else.
+    ProviderServices(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -162,10 +176,14 @@ pub fn lease_count(env: &Env) -> u64 {
 // Services
 // ---------------------------------------------------------------------------
 
-/// Persist a service and keep its entry alive for the standard horizon.
+/// Persist a service, keep its entry alive for the standard horizon, and maintain
+/// the per-provider index in the same step.
 ///
-/// Every write path (`register_service`, `set_service_active`) goes through
-/// here, so a service that is being maintained never needs an explicit bump.
+/// Every write path (`register_service`, `set_service_active`) goes through here,
+/// so a service that is being maintained never needs an explicit bump. This is
+/// also the only write path for a `Service`, so the index cannot be forgotten by a
+/// future entry point: when a service transfer rewrites the record, the id lands
+/// in the new owner's index on its own. See [`index_service`].
 pub fn save_service(env: &Env, service: &Service) {
     let key = DataKey::Service(service.service_id);
     env.storage().persistent().set(&key, service);
@@ -173,6 +191,7 @@ pub fn save_service(env: &Env, service: &Service) {
     env.storage()
         .persistent()
         .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, extend_to);
+    index_service(env, service);
 }
 
 /// Bump a service entry's TTL without reading it back to the caller.
@@ -197,6 +216,94 @@ pub fn get_service(env: &Env, service_id: u64) -> Result<Service, Error> {
         .persistent()
         .get(&DataKey::Service(service_id))
         .ok_or(Error::ServiceNotFound)
+}
+
+/// Append `service.service_id` to its provider's index and keep that index alive.
+///
+/// Idempotence comes from the index itself rather than from comparing against the
+/// stored record: re-registering the same service appends nothing, so
+/// `save_service` can call this unconditionally. The TTL is extended on every save
+/// rather than only on an append, which is what lets `set_service_active` refresh a
+/// catalogue it does not add to. The index is append-only, which makes it
+/// self-healing in one direction and deliberately lazy in the other — if a
+/// service is later transferred, its id stays in the old owner's page and
+/// [`get_provider_services`] drops it on read. Nothing here can leak a service
+/// the provider does not own.
+fn index_service(env: &Env, service: &Service) {
+    let key = DataKey::ProviderServices(service.provider.clone());
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(service.service_id) {
+        ids.push_back(service.service_id);
+        env.storage().persistent().set(&key, &ids);
+    }
+    // Extended on every save, not only on an append: `set_service_active` rewrites a
+    // record whose id is already indexed, and a provider maintaining its catalogue is
+    // also keeping the index that lists it alive. By the time control reaches here the
+    // entry exists — an absent index always takes the append above — so the extension
+    // cannot hit the missing-key path.
+    let extend_to = LEDGER_BUMP_EXTEND.min(ttl_ceiling(env));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, extend_to);
+}
+
+/// Return up to `limit` of `provider`'s services, starting at index entry `after`.
+///
+/// The page is bounded by `limit` regardless of how long the index is, and the
+/// only walk-in-storage cost is one read per entry consumed. This is a pure read
+/// in the sense the module doc means: it extends nothing, neither the listed
+/// `Service` records nor the provider's own index entry.
+pub fn get_provider_services(
+    env: &Env,
+    provider: &Address,
+    after: u32,
+    limit: u32,
+) -> Result<ProviderServicePage, Error> {
+    let key = DataKey::ProviderServices(provider.clone());
+    let Some(ids) = env.storage().persistent().get::<DataKey, Vec<u64>>(&key) else {
+        // A provider that has never had an index entry — never registered, or let it
+        // expire — has an empty catalogue as far as discovery is concerned. That is a
+        // normal answer, not an error, and callers cannot tell the two apart.
+        return Ok(ProviderServicePage {
+            service_ids: Vec::new(env),
+            next: 0,
+            done: true,
+        });
+    };
+
+    let total = ids.len();
+    let mut cursor = after.min(total);
+    let mut service_ids = Vec::new(env);
+    let mut consumed = 0u32;
+    while consumed < limit {
+        let Some(service_id) = ids.get(cursor) else {
+            break;
+        };
+        cursor += 1;
+        consumed += 1;
+        if indexed_service(env, provider, service_id) {
+            service_ids.push_back(service_id);
+        }
+    }
+
+    Ok(ProviderServicePage {
+        service_ids,
+        next: cursor,
+        done: cursor >= total,
+    })
+}
+
+/// Whether `service_id` still belongs to `provider` according to the record, the
+/// single authority on ownership.
+fn indexed_service(env: &Env, provider: &Address, service_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .get::<DataKey, Service>(&DataKey::Service(service_id))
+        .is_some_and(|service| service.provider == *provider)
 }
 
 // ---------------------------------------------------------------------------

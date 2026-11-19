@@ -109,11 +109,13 @@ keylease-core/
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
+| `quote_lease(service_id, requested_calls, duration_secs) -> LeaseQuote` | — | Read-only deposit and expiry `create_lease` would produce, with the same validation. |
 | `settle_lease(provider, lease_id, verified_calls)` | `provider` | Pay the provider, refund the remainder. Emits `lease_settled`. |
 | `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
 | `bump_service(service_id)` | — | Extend a service entry's TTL to its standard horizon. Permissionless; the caller pays the rent. |
 | `bump_lease(lease_id)` | — | Extend a live lease entry using the lease TTL policy. Permissionless; rejects a settled lease. |
 | `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. Never extend a TTL. |
+| `services_for_provider(provider, after, limit) -> ProviderServicePage` | — | One bounded page of a provider's service ids; page with `next` until `done`. Never extends a TTL. |
 | `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)` | — | Derived lifecycle queries. Never extend a TTL. |
 | `service_count()`, `lease_count()` | — | Monotonic counters. |
 

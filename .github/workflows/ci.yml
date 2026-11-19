@@ -29,6 +29,33 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+      - name: Check every tracked shell script
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          # The file list comes from the index, not a working-tree glob: a script
+          # that is tracked but moved out of scripts/ still has to be linted.
+          scripts=()
+          while IFS= read -r -d '' file; do
+            scripts+=("$file")
+          done < <(git ls-files -z '*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::No tracked *.sh files matched; this check would pass without covering anything"
+            exit 1
+          fi
+          printf 'checking %d script(s):\n' "${#scripts[@]}"
+          printf '  %s\n' "${scripts[@]}"
+          shellcheck "${scripts[@]}"
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

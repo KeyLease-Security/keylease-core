@@ -68,7 +68,7 @@ pub use crate::events::{
     ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
     RegistryInitialized, ServiceRegistered, ServiceStatusChanged, EVENT_SCHEMA_VERSION,
 };
-pub use crate::types::{Lease, LeaseStatus, Service};
+pub use crate::types::{Lease, LeaseQuote, LeaseStatus, ProviderServicePage, Service};
 
 // On-chain contract metadata, readable from the ledger without the source.
 soroban_sdk::contractmeta!(key = "name", val = "KeyLeaseRegistry");
@@ -120,6 +120,12 @@ pub const MAX_LEASE_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
 /// protects consumers from the contract's own arithmetic, so raising it should
 /// cost a Wasm upgrade and a release note, not one unsigned transaction.
 pub const MAX_LEASE_DEPOSIT: i128 = 1_000_000_000_000;
+
+/// Largest page [`KeyLeaseRegistry::services_for_provider`] will serve.
+///
+/// Every entry on a page costs one ledger read, so an unbounded `limit` would let
+/// a single call read a provider's whole index and blow the transaction budget.
+pub const MAX_PAGE_SIZE: u32 = 100;
 
 #[contract]
 pub struct KeyLeaseRegistry;
@@ -604,11 +610,103 @@ impl KeyLeaseRegistry {
         storage::get_service(&env, service_id)
     }
 
+    /// List the services `provider` owns, oldest first, one bounded page at a time.
+    ///
+    /// Reads `limit` entries from the provider's index starting at `after` and
+    /// returns them with the cursor to pass back for the next page. Keep paging
+    /// while `done` is `false`; `next` counts index entries consumed, not ids
+    /// returned, so a page can be legitimately short when an entry no longer
+    /// belongs to the provider.
+    ///
+    /// Ownership is re-checked against each `Service` record, which is the
+    /// authority: the index is derived state that is appended to on write but
+    /// pruned only on read. A provider with no index yet returns an empty page
+    /// rather than an error, so a new account can page before it registers.
+    ///
+    /// Pure read: like every other view, it extends no TTL, its own index entry
+    /// included. Use [`Self::register_service`] or [`Self::set_service_active`]
+    /// to keep a catalogue's index alive.
+    pub fn services_for_provider(
+        env: Env,
+        provider: Address,
+        after: u32,
+        limit: u32,
+    ) -> Result<ProviderServicePage, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidLimit);
+        }
+        storage::get_provider_services(&env, &provider, after, limit)
+    }
+
     /// Fetch a lease. Pure read: never extends a TTL.
     ///
     /// Use [`Self::bump_lease`] to keep an entry alive.
     pub fn get_lease(env: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&env, lease_id)
+    }
+
+    /// Predict what [`Self::create_lease`] would lock, without auth or a transfer.
+    ///
+    /// Consumers and SDKs used to re-derive the deposit and the expiry off-chain,
+    /// where any change to contract semantics turns into silent drift. This view
+    /// runs the same validation, in the same order, as `create_lease`, so every
+    /// error it returns is the error `create_lease` would return for the same
+    /// arguments — with the single exception of a balance the registry never
+    /// reads: a quote says nothing about whether `consumer` can actually pay.
+    ///
+    /// `expires_at` is derived from the current ledger time, so a quote goes
+    /// stale as soon as the ledger advances.
+    pub fn quote_lease(
+        env: Env,
+        service_id: u64,
+        requested_calls: u32,
+        duration_secs: u64,
+    ) -> Result<LeaseQuote, Error> {
+        if requested_calls == 0 {
+            return Err(Error::InvalidCalls);
+        }
+        if duration_secs == 0 {
+            return Err(Error::InvalidDuration);
+        }
+        if duration_secs > MAX_LEASE_DURATION_SECS {
+            return Err(Error::DurationTooLong);
+        }
+
+        let service = storage::get_service(&env, service_id)?;
+        if !service.is_active {
+            return Err(Error::ServiceInactive);
+        }
+
+        let locked_deposit = service
+            .rate_per_call
+            .checked_mul(requested_calls as i128)
+            .ok_or(Error::Overflow)?;
+        if locked_deposit <= 0 {
+            return Err(Error::InvalidRate);
+        }
+        // Same position in create_lease's order, for the same reason: `Overflow`
+        // means the product does not fit `i128`, `DepositTooLarge` means it fits
+        // and is still more than one lease may lock.
+        if locked_deposit > MAX_LEASE_DEPOSIT {
+            return Err(Error::DepositTooLarge);
+        }
+
+        // Mirrors create_lease: a registry with no escrow token could never fund
+        // the lease this quote predicts.
+        if storage::get_token(&env).is_none() {
+            return Err(Error::TokenNotSet);
+        }
+
+        let expires_at = env
+            .ledger()
+            .timestamp()
+            .checked_add(duration_secs)
+            .ok_or(Error::Overflow)?;
+
+        Ok(LeaseQuote {
+            locked_deposit,
+            expires_at,
+        })
     }
 
     /// Derive the lifecycle status of a lease at the current ledger time.

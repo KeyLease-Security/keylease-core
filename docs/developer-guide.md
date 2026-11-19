@@ -34,10 +34,20 @@ cargo test --all
 cargo build --target wasm32v1-none --release --all
 ```
 
-CI also runs a cargo-deny dependency policy check (`deny.toml`) and a ClamAV
-malware scan over the checkout and the built Wasm artifacts. CI job names are
-`Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Dependency Policy` and
+CI also runs a cargo-deny dependency policy check (`deny.toml`), a shellcheck
+pass over every tracked shell script, and a ClamAV malware scan over the
+checkout and the built Wasm artifacts. CI job names are `Format`, `Shellcheck`,
+`Clippy`, `Test`, `Build (wasm32v1-none)`, `Dependency Policy` and
 `Malware Scan` — these are the required status checks in branch protection.
+
+The shell pass is not one of the four cargo commands, so run it separately:
+
+```bash
+git ls-files -z '*.sh' | xargs -0 shellcheck
+```
+
+It uses shellcheck's default severity, which includes style notes, and fails
+outright when no tracked script matches.
 
 ## Project layout
 

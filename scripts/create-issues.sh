@@ -457,12 +457,16 @@ backlog_issue() {
     medium)
       labels="wave-medium,150pts"
       points=150
+      # Markdown code span in an issue body: the backticks are literal text.
+      # shellcheck disable=SC2016
       wasm_check='- [ ] `cargo build --target wasm32v1-none --release --all` succeeds'
       ;;
     high)
       labels="wave-high,200pts,security"
       points=200
       design_note='- [ ] Design note approved by a maintainer before implementation begins'
+      # Markdown code span in an issue body: the backticks are literal text.
+      # shellcheck disable=SC2016
       wasm_check='- [ ] `cargo build --target wasm32v1-none --release --all` succeeds'
       ;;
     *)
@@ -485,9 +489,13 @@ backlog_issue() {
       [ -n "$item" ] && printf -- '- [ ] %s\n' "$item"
     done
 
-    printf '%s\n' '- [ ] `cargo fmt --all -- --check` passes'
-    printf '%s\n' '- [ ] `cargo clippy --all-targets -- -D warnings` passes'
-    printf '%s\n' '- [ ] `cargo test --all` passes'
+    # The repository definition of done, appended to every backlog issue. A
+    # quoted delimiter keeps the Markdown code spans literal.
+    cat <<'DEFINITION_OF_DONE'
+- [ ] `cargo fmt --all -- --check` passes
+- [ ] `cargo clippy --all-targets -- -D warnings` passes
+- [ ] `cargo test --all` passes
+DEFINITION_OF_DONE
     [ -n "$wasm_check" ] && printf '%s\n' "$wasm_check"
 
     if [ -n "$pointers" ]; then
@@ -497,6 +505,9 @@ backlog_issue() {
       done
     fi
 
+    # Substitutions and a literal Markdown code span in one string: the backticks
+    # around the label name must reach the issue body unchanged.
+    # shellcheck disable=SC2016
     printf '\n---\n\n**Points: %s (%s)** · Label: `wave-%s`\n' \
       "$points" "$tier" "$tier"
   )

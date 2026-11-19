@@ -21,6 +21,9 @@ cargo build --all                  # compile
 cargo test --all                   # run the full test suite
 cargo fmt --all                    # format
 cargo clippy --all-targets -- -D warnings
+
+# lint every tracked shell script (the CI Shellcheck job runs the same command)
+git ls-files -z '*.sh' | xargs -0 shellcheck
 ```
 
 Everything must be green **before** you open a PR — CI runs exactly the
@@ -28,6 +31,13 @@ commands above, plus `cargo build --target wasm32v1-none --release --all` and a
 ClamAV malware scan of the checkout and the built Wasm artifacts. The scan job
 ("Malware Scan") is a required check, so do not commit binaries or archives
 that you cannot explain; CI will fail the PR if a signature matches.
+
+Shellcheck runs at its default severity, which includes style notes, and fails
+if no tracked `*.sh` file matches, so the job cannot pass without covering
+something. Install it with `brew install shellcheck` or
+`sudo apt-get install shellcheck`. Suppress a finding with a
+`# shellcheck disable=SC…` comment on the offending line plus a reason; never
+disable a check for a whole file.
 
 ## Local security checks
 

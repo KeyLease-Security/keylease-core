@@ -46,6 +46,16 @@ curl "https://friendbot.stellar.org?addr=$(stellar keys address consumer)"
 export REGISTRY=<your registry contract id>
 export CONSUMER=$(stellar keys address consumer)
 
+# optional: price it first. quote_lease is a view — no auth, no transfer — and
+# it runs the same validation as create_lease, so these are the numbers the next
+# transaction locks.
+stellar contract invoke \
+  --id $REGISTRY --source-account consumer --network testnet \
+  -- quote_lease \
+     --service_id 1 \
+     --requested_calls 500 \
+     --duration_secs 3600
+
 stellar contract invoke \
   --id $REGISTRY --source-account consumer --network testnet \
   --send=yes -- create_lease \
