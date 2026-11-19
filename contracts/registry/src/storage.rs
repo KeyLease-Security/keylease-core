@@ -25,6 +25,8 @@ pub enum DataKey {
     ServiceCount,
     /// Monotonic lease id counter (instance storage).
     LeaseCount,
+    /// Emergency pause flag (instance storage).
+    Paused,
     /// `Service` by id (persistent storage).
     Service(u64),
     /// `Lease` by id (persistent storage).
@@ -53,6 +55,17 @@ pub fn set_token(env: &Env, token: &Address) {
 
 pub fn get_token(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::Token)
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
 /// Bump the TTL of the instance (configuration) storage entry.

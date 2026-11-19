@@ -40,4 +40,6 @@ pub enum Error {
     /// Lease duration exceeds `MAX_LEASE_DURATION_SECS`, so its storage entry
     /// could not be kept alive for the whole term.
     DurationTooLong = 16,
+    /// The contract is currently paused by admin emergency action.
+    ContractPaused = 17,
 }

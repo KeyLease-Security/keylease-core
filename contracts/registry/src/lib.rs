@@ -61,8 +61,8 @@ use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
 
 pub use crate::errors::Error;
 pub use crate::events::{
-    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
-    RegistryInitialized, ServiceRegistered, ServiceStatusChanged,
+    ContractUpgraded, EmergencyPaused, EmergencyUnpaused, EscrowTokenSet, LeaseCreated,
+    LeaseRevoked, LeaseSettled, RegistryInitialized, ServiceRegistered, ServiceStatusChanged,
 };
 pub use crate::types::{Lease, LeaseStatus, Service};
 
@@ -154,6 +154,29 @@ impl KeyLeaseRegistry {
         Ok(())
     }
 
+    /// Trigger an emergency pause. Admin only.
+    ///
+    /// Blocks `register_service`, `set_service_active`, and `create_lease`.
+    /// Does NOT block `settle_lease` or `revoke_expired_lease`.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::set_paused(&env, true);
+        storage::extend_instance_ttl(&env);
+        EmergencyPaused { admin }.publish(&env);
+        Ok(())
+    }
+
+    /// Resume normal operations after an emergency pause. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::set_paused(&env, false);
+        storage::extend_instance_ttl(&env);
+        EmergencyUnpaused { admin }.publish(&env);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Services
     // -----------------------------------------------------------------------
@@ -170,6 +193,10 @@ impl KeyLeaseRegistry {
         endpoint_hash: BytesN<32>,
     ) -> Result<u64, Error> {
         provider.require_auth();
+
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
 
         if rate_per_call <= 0 {
             return Err(Error::InvalidRate);
@@ -206,6 +233,10 @@ impl KeyLeaseRegistry {
         is_active: bool,
     ) -> Result<(), Error> {
         provider.require_auth();
+
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
 
         let mut service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -246,6 +277,10 @@ impl KeyLeaseRegistry {
         duration_secs: u64,
     ) -> Result<u64, Error> {
         consumer.require_auth();
+
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
 
         if requested_calls == 0 {
             return Err(Error::InvalidCalls);
@@ -508,6 +543,11 @@ impl KeyLeaseRegistry {
             return Ok(0);
         }
         Ok(lease.locked_deposit)
+    }
+
+    /// Query whether the registry is currently paused by admin emergency action.
+    pub fn is_paused(env: Env) -> bool {
+        storage::is_paused(&env)
     }
 }
 
