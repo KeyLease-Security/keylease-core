@@ -99,7 +99,9 @@ Two rules follow:
    plenty) should be re-read rather than trusted from cache. If you would rather
    not compare clocks at all, ask the contract: `lease_status(lease_id)` and
    `remaining_calls(lease_id)` evaluate expiry at ledger time for you, and a read
-   costs one simulation with no signing key involved.
+   costs one simulation with no signing key involved — and no rent, because reads
+   never extend an entry's lifetime. Only writes and the two `bump_*` calls do;
+   see [Storage lifetime](#storage-lifetime).
 
 Keep SEP-10's own `timeout` separate from lease expiry. The challenge is valid
 for minutes and is measured against *your* server clock; the lease is measured

@@ -169,9 +169,11 @@ rather than contradicted.
 
 **Why it exists:** `extend_ttl(threshold, extend_to)` only rewrites an entry when
 its remaining lifetime has already fallen below `threshold`. At 17_280 ledgers
-that is a roughly one-day tripwire, so an entry that was just written has a
-month of runway and ordinary reads cost no rent rewrite at all — the extension
-fires only once the entry is genuinely close to expiring.
+that is a roughly one-day tripwire, so an entry that was just written has a month
+of runway before any extension is due — the contract pays for a rent rewrite only
+once an entry is genuinely close to expiring. Since reads stopped extending
+anything, the runway is measured against the gap between *writes*, which is why a
+lease's own term bound is what has to cover it.
 
 **Bounds nothing.** It is a storage-rent parameter.
 

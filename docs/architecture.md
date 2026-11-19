@@ -125,9 +125,9 @@ sequenceDiagram
     C->>R: create_lease(consumer, service_id, requested_calls, duration_secs)
     Note over C,R: AUTH — consumer.require_auth()
     Note over R: CHECKS — requested_calls and duration_secs both non-zero,<br/>duration_secs ≤ MAX_LEASE_DURATION_SECS,<br/>service exists and is_active, deposit = rate × calls (checked),<br/>deposit ≤ MAX_LEASE_DEPOSIT, token configured
-    Note over R: STATE WRITE — LeaseCount += 1, Lease(lease_id) saved with<br/>settled = false, expires_at and locked_deposit, lease and instance TTL extended
+    Note over R: STATE WRITE — LeaseCount += 1, Lease(lease_id) saved with<br/>settled = false, expires_at and locked_deposit, lease, service<br/>and instance TTL extended
     R->>T: TRANSFER IN — transfer(consumer → registry, rate_per_call × requested_calls)
-    Note over R: EVENT — lease_created { lease_id, service_id, consumer,<br/>allocated_calls, expires_at, locked_deposit }
+    Note over R: EVENT — lease_created, topic lease_id, payload { schema_version,<br/>service_id, consumer, allocated_calls, expires_at, locked_deposit }
     R-->>C: lease_id
 ```
 
@@ -154,7 +154,7 @@ sequenceDiagram
     T-->>P: payout
     R->>T: TRANSFER OUT 2 — transfer(registry → consumer, locked_deposit − payout)
     T-->>C: refund
-    Note over R: EVENT — lease_settled { lease_id, provider, verified_calls, payout, refund }
+    Note over R: EVENT — lease_settled, topic lease_id, payload { schema_version,<br/>provider, verified_calls, payout, refund }
     R-->>P: ok
 ```
 
@@ -179,7 +179,7 @@ sequenceDiagram
     Note over R: CHECKS — caller is lease.consumer, not settled,<br/>now ≥ expires_at, and now ≥ expires_at + SETTLE_GRACE_PERIOD_SECS
     Note over R: STATE WRITE — Lease(lease_id).settled = true, persisted<br/>BEFORE the refund transfer
     R->>T: TRANSFER OUT — transfer(registry → consumer, locked_deposit)
-    Note over R: EVENT — lease_revoked { lease_id, consumer, refund }
+    Note over R: EVENT — lease_revoked, topic lease_id, payload { schema_version,<br/>consumer, refund }
     R-->>C: ok
 ```
 
