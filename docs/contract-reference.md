@@ -7,15 +7,10 @@ as authoritative.
 - **Package:** `keylease-registry`
 - **Wasm:** `target/wasm32v1-none/release/keylease_registry.wasm`
 - **Network target:** Stellar (`wasm32v1-none`), `soroban-sdk 26`
-- **Constants:** `SETTLE_GRACE_PERIOD_SECS = 86_400` (24 hours),
-  `MAX_LEASE_DURATION_SECS = 2_592_000` (30 days),
-  `MAX_LEASE_DEPOSIT = 1_000_000_000_000` base units (100,000 of a
-  seven-decimal token such as XLM)
-- **Storage TTL:** `LEDGER_BUMP_THRESHOLD = 17_280`, `LEDGER_BUMP_EXTEND = 518_400`,
-  `MAX_ENTRY_TTL_LEDGERS = 1_555_200` (90 days); leases extend to term + 24h
-  grace + a 1-day buffer, clamped to `MAX_ENTRY_TTL_LEDGERS` and to the network's
-  live `maxEntryTtl`. Only writes and the two `bump_*` entry points extend a TTL;
-  reads never do.
+- **Constants:** eight of them, all tabulated in [Constants](#constants)
+- **Storage TTL:** leases extend to term + 24h grace + a 1-day buffer, clamped to
+  `MAX_ENTRY_TTL_LEDGERS` and to the network's live `maxEntryTtl` (values in the
+  table). Only writes and the two `bump_*` entry points extend a TTL; reads never do.
 - **On-chain metadata:** `name = KeyLeaseRegistry`, `version`,
   `eventSchemaVersion`, `description`, `repository`, embedded with `contractmeta!`
 
@@ -23,6 +18,257 @@ Every state-changing entry point calls `require_auth()` on the actor it
 represents. Errors are returned as `Result<_, Error>`; codes are stable and never
 renumbered. Every money-moving path persists its effect before calling the SEP-41
 token (checks-effects-interactions).
+
+---
+
+## Constants
+
+Eight values decide how much money a lease may lock, for how long, how long
+the ledger is paid to remember it, and what revision of the event payload an
+indexer is decoding. They live in three source files: the amount and timing
+bounds in `contracts/registry/src/lib.rs`, the storage lifetime policy in
+`contracts/registry/src/storage.rs`, and the payload version in
+`contracts/registry/src/events.rs`. This is the single table for all of them —
+the source stays authoritative.
+
+| Constant | Value | Unit | Defined in | What it constrains |
+| --- | --- | --- | --- | --- |
+| `MAX_LEASE_DURATION_SECS` | `2_592_000` | seconds of lease term (= 30 days) | `lib.rs` | **caller input**: `create_lease.duration_secs` |
+| `MAX_LEASE_DEPOSIT` | `1_000_000_000_000` | escrow-token base units (= 100,000 of a 7-decimal token) | `lib.rs` | **caller input**: the `rate_per_call × requested_calls` product |
+| `SETTLE_GRACE_PERIOD_SECS` | `86_400` | seconds after expiry (= 24 hours) | `lib.rs` | **who may act**: provider-only settlement window, then consumer revoke |
+| `LEDGER_CLOSE_SECS` | `5` | seconds per ledger | `storage.rs` | nothing directly: a conversion factor |
+| `LEDGER_BUMP_THRESHOLD` | `17_280` | ledgers remaining (≈ 1 day) | `storage.rs` | **storage only**: when an entry is worth extending |
+| `LEDGER_BUMP_EXTEND` | `518_400` | ledgers to extend to (≈ 30 days) | `storage.rs` | **storage only**: how far instance and service entries are pushed out |
+| `MAX_ENTRY_TTL_LEDGERS` | `1_555_200` | ledgers (≈ 90 days) | `storage.rs` | **storage only**: the ceiling on any single extension, whatever `expires_at` says |
+| `EVENT_SCHEMA_VERSION` | `1` | payload revision (not a release) | `events.rs` | **indexers decode by it**: the first key of every event payload |
+
+**Which of these bound user input?** Exactly two, and they bound different
+things. `MAX_LEASE_DURATION_SECS` is compared against a number the caller types;
+`MAX_LEASE_DEPOSIT` is compared against a number two of the caller's arguments
+produce together. Each earns its own code, `DurationTooLong` (16) and
+`DepositTooLarge` (17), and 17 is deliberately not 15: `Overflow` means the
+product does not fit `i128`, `DepositTooLarge` means it fits and is still more
+than one lease is allowed to lock.
+`SETTLE_GRACE_PERIOD_SECS` is never supplied — it is added to `expires_at`, which
+the contract computes itself, so it changes *when* an action becomes legal rather
+than *what* a caller may pass (`RevokeWindowNotElapsed`, 10 is a consequence of
+the ledger clock, not of an argument). The four storage constants — the three
+`LEDGER_*` values plus `MAX_ENTRY_TTL_LEDGERS` — appear in no signature, no event
+and no error: they only decide how much Soroban rent the contract pays, which is
+why changing them is a storage decision, not an interface decision.
+`EVENT_SCHEMA_VERSION` is the odd one out: it bounds nothing, but unlike the
+storage values it is *read by every consumer of the stream*, because it is the
+first key of every payload. Changing it is an interface decision.
+
+### `MAX_LEASE_DURATION_SECS = 2_592_000` — seconds
+
+**Why it exists:** `save_lease` extends the lease's persistent entry to cover its
+remaining term plus the grace window plus a one-day read buffer
+(`lease_ttl_extend`). Bounding the term bounds that extension, so a locked
+deposit can never outlive the entry that records it. At thirty days the largest
+extension the policy can ask for is 552,960 ledgers, which sits under both
+`MAX_ENTRY_TTL_LEDGERS` (1,555,200) and the network's own `maxEntryTtl`
+(6,312,000 ledgers on Pubnet and Testnet) — see
+[architecture.md — What extends a TTL, and what does not](architecture.md#what-extends-a-ttl-and-what-does-not).
+
+**Bounded range:** `duration_secs` must be in `1..=2_592_000` — `InvalidDuration`
+(12) below, `DurationTooLong` (16) above.
+
+**Entry points:** [`create_lease`](#create_lease) enforces it; every later path
+inherits it from `expires_at`.
+**Tests:** `test_max_duration_is_accepted`, `test_duration_above_max_is_rejected`.
+**If you change it:** a larger value is only safe if the TTL math and the host's
+maximum entry lifetime still cover term + grace; existing leases are never
+invalidated, but callers may legitimately rely on thirty days being the ceiling.
+See [protocol.md — Storage and lifetime](protocol.md#storage-and-lifetime).
+
+### `MAX_LEASE_DEPOSIT = 1_000_000_000_000` — escrow-token base units
+
+**Why it exists:** `required_deposit` is `rate_per_call × requested_calls`, so one
+extra zero in either argument multiplies straight into an escrow transfer.
+Checked arithmetic only refuses a product that does not fit `i128`; it cannot
+tell a deliberate wholesale lease from a fat-fingered one, and it cannot see a
+token-scale change — a deployment pointed at a token with more decimals than the
+native asset turns the same lease into a larger real amount. This bound is the
+second guard, and because it is denominated in base units rather than whole
+tokens, that higher-decimals deployment gets a *tighter* ceiling in real terms,
+which is the direction a guard should fail in.
+
+**How far above ordinary use:** one trillion base units is 100,000 of a
+seven-decimal token — XLM in every documented deployment — which is 2,000 times
+the 500,000,000 base units in the worked example under
+[Protocol — Worked economics](protocol.md#worked-economics). No documented lease
+shape reaches it, so the bound is invisible in normal use.
+
+**Bounded range:** `required_deposit ≤ 1_000_000_000_000`; above it,
+`DepositTooLarge` (17). A product that overflows `i128` is `Overflow` (15)
+instead, and the two are checked in that order — multiply, then bound — which is
+why `DepositTooLarge` is only ever reachable for a deposit that fits.
+
+**Entry points:** [`create_lease`](#create_lease) enforces it. The bound is a
+`u64`-input guard on an `i128` amount, and it is the only one of the eight whose
+unit depends on the escrow token: [`set_token`](#set_token) does not move it, so
+switching token changes what the ceiling is *worth*. `settle_lease` and
+`revoke_expired_lease` inherit it from `locked_deposit` and never re-check it.
+**Tests:** `test_deposit_exactly_at_max_is_accepted`,
+`test_deposit_one_above_max_is_rejected`,
+`test_deposit_bound_applies_to_the_product_not_the_rate`,
+`test_deposit_bound_rejects_before_the_overflow_path`.
+**If you change it:** raising it costs a Wasm upgrade and a release note, which
+is the point — the guard protects consumers from the contract's own arithmetic,
+so it is a compile-time constant instead of admin storage that one unsigned
+transaction could widen. It never retroactively invalidates an open lease, but
+lowering it would reject leases that were legal at the old rate.
+
+### `SETTLE_GRACE_PERIOD_SECS = 86_400` — seconds after expiry
+
+**Why it exists:** after a lease expires there is a 24-hour window in which only
+the provider can settle. Without it, a provider that was briefly offline at
+expiry would lose a legitimate payout to a consumer racing to revoke. The
+consumer's exit is still bounded: after the window it reclaims the whole deposit.
+
+**What it gates:** it is added to `expires_at` to compute the revoke deadline,
+and it is added to the lease's remaining lifetime in `lease_ttl_extend` — the
+same number that protects the provider's payout also keeps the entry alive long
+enough for the consumer to claim it.
+
+**Entry points:** [`settle_lease`](#settle_lease) (allowed for the whole window)
+and [`revoke_expired_lease`](#revoke_expired_lease) (returns
+`RevokeWindowNotElapsed`, 10 inside it). A lease that is neither settled nor yet
+revocable sits in this window as `Expired` — see
+[`lease_status`](#read-only-views).
+**Tests:** `test_provider_can_settle_within_grace_window`,
+`test_revoke_during_grace_window_is_rejected`,
+`test_expired_unsettled_lease_is_fully_reclaimed`.
+**If you change it:** you change the consumer's maximum wait for a refund and the
+storage rent of every lease. Because the deadline is derived from `expires_at`
+rather than stored per lease, changing the constant moves the revoke line for
+leases that are already open. The window is drawn in
+[protocol.md — The 24-hour grace window](protocol.md#the-24-hour-grace-window).
+
+### `LEDGER_CLOSE_SECS = 5` — seconds per ledger
+
+**Why it exists:** Soroban TTLs are counted in ledgers, lease durations in
+seconds. This constant converts one to the other
+(`ledgers = remaining_secs / LEDGER_CLOSE_SECS`).
+
+**Bounds nothing.** No caller sees it, no error depends on it.
+
+**If it drifts from reality:** the estimate is wrong in whichever direction the
+network's actual close time moved. An over-estimate pays rent for storage time
+nobody uses; an under-estimate shortens the guaranteed lifetime, and nothing else
+re-derives it — the contract converts seconds to ledgers itself rather than
+reading a network cadence setting. Each extension is separately clamped by
+`ttl_ceiling`, the minimum of `MAX_ENTRY_TTL_LEDGERS` and the live
+`env.storage().max_ttl()`, so a network that lowers its own cap is followed
+rather than contradicted.
+**Entry points:** every path that writes a lease, through `save_lease`,
+`extend_lease_ttl` and `bump_lease`; see [Storage layout](#storage-layout).
+
+### `LEDGER_BUMP_THRESHOLD = 17_280` — ledgers remaining (≈ 1 day)
+
+**Why it exists:** `extend_ttl(threshold, extend_to)` only rewrites an entry when
+its remaining lifetime has already fallen below `threshold`. At 17_280 ledgers
+that is a roughly one-day tripwire, so an entry that was just written has a month
+of runway before any extension is due — the contract pays for a rent rewrite only
+once an entry is genuinely close to expiring. Since reads stopped extending
+anything, the runway is measured against the gap between *writes*, which is why a
+lease's own term bound is what has to cover it.
+
+**Bounds nothing.** It is a storage-rent parameter.
+
+**Two roles:** for instance and service entries it is the tripwire; for leases it
+is *also* the one-day read buffer, because `lease_ttl_extend` adds it on top of
+the computed term. Any value here must exceed the longest gap in which an entry
+is never *written* — reads no longer close that gap, since every view is pure —
+otherwise an entry can lapse while its escrow is still claimable. That is the
+hole `bump_service` and `bump_lease` exist to fill, and why a service an indexer
+only reads has to be kept alive on purpose; see
+[Storage maintenance](#storage-maintenance).
+**Entry points:** `extend_instance_ttl` (called by `init`, `set_token`,
+`upgrade`, `register_service`, `set_service_active`, `create_lease`,
+`settle_lease` and `revoke_expired_lease`) and the save path plus the matching
+`bump_*` call for each persistent key.
+
+### `LEDGER_BUMP_EXTEND = 518_400` — ledgers to extend to (≈ 30 days)
+
+**Why it exists:** how far the contract pushes an entry out once it has decided
+to pay for an extension. It applies to instance entries (`Admin`, `Token`,
+`ServiceCount`, `LeaseCount`) and to `Service(u64)` — not to leases, which use
+their own duration-aware extension instead of this generic month.
+
+**Bounds nothing.** It is a storage-rent parameter.
+
+**Entry points:** [`init`](#init), [`set_token`](#set_token),
+[`register_service`](#register_service), [`create_lease`](#create_lease) and the
+two maintenance calls [`bump_service`](#bump_service) and
+[`bump_lease`](#bump_lease) — never a read-only view. The resulting per-key
+policy table is in [Storage layout](#storage-layout).
+
+### `MAX_ENTRY_TTL_LEDGERS = 1_555_200` — ledgers (≈ 90 days)
+
+**Why it exists:** every lease's TTL ask is derived from its own `expires_at`, so
+if `MAX_LEASE_DURATION_SECS` is ever raised — or an entry is migrated in by an
+upgrade with an `expires_at` no `create_lease` would produce today — that ask
+would grow without limit. This is the ceiling that stops it, and it is a policy
+bound rather than a workaround: it caps how much rent one call can create and how
+long a stale entry can squat in the ledger, independent of what `expires_at`
+says.
+
+**Where it bites:** `ttl_ceiling` takes the minimum of this constant and the
+network's live `env.storage().max_ttl()`, and every extension in `storage.rs`
+goes through it. Three bounds nest: the longest valid lease asks for 552,960
+ledgers, this ceiling is 1,555,200, and the network publishes 6,312,000 — so a
+real lease is never truncated, and the ceiling only ever catches an unreachable
+horizon. The ladder is tabulated in
+[architecture.md — What extends a TTL, and what does not](architecture.md#what-extends-a-ttl-and-what-does-not).
+
+**Bounds nothing a caller types.** It appears in no signature and raises no error.
+
+**Entry points:** no public call — reached through `save_lease`,
+`extend_service_ttl`, `extend_instance_ttl` and both `bump_*` calls.
+**Tests:** `test_ttl_ceiling_is_named_and_below_the_network_limit`,
+`test_lease_ttl_ask_is_clamped_for_an_unreachable_horizon`,
+`test_lease_ttl_ask_floors_once_the_grace_window_is_past`,
+`test_lease_ttl_ask_follows_a_lowered_network_max_entry_ttl`.
+**If you change it:** raising it lets one write bill more rent; lowering it below
+552,960 ledgers starts truncating legitimate thirty-day leases. Note the trap in
+proving either: `soroban-test` does not enforce `maxEntryTtl` on `extend_ttl` —
+it accepts an over-cap extension, even `u32::MAX`, and never evicts — so the
+assertable behaviour here is the clamped value, not a host rejection.
+
+### `EVENT_SCHEMA_VERSION = 1` — payload revision
+
+**Why it exists:** an indexer reading a stream that spans a contract upgrade needs
+to know which revision produced a record. The contract's `version` metadata says
+which Wasm is deployed *now*; an event recorded six months ago was emitted by
+whatever schema was running *then*. This number answers the second question, and
+it moves only when an event gains or loses a field, not on every deploy.
+
+**What it is stamped on:** the first map key of every payload, on all eight
+events, plus the `eventSchemaVersion` contract-metadata entry. Topics never carry
+it — topics are positional and indexers hard-code them as filter keys.
+
+**The rules that make a bump safe:** fields are added, never removed, renamed or
+retyped, because the payload is a symbol-keyed map and a decoder that already
+reads the old key would break. So a version bump means exactly one thing: this
+payload may contain keys you do not know. Absent key means revision `0`, the
+pre-versioning contract. The branching table indexers implement lives in
+[Integration — Event schema version](integration.md#event-schema-version).
+
+**Bounded range:** nothing is compared against it; consumers branch on it.
+
+**Entry points:** every publishing path — `init`, `set_token`, `upgrade`,
+`register_service`, `set_service_active`, `create_lease`, `settle_lease`,
+`revoke_expired_lease`.
+**Tests:** `test_init_event_is_versioned_on_the_wire`,
+`test_service_and_lease_events_are_versioned`,
+`test_revoke_event_is_versioned`,
+`test_schema_version_is_payload_only_topics_stay_put`.
+**If you change it:** this is the one constant whose change is an interface
+decision, and it is two edits — the metadata entry is written as a literal
+`val = "1"`, and no test compares it to the constant, so bumping one without the
+other silently publishes a lie about the stream.
 
 ---
 

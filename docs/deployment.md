@@ -29,15 +29,99 @@ for tests and local sandboxes only.
 ```
 
 Then it re-reads `get_service` to confirm the write landed, and prints a block
-you can paste into `.env`:
+you can paste into `.env`. In deploy mode that block is nine lines:
 
 ```text
 KEYLEASE_CONTRACT_ID=C...
 KEYLEASE_SERVICE_ID=1
-KEYLEASE_TOKEN_ADDRESS=...
+KEYLEASE_TOKEN_ADDRESS=C...
 KEYLEASE_NETWORK=testnet
 KEYLEASE_RPC_URL=https://soroban-testnet.stellar.org
+KEYLEASE_ADMIN=G...
+KEYLEASE_PROVIDER=G...
+KEYLEASE_RATE_PER_CALL=1000000
+KEYLEASE_ENDPOINT_HASH=<64 hex chars>
 ```
+
+In `--upgrade` mode it prints only the two lines that change —
+`KEYLEASE_CONTRACT_ID` (unchanged, echoed back for confirmation) and
+`KEYLEASE_NETWORK` — plus the new `version()` and Wasm hash, which are not env
+entries.
+
+## Mapping printed values to your env file
+
+Two sets of names are in play and mixing them up is the usual way a deployment
+goes sideways. The variables in [Configuration](#configuration) are **inputs**:
+you set them before running the script, they carry no `KEYLEASE_` prefix, and
+`SOURCE_ACCOUNT` is the only one that touches a key. The `KEYLEASE_*` lines the
+script prints are **outputs**: they describe what now exists on the ledger, and
+they are what your client, indexer or CI reads afterwards.
+
+| Printed as | `.env` entry | What it actually is | In `.env`? |
+| --- | --- | --- | --- |
+| `KEYLEASE_CONTRACT_ID` | `KEYLEASE_CONTRACT_ID` | the deployed `KeyLeaseRegistry` id; the script asserts it matches `^C[A-Z0-9]{55}$` | public |
+| `KEYLEASE_SERVICE_ID` | `KEYLEASE_SERVICE_ID` | the decimal `u64` returned by `register_service`; monotonic from `1` | public |
+| `KEYLEASE_TOKEN_ADDRESS` | `KEYLEASE_TOKEN_ADDRESS` | the SEP-41 escrow token set by `set_token` — for `native` this is the network's SAC id, so it is the same string on every Testnet deployment | public |
+| `KEYLEASE_NETWORK` | `KEYLEASE_NETWORK` | the CLI network name; also the `--network` argument for every later invocation | public |
+| `KEYLEASE_RPC_URL` | `KEYLEASE_RPC_URL` | Testnet only: the script hardcodes `https://soroban-testnet.stellar.org` and prints the placeholder `<your <network> RPC url>` for anything else. Replace the placeholder — do not paste it | public |
+| `KEYLEASE_ADMIN` | `KEYLEASE_ADMIN` | address authorized for `set_token` and `upgrade`; defaults to the address of `SOURCE_ACCOUNT` | public address, secret seed elsewhere |
+| `KEYLEASE_PROVIDER` | `KEYLEASE_PROVIDER` | owner of the demo service; defaults to `KEYLEASE_ADMIN` | public |
+| `KEYLEASE_RATE_PER_CALL` | `KEYLEASE_RATE_PER_CALL` | stroops per call, and already on-chain in `service_registered` | public |
+| `KEYLEASE_ENDPOINT_HASH` | `KEYLEASE_ENDPOINT_HASH` | the 32-byte commitment actually stored, lowercased by the script; default `sha256("<PROVIDER>:<SERVICE_NAME>")` | public digest, **not** the descriptor |
+
+Nothing in that table is a secret. Every one of those values is either on the
+ledger already — visible through `get_service`, `get_token` or the
+`service_registered` event — or an address that is by definition public. So the
+rule is simple:
+
+| Never commit | Where it belongs instead |
+| --- | --- |
+| The seed of any identity used here (`SOURCE_ACCOUNT`, admin, provider, consumer) | the `stellar` CLI keystore, or an OS secret manager |
+| The off-chain endpoint descriptor behind `KEYLEASE_ENDPOINT_HASH` | your own config; only the digest goes on-chain, and a committed descriptor is one an attacker can re-derive to confirm they guessed your service |
+| `.env` itself, and anything you add to it later — database URLs, webhook signing secrets | a secret manager; `.env` is gitignored, `.env.example` is the committed template and carries no values |
+
+Four entries in [`.env.example`](https://github.com/KeyLease-Security/keylease-core/blob/main/.env.example)
+are **not** printed by the script, so pasting the output leaves them empty:
+
+- `KEYLEASE_NETWORK_PASSPHRASE` — the signing string for the network; the script
+  passes `--network`, which reads its own CLI config, so it never needs the
+  passphrase and never prints it. Take it from [Networks](networks.md).
+- `SOURCE_ACCOUNT` — an input, not an output.
+- `KEYLEASE_GENERATE_KEY` — an input, and Testnet-only.
+- `KEYLEASE_CONSUMER` — a consumer you fund after the deploy; the script has no
+  reason to know it.
+
+## The minimum env for a read
+
+After `cp .env.example .env`, three entries are enough to read a deployment:
+
+```ini
+KEYLEASE_NETWORK=testnet
+KEYLEASE_RPC_URL=https://soroban-testnet.stellar.org
+KEYLEASE_CONTRACT_ID=C...
+```
+
+Read views require no authorization and submit nothing, so no funds move and no
+escrow token is involved: `KEYLEASE_TOKEN_ADDRESS`, `KEYLEASE_RATE_PER_CALL`,
+`KEYLEASE_ENDPOINT_HASH`, `KEYLEASE_ADMIN` and `KEYLEASE_PROVIDER` are all
+unread. `KEYLEASE_SERVICE_ID` matters only as the thing you name — it is an
+argument to `get_service`, the way `lease_id` is to `get_lease` — and
+`KEYLEASE_CONSUMER` is never needed for a read.
+
+```bash
+stellar contract invoke \
+  --id "$KEYLEASE_CONTRACT_ID" --source-account "$SOURCE_ACCOUNT" \
+  --network "$KEYLEASE_NETWORK" -- get_service --service_id "$KEYLEASE_SERVICE_ID"
+```
+
+That call names one more variable, `SOURCE_ACCOUNT`: a local CLI identity to
+build the simulation against. It is an **input** from [Configuration](#configuration),
+not one of the printed outputs, and it is not a secret in the file either — only
+its address is ever written down here. A client that only reads can skip the CLI
+entirely and simulate directly, which needs no signing authority at all; see
+[Integration](integration.md#reading-a-lease). Note that the CLI resolves the
+endpoint from its own `--network` configuration, so `KEYLEASE_RPC_URL` is
+consumed by your own client and indexer rather than by the CLI.
 
 ## Configuration
 
