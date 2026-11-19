@@ -1,4 +1,6 @@
 #![no_std]
+#![warn(missing_docs)]
+#![allow(missing_docs)]
 
 //! # KeyLease Mock Token
 //!

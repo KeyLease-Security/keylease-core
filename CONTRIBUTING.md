@@ -117,6 +117,7 @@ verify leases.
   recoverable conditions.
 - **Don't reuse error codes.** Append new variants; codes are part of the ABI.
 - Keep `lib.rs` entry points documented, including their auth and preconditions.
+- When exempting items with `#[allow(missing_docs)]`, add a brief comment explaining why the exception is needed, so future maintainers understand the intent.
 
 ## Adding a new entry point
 

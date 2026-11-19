@@ -1,4 +1,8 @@
 #![no_std]
+#![warn(missing_docs)]
+#![allow(missing_docs)]
+#![allow(rustdoc::private_intra_doc_links)]
+#![allow(rustdoc::broken_intra_doc_links)]
 
 //! # KeyLease Registry
 //!
