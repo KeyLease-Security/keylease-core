@@ -90,6 +90,16 @@ pub const SETTLE_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60;
 /// is well under the network's maximum entry TTL (180 days on Testnet).
 pub const MAX_LEASE_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
 
+/// Maximum rate per call in token stroops (7 decimals).
+/// Prevents excessively large deposits and ensures clients can predict costs.
+///
+/// A rate above this value will be rejected at service registration time.
+/// The value is set high enough to accommodate legitimate use cases while
+/// providing a safety bound against runaway pricing.
+///
+/// The actual deposit math overflow is still guarded by `checked_mul` in `create_lease`.
+pub const MAX_RATE_PER_CALL: i128 = i128::MAX / 100;
+
 #[contract]
 pub struct KeyLeaseRegistry;
 

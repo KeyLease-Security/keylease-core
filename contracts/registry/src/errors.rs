@@ -1,8 +1,9 @@
 use soroban_sdk::contracterror;
 
-/// Contract-level error codes returned by [`crate::KeyLeaseRegistry`].
-///
-/// Codes are stable and start at 1 (`0` is reserved by the host for success).
+/** Contract-level error codes returned by [`crate::KeyLeaseRegistry`].
+ * Codes are stable and start at 1 (`0` is reserved by the host for success).
+ * New codes must be appended; codes are part of the ABI.
+ */
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -40,4 +41,6 @@ pub enum Error {
     /// Lease duration exceeds `MAX_LEASE_DURATION_SECS`, so its storage entry
     /// could not be kept alive for the whole term.
     DurationTooLong = 16,
+    /// Rate per call exceeds the maximum allowed value.
+    RateTooHigh = 17,
 }
