@@ -45,7 +45,7 @@ malware scan over the checkout and the built Wasm artifacts. CI job names are
 | --- | --- |
 | `contracts/registry/src/lib.rs` | Entry points, `contractmeta!`, upgrade, protocol lifecycle. |
 | `contracts/registry/src/events.rs` | Typed `#[contractevent]` payloads. |
-| `contracts/registry/src/types.rs` | `Service`, `Lease`, `LeaseStatus`. |
+| `contracts/registry/src/types.rs` | `Service`, `Lease`, `ServiceStats`, `LeaseStatus`. |
 | `contracts/registry/src/storage.rs` | `DataKey` layout, TTL policy, accessors. |
 | `contracts/registry/src/errors.rs` | Stable `Error` codes (never reuse a number). |
 | `contracts/registry/src/test.rs` | Lifecycle, SAC, events, upgrade and re-entrancy tests. |

@@ -155,9 +155,9 @@ rails above exist; the full layout is in
 | `DataKey` variant names and arities: `Admin`, `Token`, `ServiceCount`, `LeaseCount`, `Service(u64)`, `Lease(u64)` | A `#[contracttype]` enum key encodes as `Vec[Symbol("<variant>"), …]`, so renaming `Lease` to `Leases` orphans every existing entry. The registry then reads `LeaseNotFound` on leases that still hold escrow. |
 | Stored value shapes for `Service` and `Lease` | Entries decode by field name and type. Renaming `used_calls`, retyping `locked_deposit`, or removing `settled` reinterprets or loses live records. |
 | Field presence, not field order, for structs | Old entries are read by key, so adding a field is safe **only** if the accessor tolerates its absence in entries written before the upgrade. |
-| `Error` codes, append-only (1–16 today) | Callers and indexers branch on the number; a reused code changes what a past transaction meant. |
+| `Error` codes, append-only (1–18 today) | Callers and indexers branch on the number; a reused code changes what a past transaction meant. |
 | Event names, topics and payload fields, append-only | They are the indexing ABI. Dropping a `#[topic]` field shifts every subscriber's filter, including the base64 segments in [Topics, payloads and filters](integration.md#topics-payloads-and-filters). |
-| `LeaseStatus` discriminants (`0`/`1`/`2`) | Returned by `lease_status` and cached by clients. |
+| `LeaseStatus` discriminants (`0`/`1`/`2`/`3`) | Returned by `lease_status` and cached by clients. `Revoked = 3` was appended; reusing `2` for a reclaimed lease would rewrite what every cached `Settled` meant. |
 | The `settled`-before-token-call ordering in `settle_lease` and `revoke_expired_lease` | It is the double-payout guard; reordering it behind a transfer reintroduces the re-entrancy bug the suite proves closed. |
 | The lease TTL policy covers term + 24 h grace + read buffer | If a shorter policy evicts a lease entry while escrow is still locked, the consumer's revoke path disappears. |
 | `MAX_LEASE_DURATION_SECS` never lowered below an in-flight lease's term | Existing leases stay settleable; lowering the cap for *new* leases is additive, lowering it retroactively is not. |

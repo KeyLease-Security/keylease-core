@@ -44,4 +44,10 @@ pub enum Error {
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.
     DepositTooLarge = 17,
+    /// Published `rate_per_call` exceeds `MAX_RATE_PER_CALL`.
+    ///
+    /// Raised by `register_service`, before any consumer can be quoted a price
+    /// that no lease could fund or whose deposit the arithmetic could not
+    /// represent.
+    RateTooHigh = 18,
 }
