@@ -806,6 +806,61 @@ fn test_upgrade_is_admin_only() {
     );
 }
 
+/// Verify that upgrading the contract via `update_current_contract_wasm`
+/// preserves all existing instance and persistent storage:
+/// - Admin address (`get_admin`)
+/// - Escrow token address (`get_token`)
+/// - Service and lease monotonic counters (`service_count`, `lease_count`)
+/// - Existing service entries (`get_service`)
+/// - Existing in-flight lease entries (`get_lease`)
+///
+/// Wasm fixture: `contracts/registry/test_fixtures/upgrade_fixture.wasm`
+/// Produced by building the release contract for wasm32v1-none:
+///   `cargo build --target wasm32v1-none --release -p keylease-registry`
+/// and copying `target/wasm32v1-none/release/keylease_registry.wasm` to
+/// `contracts/registry/test_fixtures/upgrade_fixture.wasm`.
+#[test]
+fn test_upgrade_preserves_storage() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    let wasm_bytes = include_bytes!("../test_fixtures/upgrade_fixture.wasm");
+    let wasm_bytes_val = soroban_sdk::Bytes::from_slice(&env, wasm_bytes);
+    let new_wasm_hash = env.deployer().upload_contract_wasm(wasm_bytes_val);
+
+    ctx.registry.upgrade(&ctx.admin, &new_wasm_hash);
+
+    // Verify admin and token configuration are preserved
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+    assert_eq!(ctx.registry.get_token(), ctx.token.address);
+
+    // Verify counters are preserved
+    assert_eq!(ctx.registry.service_count(), 1);
+    assert_eq!(ctx.registry.lease_count(), 1);
+
+    // Verify existing registered service is preserved
+    let service = ctx.registry.get_service(&service_id);
+    assert_eq!(service.provider, ctx.provider);
+    assert_eq!(service.rate_per_call, RATE);
+    assert!(service.is_active);
+
+    // Verify existing in-flight lease is preserved
+    let lease = ctx.registry.get_lease(&lease_id);
+    assert_eq!(lease.service_id, service_id);
+    assert_eq!(lease.consumer, ctx.consumer);
+    assert_eq!(lease.allocated_calls, 10);
+    assert_eq!(lease.used_calls, 0);
+    assert_eq!(lease.locked_deposit, RATE * 10);
+    assert_eq!(lease.expires_at, 1_000 + 3_600);
+    assert!(!lease.settled);
+}
+
 // A successful upgrade installs a real Wasm uploaded with
 // `stellar contract upload`, which the unit-test host cannot fabricate (it
 // requires a valid `contractspecv0` metadata section). The success path is
