@@ -8,7 +8,9 @@ as authoritative.
 - **Wasm:** `target/wasm32v1-none/release/keylease_registry.wasm`
 - **Network target:** Stellar (`wasm32v1-none`), `soroban-sdk 26`
 - **Constants:** `SETTLE_GRACE_PERIOD_SECS = 86_400` (24 hours),
-  `MAX_LEASE_DURATION_SECS = 2_592_000` (30 days)
+  `MAX_LEASE_DURATION_SECS = 2_592_000` (30 days),
+  `BASIS_POINTS_DENOMINATOR = 10_000`,
+  `MAX_PROTOCOL_FEE_BPS = 1_000` (10%)
 - **Storage TTL:** `LEDGER_BUMP_THRESHOLD = 17_280`, `LEDGER_BUMP_EXTEND = 518_400`;
   leases extend to term + 24h grace + a 1-day buffer
 - **On-chain metadata:** `name = KeyLeaseRegistry`, `version`,
@@ -37,8 +39,8 @@ Initialize the registry and appoint `admin`.
 - **State:** sets `Admin`; extends instance TTL.
 - **Events:** `registry_initialized { admin }`.
 - **Errors:** `AlreadyInitialized`.
-- **Notes:** the admin can only call `set_token` and `upgrade`. It cannot move
-  user funds.
+- **Notes:** the admin can configure the token and protocol fee, and upgrade
+  the Wasm. It cannot move user funds.
 
 ### `set_token`
 
@@ -55,6 +57,31 @@ Point the registry at the SEP-41 token used for every deposit and payout.
 - **Errors:** `NotInitialized`, `Unauthorized`.
 - **Notes:** the native Stellar Asset Contract (SAC) is the usual value. Changing
   the token while leases are unsettled is a migration hazard — settle first.
+
+### `set_protocol_fee`
+
+```rust
+pub fn set_protocol_fee(
+    env: Env,
+    admin: Address,
+    fee_bps: u32,
+    fee_recipient: Option<Address>,
+) -> Result<(), Error>
+```
+
+Configure the fee charged on provider-earned settlement amounts.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **Parameters:** `fee_bps` is basis points (10,000 = 100%) and must be at most
+  1,000 (10%). A zero fee permits `None`; a positive fee requires a recipient.
+  The registry itself cannot be the recipient.
+- **State:** writes `ProtocolFeeBps` and `FeeRecipient`; extends instance TTL.
+- **Events:** `protocol_fee_set { admin, fee_bps, fee_recipient }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `FeeTooHigh`,
+  `FeeRecipientNotSet`, `InvalidFeeRecipient`.
+- **Notes:** new storage keys are appended and default to `0` / `None` when
+  absent, so existing deployments retain a zero-fee configuration on upgrade.
+  The configuration in effect at settlement applies to outstanding leases.
 
 ### `upgrade`
 
@@ -146,7 +173,10 @@ Lock a deposit and mint a time-bound lease.
 - **Preconditions:** `requested_calls > 0`, `0 < duration_secs ≤
   MAX_LEASE_DURATION_SECS`, the service exists and `is_active`, and `Token` is
   set.
-- **Effects:** `transfer(consumer → contract, rate_per_call × requested_calls)`.
+- **Effects:** transfers exactly `rate_per_call × requested_calls` from
+  consumer to registry. Sender and recipient balances are checked before and
+  after each transfer; a non-exact transfer returns `InvalidTokenBehavior` and
+  rolls the transaction back.
 - **Returns:** the new `lease_id` (monotonic, starts at `1`).
 - **State:** writes `Lease(lease_id)` with `expires_at = ledger.timestamp() +
   duration_secs` and a TTL covering the term plus grace; increments `LeaseCount`.
@@ -173,14 +203,18 @@ Pay the provider for verified calls and refund the remainder to the consumer.
   allocated_calls`, the caller owns the service, and the lease has expired **or**
   `verified_calls == allocated_calls`.
 - **Effects:** persists `used_calls` and `settled = true` **first**, then calls
-  `transfer(contract → provider, verified_calls × rate_per_call)` and
-  `transfer(contract → consumer, locked_deposit − payout)`.
-- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+  exact transfers to the provider, fee recipient (if the fee is non-zero), and
+  consumer. Gross earned is `verified_calls × rate_per_call`;
+  `protocol_fee = floor(gross_earned × fee_bps / 10,000)`,
+  `payout = gross_earned − protocol_fee`, and
+  `refund = locked_deposit − gross_earned`. The refund is not charged a fee.
+- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, protocol_fee, refund }`.
 - **Errors:** `LeaseNotFound`, `LeaseAlreadySettled`, `InvalidCalls`,
-  `Unauthorized`, `LeaseNotSettleable`, `TokenNotSet`, `Overflow`.
+  `Unauthorized`, `LeaseNotSettleable`, `TokenNotSet`, `Overflow`,
+  `InvalidTokenBehavior`, `FeeTooHigh`, `FeeRecipientNotSet`.
 - **Notes:** zero-value transfers are skipped. Settling with
-  `verified_calls = 0` is a legitimate way for a provider to refund an
-  unusable lease. A re-entrant token sees `settled = true` and is rejected.
+  `verified_calls = 0` charges no fee and refunds the whole deposit. A
+  re-entrant token sees `settled = true` and is rejected.
 
 ### `revoke_expired_lease`
 
@@ -196,11 +230,12 @@ Reclaim the **full** deposit when the provider never settled.
 
 - **Caller / auth:** `consumer`, and it must be the lease's consumer.
 - **Trigger:** after `expires_at + SETTLE_GRACE_PERIOD_SECS`.
-- **Effects:** persists `settled = true` first, then
-  `transfer(contract → consumer, locked_deposit)`.
+- **Effects:** persists `settled = true` first, then transfers the full deposit
+  exactly to the consumer. Revocation never charges a protocol fee.
 - **Events:** `lease_revoked { lease_id, consumer, refund }`.
 - **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
-  `LeaseNotExpired`, `RevokeWindowNotElapsed`, `TokenNotSet`, `Overflow`.
+  `LeaseNotExpired`, `RevokeWindowNotElapsed`, `TokenNotSet`, `Overflow`,
+  `InvalidTokenBehavior`.
 - **Notes:** this is the consumer's escape hatch, and the reason escrow is safe
   against an unresponsive provider.
 
@@ -214,6 +249,7 @@ These require no authorization.
 | --- | --- | --- |
 | `get_admin` | `(env) -> Result<Address, Error>` | stored admin, else `NotInitialized` |
 | `get_token` | `(env) -> Result<Address, Error>` | escrow token, else `TokenNotSet` |
+| `get_protocol_fee` | `(env) -> (u32, Option<Address>)` | fee in basis points and recipient; absent configuration is `(0, None)` |
 | `version` | `(env) -> String` | version embedded by `contractmeta!` |
 | `service_count` | `(env) -> u64` | total services ever registered |
 | `lease_count` | `(env) -> u64` | total leases ever created |
@@ -239,8 +275,9 @@ Events are part of the ABI. Each event name is a `Symbol` topic, followed by the
 | `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `provider`, `is_active` |
 | `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
-| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `protocol_fee`, `refund` |
 | `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `protocol_fee_set` | — | `admin`, `fee_bps`, `fee_recipient` |
 | `contract_upgraded` | — | `admin`, `new_wasm_hash` |
 
 ```bash
@@ -282,6 +319,8 @@ pub enum DataKey {
     LeaseCount,   // instance
     Service(u64), // persistent
     Lease(u64),   // persistent
+    ProtocolFeeBps, // instance; absent means zero
+    FeeRecipient, // instance; absent means no recipient
 }
 ```
 
@@ -313,6 +352,10 @@ never reused.
 | 14 | `TokenNotSet` | escrow token not configured |
 | 15 | `Overflow` | checked arithmetic failed |
 | 16 | `DurationTooLong` | lease duration above `MAX_LEASE_DURATION_SECS` |
+| 17 | `InvalidTokenBehavior` | token transfer did not debit and credit the exact amount |
+| 18 | `FeeTooHigh` | protocol fee exceeds 1,000 basis points |
+| 19 | `FeeRecipientNotSet` | positive fee configured without a recipient |
+| 20 | `InvalidFeeRecipient` | registry configured as its own fee recipient |
 
 ## Invoking with the Stellar CLI
 

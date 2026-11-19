@@ -118,7 +118,7 @@ by `#[contractevent]`:
 assert_single_event(
     &env,
     &registry_id,
-    &LeaseSettled { lease_id, provider, verified_calls, payout, refund },
+    &LeaseSettled { lease_id, provider, verified_calls, payout, protocol_fee, refund },
 );
 ```
 

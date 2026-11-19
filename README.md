@@ -67,7 +67,7 @@ flowchart LR
     REG -- "transfer into escrow" --> TOK
     P -- "publish rate + endpoint_hash" --> REG
     S -- "claim used_calls × rate" --> REG
-    REG -- "payout + refund" --> TOK
+    REG -- "provider payout + protocol fee + refund" --> TOK
     R -- "full refund after 24h" --> REG
     REG -. "lease_created / lease_settled / lease_revoked" .-> EV
     EV -. "index + verify" .-> I
@@ -105,13 +105,14 @@ keylease-core/
 | --- | --- | --- |
 | `init(admin)` | `admin` | One-time initialization; appoints the protocol admin. Emits `registry_initialized`. |
 | `set_token(admin, token)` | `admin` | Configure the SEP-41 escrow token (native SAC or custom). Emits `escrow_token_set`. |
+| `set_protocol_fee(admin, fee_bps, fee_recipient)` | `admin` | Configure the fee (0–1,000 bps) and recipient. Emits `protocol_fee_set`. |
 | `upgrade(admin, new_wasm_hash)` | `admin` | Install a new Wasm through the Soroban deployer. Emits `contract_upgraded`. |
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
-| `settle_lease(provider, lease_id, verified_calls)` | `provider` | Pay the provider, refund the remainder. Emits `lease_settled`. |
+| `settle_lease(provider, lease_id, verified_calls)` | `provider` | Split earned funds between provider and protocol fee, then refund the unused remainder. Emits `lease_settled`. |
 | `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
-| `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. |
+| `get_admin()`, `get_token()`, `get_protocol_fee()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. |
 | `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)` | — | Derived lifecycle queries. |
 | `service_count()`, `lease_count()` | — | Monotonic counters. |
 
@@ -127,8 +128,9 @@ extra. Event names are the first topic; ids follow.
 | `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `provider`, `is_active` |
 | `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
-| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `protocol_fee`, `refund` |
 | `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `protocol_fee_set` | — | `admin`, `fee_bps`, `fee_recipient` |
 | `contract_upgraded` | — | `admin`, `new_wasm_hash` |
 
 ```bash
@@ -259,16 +261,25 @@ invariants:
 6. **Explicit authorization.** Every state-changing entry point calls
    `require_auth()` on the actor it claims to represent, and cross-checks that
    actor against stored ownership where relevant.
-7. **Bounded admin.** The admin can configure the token and upgrade the Wasm. It
-   cannot move escrowed funds.
+7. **Bounded admin.** The admin can configure the token and protocol fee and
+   upgrade the Wasm. It cannot move escrowed funds.
 
 ### Trusting the escrow token
 
-The registry uses the standard SEP-41 `transfer` interface, so it works with the
-native Stellar Asset Contract or a custom token. The token is set by the admin
-via `set_token`. Because the token boundary is a cross-contract call, the money
-paths follow checks-effects-interactions and have an adversarial test against a
-re-entrant token.
+The registry uses the standard SEP-41 `transfer` and `balance` interfaces, so it
+works with the native Stellar Asset Contract or a custom SEP-41 token that has
+truthful, stable balances and exact transfer semantics. Each deposit, payout
+and refund is checked against sender and recipient balance deltas. A non-exact
+transfer fails with `InvalidTokenBehavior` and rolls the transaction back;
+fee-on-transfer and rebasing tokens are not supported. The token is set by the
+admin via `set_token`, but its behavior is checked on every transfer rather
+than assumed safe from its address alone. Because the token boundary is a
+cross-contract call, the money paths follow checks-effects-interactions and
+have adversarial tests against fee-on-transfer and re-entrant tokens.
+
+The admin may set a protocol fee up to 1,000 basis points (10%). It is charged
+only on the amount earned for verified calls; the unused consumer refund is
+protected, and a revoked lease returns its full deposit without a fee.
 
 > `contracts/mock_token` is a **test/sandbox-only** token with an unlimited mint.
 > It must never be deployed to a network holding real value. The test suite
@@ -282,7 +293,7 @@ re-entrant token.
 cargo test --all
 ```
 
-The 40 tests in `contracts/registry/src/test.rs` cover:
+The registry tests in `contracts/registry/src/test.rs` cover:
 
 - service registration and ID monotonicity,
 - the happy path (lock → full-usage settle before expiry),
@@ -293,6 +304,8 @@ The 40 tests in `contracts/registry/src/test.rs` cover:
 - rate-math, timestamp and duration overflow/rejection,
 - every emitted event, including its topics and payload,
 - the full lifecycle escrowed with the **native Stellar Asset Contract**,
+- a **fee-on-transfer token** rejected on deposits and payouts,
+- protocol-fee limits, rounding, configuration, refunds and revoked leases,
 - a **re-entrant token** attempting a second settlement,
 - status transitions and derived views.
 

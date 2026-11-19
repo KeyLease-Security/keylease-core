@@ -23,6 +23,7 @@ pub enum DataKey {
     Balance(Address),
     Allowance(Address, Address),
     AllowanceExpiry(Address, Address),
+    TransferFeeBps,
 }
 
 /// Error codes returned by the mock token.
@@ -42,6 +43,10 @@ pub enum TokenError {
     NotInitialized = 5,
     /// Only the admin may perform this operation.
     Unauthorized = 6,
+    /// The configured transfer fee exceeds 10,000 basis points.
+    InvalidFee = 7,
+    /// Arithmetic overflow in mock-token balance or fee math.
+    Overflow = 8,
 }
 
 #[contract]
@@ -79,7 +84,26 @@ impl MockToken {
 
         let key = DataKey::Balance(to.clone());
         let balance = read_balance(&env, &to);
-        env.storage().persistent().set(&key, &(balance + amount));
+        let balance = balance.checked_add(amount).ok_or(TokenError::Overflow)?;
+        env.storage().persistent().set(&key, &balance);
+        Ok(())
+    }
+
+    /// Configure a transfer fee, deducted from the recipient amount. Admin only.
+    ///
+    /// This exists to model incompatible fee-on-transfer tokens in registry
+    /// tests; production deployments must not use this mock token.
+    pub fn set_transfer_fee_bps(env: Env, admin: Address, fee_bps: u32) -> Result<(), TokenError> {
+        admin.require_auth();
+        if read_admin(&env)? != admin {
+            return Err(TokenError::Unauthorized);
+        }
+        if fee_bps > 10_000 {
+            return Err(TokenError::InvalidFee);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::TransferFeeBps, &fee_bps);
         Ok(())
     }
 
@@ -214,13 +238,21 @@ fn move_balance(env: &Env, from: &Address, to: &Address, amount: i128) -> Result
 
     let from_key = DataKey::Balance(from.clone());
     let to_key = DataKey::Balance(to.clone());
+    let fee_bps: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::TransferFeeBps)
+        .unwrap_or(0);
+    let fee = transfer_fee(amount, fee_bps)?;
+    let received = amount.checked_sub(fee).ok_or(TokenError::Overflow)?;
+    let to_balance = read_balance(env, to)
+        .checked_add(received)
+        .ok_or(TokenError::Overflow)?;
 
     env.storage()
         .persistent()
         .set(&from_key, &(from_balance - amount));
-    env.storage()
-        .persistent()
-        .set(&to_key, &(read_balance(env, to) + amount));
+    env.storage().persistent().set(&to_key, &to_balance);
 
     env.storage()
         .persistent()
@@ -229,6 +261,20 @@ fn move_balance(env: &Env, from: &Address, to: &Address, amount: i128) -> Result
         .persistent()
         .extend_ttl(&to_key, TTL_THRESHOLD, TTL_EXTEND);
     Ok(())
+}
+
+fn transfer_fee(amount: i128, fee_bps: u32) -> Result<i128, TokenError> {
+    let denominator = 10_000i128;
+    let fee_bps = fee_bps as i128;
+    let whole = (amount / denominator)
+        .checked_mul(fee_bps)
+        .ok_or(TokenError::Overflow)?;
+    let fractional = (amount % denominator)
+        .checked_mul(fee_bps)
+        .ok_or(TokenError::Overflow)?
+        .checked_div(denominator)
+        .ok_or(TokenError::Overflow)?;
+    whole.checked_add(fractional).ok_or(TokenError::Overflow)
 }
 
 fn read_allowance(env: &Env, from: &Address, spender: &Address) -> i128 {

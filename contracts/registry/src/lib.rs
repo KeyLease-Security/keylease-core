@@ -61,7 +61,7 @@ use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
 
 pub use crate::errors::Error;
 pub use crate::events::{
-    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
+    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled, ProtocolFeeSet,
     RegistryInitialized, ServiceRegistered, ServiceStatusChanged,
 };
 pub use crate::types::{Lease, LeaseStatus, Service};
@@ -89,6 +89,12 @@ pub const SETTLE_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60;
 /// never outlive its storage entry. At thirty days the resulting TTL (~32 days)
 /// is well under the network's maximum entry TTL (180 days on Testnet).
 pub const MAX_LEASE_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Denominator for protocol fee rates expressed in basis points.
+pub const BASIS_POINTS_DENOMINATOR: u32 = 10_000;
+
+/// Maximum protocol fee: 1,000 basis points (10%).
+pub const MAX_PROTOCOL_FEE_BPS: u32 = 1_000;
 
 #[contract]
 pub struct KeyLeaseRegistry;
@@ -131,6 +137,45 @@ impl KeyLeaseRegistry {
         EscrowTokenSet {
             admin: admin.clone(),
             token: token.clone(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Configure the protocol fee and its recipient. Admin only.
+    ///
+    /// `fee_bps` is in basis points (10,000 = 100%) and cannot exceed
+    /// [`MAX_PROTOCOL_FEE_BPS`]. A zero fee may have no recipient; a positive
+    /// fee requires one. The registry itself cannot be the recipient.
+    pub fn set_protocol_fee(
+        env: Env,
+        admin: Address,
+        fee_bps: u32,
+        fee_recipient: Option<Address>,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        if fee_bps > MAX_PROTOCOL_FEE_BPS {
+            return Err(Error::FeeTooHigh);
+        }
+        if fee_bps > 0 && fee_recipient.is_none() {
+            return Err(Error::FeeRecipientNotSet);
+        }
+        if fee_recipient
+            .as_ref()
+            .is_some_and(|recipient| recipient == &env.current_contract_address())
+        {
+            return Err(Error::InvalidFeeRecipient);
+        }
+
+        storage::set_protocol_fee_bps(&env, fee_bps);
+        storage::set_fee_recipient(&env, fee_recipient.clone());
+        storage::extend_instance_ttl(&env);
+        ProtocolFeeSet {
+            admin,
+            fee_bps,
+            fee_recipient,
         }
         .publish(&env);
         Ok(())
@@ -228,9 +273,10 @@ impl KeyLeaseRegistry {
 
     /// Lock a deposit and mint a time-bound lease.
     ///
-    /// Transfers `rate_per_call * requested_calls` of the escrow token from
-    /// `consumer` into the registry, and records a lease that expires at
-    /// `ledger.timestamp() + duration_secs`. Requires `consumer` auth.
+    /// Transfers exactly `rate_per_call * requested_calls` of the escrow token
+    /// from `consumer` into the registry, and records a lease that expires at
+    /// `ledger.timestamp() + duration_secs`. Tokens with non-exact transfer
+    /// semantics are rejected. Requires `consumer` auth.
     ///
     /// `duration_secs` must be in `1..=MAX_LEASE_DURATION_SECS`. The upper bound
     /// is a Soroban storage constraint: the lease's persistent entry is extended
@@ -298,11 +344,13 @@ impl KeyLeaseRegistry {
         // called, and the whole transaction reverts if the transfer does.
         storage::save_lease(&env, &lease);
         storage::extend_instance_ttl(&env);
-        token::Client::new(&env, &token_addr).transfer(
+        transfer_exact(
+            &env,
+            &token_addr,
             &consumer,
-            env.current_contract_address(),
+            &env.current_contract_address(),
             &required_deposit,
-        );
+        )?;
 
         LeaseCreated {
             lease_id,
@@ -322,9 +370,10 @@ impl KeyLeaseRegistry {
     ///
     /// A lease may only be settled when it has **expired** or when
     /// `verified_calls == allocated_calls` (the consumer got everything it
-    /// paid for, so there is no reason to wait). Settling pays out
-    /// `verified_calls * rate_per_call` and returns
-    /// `locked_deposit - payout` to the consumer. A lease can be settled once.
+    /// paid for, so there is no reason to wait). The protocol fee is floored
+    /// from the amount earned for verified calls; the remainder is paid to the
+    /// provider, and the unused deposit is returned in full. A lease can be
+    /// settled once.
     pub fn settle_lease(
         env: Env,
         provider: Address,
@@ -352,14 +401,25 @@ impl KeyLeaseRegistry {
             return Err(Error::LeaseNotSettleable);
         }
 
-        let payout = service
+        let earned = service
             .rate_per_call
             .checked_mul(verified_calls as i128)
             .ok_or(Error::Overflow)?;
         let refund = lease
             .locked_deposit
-            .checked_sub(payout)
+            .checked_sub(earned)
             .ok_or(Error::Overflow)?;
+        let fee_bps = storage::protocol_fee_bps(&env);
+        if fee_bps > MAX_PROTOCOL_FEE_BPS {
+            return Err(Error::FeeTooHigh);
+        }
+        let protocol_fee = calculate_protocol_fee(earned, fee_bps)?;
+        let payout = earned.checked_sub(protocol_fee).ok_or(Error::Overflow)?;
+        let fee_recipient = if protocol_fee > 0 {
+            Some(storage::fee_recipient(&env).ok_or(Error::FeeRecipientNotSet)?)
+        } else {
+            None
+        };
 
         // checks-effects-interactions: persist the settlement before any token
         // transfer, so a re-entrant token sees a settled lease and reverts.
@@ -368,14 +428,16 @@ impl KeyLeaseRegistry {
         storage::save_lease(&env, &lease);
 
         let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
-        let client = token::Client::new(&env, &token_addr);
         let contract = env.current_contract_address();
 
         if payout > 0 {
-            client.transfer(&contract, &service.provider, &payout);
+            transfer_exact(&env, &token_addr, &contract, &service.provider, &payout)?;
+        }
+        if let Some(recipient) = fee_recipient {
+            transfer_exact(&env, &token_addr, &contract, &recipient, &protocol_fee)?;
         }
         if refund > 0 {
-            client.transfer(&contract, &lease.consumer, &refund);
+            transfer_exact(&env, &token_addr, &contract, &lease.consumer, &refund)?;
         }
 
         LeaseSettled {
@@ -383,6 +445,7 @@ impl KeyLeaseRegistry {
             provider,
             verified_calls,
             payout,
+            protocol_fee,
             refund,
         }
         .publish(&env);
@@ -429,11 +492,13 @@ impl KeyLeaseRegistry {
 
         if refund > 0 {
             let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
-            token::Client::new(&env, &token_addr).transfer(
+            transfer_exact(
+                &env,
+                &token_addr,
                 &env.current_contract_address(),
                 &consumer,
                 &refund,
-            );
+            )?;
         }
 
         LeaseRevoked {
@@ -458,6 +523,16 @@ impl KeyLeaseRegistry {
     /// Return the configured escrow token, or `TokenNotSet`.
     pub fn get_token(env: Env) -> Result<Address, Error> {
         storage::get_token(&env).ok_or(Error::TokenNotSet)
+    }
+
+    /// Return the configured protocol fee in basis points and its recipient.
+    ///
+    /// Older instances without fee configuration return `(0, None)`.
+    pub fn get_protocol_fee(env: Env) -> (u32, Option<Address>) {
+        (
+            storage::protocol_fee_bps(&env),
+            storage::fee_recipient(&env),
+        )
     }
 
     /// Version string embedded in the Wasm by `contractmeta!`.
@@ -518,4 +593,57 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
         return Err(Error::Unauthorized);
     }
     Ok(())
+}
+
+/// Move exactly `amount` according to both token balance views.
+///
+/// Any mismatch returns an error, causing the entire Soroban transaction
+/// (including the token call and earlier storage writes) to roll back.
+fn transfer_exact(
+    env: &Env,
+    token_addr: &Address,
+    from: &Address,
+    to: &Address,
+    amount: &i128,
+) -> Result<(), Error> {
+    if *amount <= 0 || from == to {
+        return Err(Error::InvalidTokenBehavior);
+    }
+
+    let client = token::Client::new(env, token_addr);
+    let from_before = client.balance(from);
+    let to_before = client.balance(to);
+    client.transfer(from, to, amount);
+    let expected_from = from_before
+        .checked_sub(*amount)
+        .ok_or(Error::InvalidTokenBehavior)?;
+    let expected_to = to_before.checked_add(*amount).ok_or(Error::Overflow)?;
+
+    if client.balance(from) != expected_from || client.balance(to) != expected_to {
+        return Err(Error::InvalidTokenBehavior);
+    }
+    Ok(())
+}
+
+/// Calculate a basis-point fee with floor rounding and no overflowing
+/// intermediate product.
+fn calculate_protocol_fee(earned: i128, fee_bps: u32) -> Result<i128, Error> {
+    if fee_bps > MAX_PROTOCOL_FEE_BPS {
+        return Err(Error::FeeTooHigh);
+    }
+    if earned < 0 {
+        return Err(Error::Overflow);
+    }
+
+    let denominator = BASIS_POINTS_DENOMINATOR as i128;
+    let fee_bps = fee_bps as i128;
+    let whole = (earned / denominator)
+        .checked_mul(fee_bps)
+        .ok_or(Error::Overflow)?;
+    let fractional = (earned % denominator)
+        .checked_mul(fee_bps)
+        .ok_or(Error::Overflow)?
+        .checked_div(denominator)
+        .ok_or(Error::Overflow)?;
+    whole.checked_add(fractional).ok_or(Error::Overflow)
 }

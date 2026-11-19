@@ -40,9 +40,14 @@ Its address is derived from the network passphrase, not invented:
 stellar contract id asset --network testnet --asset native
 ```
 
-Any SEP-41 token can be configured instead with `set_token`; the derive command
-above is only for the native asset. The admin must call `set_token` before any
-lease can be created (`TokenNotSet` otherwise).
+Custom SEP-41 tokens can be configured with `set_token`; the derive command
+above is only for the native asset. Choose a token with truthful, stable
+`balance` results and exact sender debits and recipient credits. Fee-on-transfer
+and rebasing tokens are unsupported: each non-exact deposit, payout, or refund
+is rejected and the transaction rolls back. `set_token` does not probe token
+behavior, so administrators must verify compatibility before configuration.
+The admin must call `set_token` before any lease can be created (`TokenNotSet`
+otherwise).
 
 ## Funding accounts
 

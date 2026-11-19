@@ -29,6 +29,10 @@ pub enum DataKey {
     Service(u64),
     /// `Lease` by id (persistent storage).
     Lease(u64),
+    /// Protocol fee in basis points; absent values mean zero (instance storage).
+    ProtocolFeeBps,
+    /// Recipient of non-zero protocol fees (instance storage).
+    FeeRecipient,
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +57,32 @@ pub fn set_token(env: &Env, token: &Address) {
 
 pub fn get_token(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::Token)
+}
+
+pub fn set_protocol_fee_bps(env: &Env, fee_bps: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ProtocolFeeBps, &fee_bps);
+}
+
+pub fn protocol_fee_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProtocolFeeBps)
+        .unwrap_or(0)
+}
+
+pub fn set_fee_recipient(env: &Env, fee_recipient: Option<Address>) {
+    env.storage()
+        .instance()
+        .set(&DataKey::FeeRecipient, &fee_recipient);
+}
+
+pub fn fee_recipient(env: &Env) -> Option<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::FeeRecipient)
+        .unwrap_or(None)
 }
 
 /// Bump the TTL of the instance (configuration) storage entry.
