@@ -155,6 +155,71 @@ stellar events --id $REGISTRY --network testnet --start-ledger <ledger> \
 usually enough for a one-off check; the encoded filters matter when a subscriber
 needs the server to narrow the stream.
 
+### Checking a filter against the live contract
+
+The table above is read out of this repository's source. The deployment is the
+other half of the ABI, and an upgrade can move a field from one side of the
+topics line to the other, so confirm the layout you are about to hard-code:
+
+```bash
+stellar contract info interface --id $REGISTRY --network testnet
+```
+
+The spec comes back as the `#[contractevent]` structs the SDK reconstructed from
+it, and `#[topic]` marks exactly the fields that occupy a topic position:
+
+```rust
+#[soroban_sdk::contractevent(topics = ["lease_created"])]
+pub struct LeaseCreated {
+    #[topic]
+    pub lease_id: u64,
+    pub service_id: u64,
+    // remaining fields are payload-only
+}
+```
+
+A field printed without `#[topic]` cannot be narrowed on at any ledger range;
+decode it instead. Run this after an upgrade that touched an event, and treat
+the printed struct as the ABI your subscribers see rather than the Rust source
+you merged — the two can disagree for one release.
+
+### Filtering from your own code
+
+A subscriber that calls the RPC itself puts the same segments in a filter's
+`topics` field, which is an array of arrays: one inner array per topic position,
+with the same arity and `*` rules as `--topic`.
+
+```json
+{
+  "startLedger": 5819050,
+  "filters": [
+    {
+      "type": "contract",
+      "contractIds": ["CCEZYHUJUICXVPLH6UC2OFZL2RG23QQ7EMZOWE32WVQPT25DCTIAFH62"],
+      "topics": [["AAAADwAAAA1sZWFzZV9jcmVhdGVkAAAA", "*"]]
+    }
+  ]
+}
+```
+
+`@stellar/stellar-sdk` types it identically, and its request union keeps the two
+resume modes apart: `startLedger` (with optional `endLedger` and `limit`) or
+`cursor` (with `limit`), never both.
+
+```ts
+// `persistedLedger` is your own resume point, not a value the RPC owes you
+const { events, cursor, oldestLedger } = await server.getEvents({
+  startLedger: persistedLedger,
+  filters: [
+    {
+      type: "contract",
+      contractIds: [process.env.KEYLEASE_CONTRACT_ID!],
+      topics: [["AAAADwAAAA1sZWFzZV9jcmVhdGVkAAAA", "*"]],
+    },
+  ],
+});
+```
+
 ### Recipes
 
 - **`lease_created`** — open (or upsert) a lease record keyed by `lease_id`,
@@ -219,6 +284,42 @@ Prefer the payload key over the `eventSchemaVersion` metadata when decoding
 history: metadata describes the Wasm running *now*, while an event from an old
 ledger was emitted by the schema that was running *then*. Read the metadata once
 at startup to learn the current version, and index from there.
+
+### Resuming where you left off
+
+`stellar events` takes `--start-ledger` or `--cursor`, and a JSON-RPC subscriber
+takes the same pair. Persist whichever you used. Delivery is at-least-once after
+a restart, so key every projection row by `lease_id` or `service_id` and make
+the writes idempotent.
+
+Retention is the endpoint's, not yours, and it is a rolling window, so a resume
+from too far back is refused rather than answered with an empty list. The deploy
+ledger recorded in [Deployments](deployments.md) is `5382788`; asking the public
+Testnet endpoint for it today returns:
+
+```text
+startLedger must be within the ledger range: 5698139 - 5819098
+```
+
+Every response states the window it is serving, as `oldestLedger` and
+`latestLedger` with their close times, so an indexer does not have to guess when
+it is about to lose history. Measured on that same endpoint: `5698126` to
+`5819085`, which is 120,959 ledgers spanning 604,791 seconds — seven days at
+five seconds a ledger.
+
+Three consequences:
+
+- **Watch `oldestLedger` against your own cursor.** The gap closes while you are
+  still healthy, so alert on the trend rather than on the rejection you get once
+  it has already lapped you.
+- **A week of downtime is not backfillable from the ledger.** Rebuild from the
+  counters (`service_count`, `lease_count`) and the read views, continue from
+  `oldestLedger`, and mark the range you cannot replay instead of treating it as
+  empty.
+- **Anything older than the window needs the explorer.** The recorded history in
+  [Deployments](deployments.md) is provable by transaction link, not by
+  `stellar events` — and not by a read, either, once the entry's lifetime has
+  run out; see [Storage lifetime](#storage-lifetime).
 
 ## Storage lifetime
 

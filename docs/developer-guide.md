@@ -135,7 +135,7 @@ strand, or double-spend.
 A release is four things: a version bump, a notes page, a check run and an
 annotated tag. Nothing in `.github/workflows/` publishes a crate, builds a
 GitHub Release or cuts a tag — `ci.yml` only gates commits and `docs.yml` only
-builds the site on push to `main` — so the steps below are the whole process.
+builds and publishes the site — so the steps below are the whole process.
 
 ### 1. Bump the version
 
@@ -219,9 +219,13 @@ pip install -r requirements-docs.txt && mkdocs build --strict
 
 The first four are the CI jobs every commit must pass; `cargo deny check` and
 `./scripts/scan-malware.sh` are the Dependency Policy and Malware Scan jobs run
-locally. `mkdocs build --strict` is the one that bites at release time: the docs
-workflow only runs on `main`, so a notes page missing from `nav:` or a dangling
-anchor goes red *after* the release commit has landed.
+locally. `mkdocs build --strict` is the one that bites here, because the failure
+it catches is a page missing from `nav:` or an anchor that does not resolve. It
+is a pull-request gate as well as a `main` gate, but only for a PR that touches
+`docs/**`, `mkdocs.yml` or `requirements-docs.txt` — those paths run the
+`Docs → Build preview` job. A release branch that changes none of them, such as
+one that only bumps the version, gets no preview run at all, so execute the
+command above yourself before tagging.
 
 ### 4. Tag the release commit on `main`
 

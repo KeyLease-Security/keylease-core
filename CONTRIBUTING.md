@@ -54,7 +54,7 @@ repository, so the local command below is the same check and fails the same way:
 | --- | --- | --- | --- |
 | Spell check | `typos` | [`_typos.toml`](./_typos.toml) | `Spell Check` |
 | Markdown lint | `npx markdownlint-cli2@0.24.0` | [`.markdownlint-cli2.jsonc`](./.markdownlint-cli2.jsonc) | `Markdown Lint` |
-| Nav, anchors, links | `mkdocs build --strict` | [`mkdocs.yml`](./mkdocs.yml) | `Docs → Build & deploy` |
+| Nav, anchors, links | `mkdocs build --strict` | [`mkdocs.yml`](./mkdocs.yml) | `Docs → Build preview` (PR), `Build & deploy` (`main`) |
 
 ```bash
 cargo install typos-cli --locked            # one-time
@@ -72,11 +72,16 @@ arguments lints exactly what CI lints. `mkdocs build --strict` promotes a broken
 nav entry or a missing in-page anchor to an error, which is why internal links
 must target real heading slugs.
 
-The Docs workflow runs on `push` to `main` and `workflow_dispatch` only, so a
-broken anchor will not fail your PR — run `mkdocs build --strict` locally before
-opening one. The checks that guard your branch are the CI jobs `Format`,
-`Clippy`, `Test`, `Build (wasm32v1-none)`, `Spell Check`, `Markdown Lint`,
-`Dependency Policy` and the required `Malware Scan`.
+The Docs workflow gates a pull request through its `Build preview` job, but only
+when the PR touches `docs/**`, `mkdocs.yml`, `requirements-docs.txt` or the
+workflow file itself. A documentation change therefore fails on the anchor
+before it merges — which is why the local command above is still worth running,
+since it is the same build and it answers in seconds. A change that touches none
+of those paths gets no Docs job on the PR at all, so if you edit `nav:` in a
+branch that only changes Rust, run it yourself. The checks that guard your branch
+are the CI jobs `Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`,
+`Spell Check`, `Markdown Lint`, `Dependency Policy` and the required
+`Malware Scan`.
 
 ## Repository layout
 
