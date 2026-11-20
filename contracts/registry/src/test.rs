@@ -7,8 +7,8 @@ use soroban_sdk::{
 use keylease_mock_token::{MockToken, MockTokenClient};
 
 use crate::events::{
-    EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled, ServiceRegistered,
-    ServiceStatusChanged, EVENT_SCHEMA_VERSION,
+    EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled, ServiceProviderTransferred,
+    ServiceRegistered, ServiceStatusChanged, EVENT_SCHEMA_VERSION,
 };
 use crate::storage::{self, LEDGER_BUMP_EXTEND, LEDGER_BUMP_THRESHOLD, MAX_ENTRY_TTL_LEDGERS};
 use crate::{
@@ -263,6 +263,187 @@ fn test_set_service_active_is_provider_only() {
             .try_set_service_active(&impostor, &service_id, &false),
         Err(Ok(Error::Unauthorized))
     );
+}
+
+// ---------------------------------------------------------------------------
+// Provider key rotation (transfer_service)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_transfer_service_moves_ownership_and_emits_event() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // Auths and events describe the last invocation, so read them before any
+    // other contract call replaces them.
+    let auths = env.auths();
+    assert_eq!(
+        auths.len(),
+        1,
+        "only the current provider authorizes a hand-over"
+    );
+    assert_eq!(auths[0].0, ctx.provider);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &ServiceProviderTransferred {
+            schema_version: EVENT_SCHEMA_VERSION,
+            service_id,
+            previous_provider: ctx.provider.clone(),
+            new_provider: new_provider.clone(),
+        },
+    );
+
+    assert_eq!(ctx.registry.get_service(&service_id).provider, new_provider);
+    // Everything except the owner is untouched.
+    let service = ctx.registry.get_service(&service_id);
+    assert_eq!(service.rate_per_call, RATE);
+    assert!(service.is_active);
+    assert_eq!(service.endpoint_hash, endpoint_hash(&env));
+}
+
+#[test]
+fn test_transfer_service_is_rejected_for_a_non_owner() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let impostor = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&impostor, &service_id, &new_provider),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.registry.get_service(&service_id).provider, ctx.provider);
+}
+
+#[test]
+fn test_transfer_service_rejects_the_address_that_already_owns_it() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&ctx.provider, &service_id, &ctx.provider),
+        Err(Ok(Error::ProviderUnchanged))
+    );
+    assert_eq!(env.events().all(), Vec::new(&env));
+}
+
+#[test]
+fn test_transfer_service_rejects_an_unknown_service() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_provider = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&ctx.provider, &404, &new_provider),
+        Err(Ok(Error::ServiceNotFound))
+    );
+}
+
+#[test]
+fn test_old_provider_cannot_settle_after_the_transfer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // The old key is no longer a party to the service: it cannot settle the
+    // lease it used to own, and it cannot deactivate or re-transfer the service.
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &lease_id, &10),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_set_service_active(&ctx.provider, &service_id, &false),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&ctx.provider, &service_id, &ctx.consumer),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert!(!ctx.registry.get_lease(&lease_id).settled);
+}
+
+#[test]
+fn test_new_provider_settles_a_lease_created_before_the_transfer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // An in-flight lease refers to the service, not to the old address, so the
+    // new provider settles it under the same escrow terms as before.
+    env.ledger().set_timestamp(4_601);
+    ctx.registry.settle_lease(&new_provider, &lease_id, &6);
+
+    assert_eq!(ctx.token.balance(&new_provider), RATE * 6);
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        FUNDING - RATE * 10 + RATE * 4
+    );
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert!(ctx.registry.get_lease(&lease_id).settled);
+
+    // The new owner can also pause new leases.
+    ctx.registry
+        .set_service_active(&new_provider, &service_id, &false);
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &10, &3_600),
+        Err(Ok(Error::ServiceInactive))
+    );
+}
+
+#[test]
+fn test_consumer_refund_path_survives_a_provider_transfer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // A transfer cannot be used to trap a consumer's deposit: if the new key
+    // never settles, the refund path still works exactly as before.
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&new_provider), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,34 +1242,62 @@ fn test_escrow_runs_on_the_stellar_asset_contract() {
 #[derive(Clone)]
 enum ReentryKey {
     Registry,
+    /// The authenticated actor the hostile token calls back as: the provider for
+    /// a `settle_lease` re-entry, the consumer for a `revoke_expired_lease` one.
     Provider,
     LeaseId,
     Armed,
     Blocked,
+    /// Error code of the re-entered call; `0` means it unexpectedly succeeded.
+    BlockedCode,
+    /// What the armed mode does inside `transfer`.
+    Mode,
 }
 
-/// A hostile SEP-41-shaped token that re-enters `settle_lease` from `transfer`.
+/// Armed mode: re-enter `settle_lease` for the armed lease.
+const MODE_SETTLE: u32 = 1;
+/// Armed mode: re-enter `revoke_expired_lease` for the armed lease.
+const MODE_REVOKE: u32 = 2;
+
+/// A hostile SEP-41-shaped token that re-enters the registry from `transfer`.
 ///
-/// It never moves value; it only records whether the re-entrant settlement was
-/// rejected. With checks-effects-interactions the second attempt must fail with
-/// `LeaseAlreadySettled` before any payout is attempted.
+/// It never moves value; it only records what the re-entrant call did. Armed in
+/// settle or revoke mode it calls the registry back for the same lease and
+/// records the error code. Because it runs *inside* the registry's own payout or
+/// refund transfer, the recorded code is what the registry's persisted state lets
+/// a re-entrant caller see at the exact moment value is leaving: with
+/// checks-effects-interactions that must be `LeaseAlreadySettled`, never a second
+/// release.
 #[contract]
 pub struct ReentrantToken;
 
 #[contractimpl]
 impl ReentrantToken {
     pub fn arm(env: Env, registry: Address, provider: Address, lease_id: u64) {
+        Self::reset(&env, &registry, &provider, lease_id, MODE_SETTLE);
+    }
+
+    /// Arm a re-entrant `revoke_expired_lease` as `consumer` for `lease_id`.
+    pub fn arm_revoke(env: Env, registry: Address, consumer: Address, lease_id: u64) {
+        Self::reset(&env, &registry, &consumer, lease_id, MODE_REVOKE);
+    }
+
+    /// Store the armed state. Called from inside this contract, so the writes
+    /// land in this token's own storage.
+    fn reset(env: &Env, registry: &Address, actor: &Address, lease_id: u64, mode: u32) {
         env.storage()
             .instance()
-            .set(&ReentryKey::Registry, &registry);
-        env.storage()
-            .instance()
-            .set(&ReentryKey::Provider, &provider);
+            .set(&ReentryKey::Registry, registry);
+        env.storage().instance().set(&ReentryKey::Provider, actor);
         env.storage()
             .instance()
             .set(&ReentryKey::LeaseId, &lease_id);
+        env.storage().instance().set(&ReentryKey::Mode, &mode);
         env.storage().instance().set(&ReentryKey::Armed, &true);
         env.storage().instance().set(&ReentryKey::Blocked, &false);
+        env.storage()
+            .instance()
+            .set(&ReentryKey::BlockedCode, &0u32);
     }
 
     pub fn transfer(env: Env, _from: Address, _to: Address, _amount: i128) {
@@ -1101,16 +1310,36 @@ impl ReentrantToken {
             return;
         }
 
+        let registry: Address = env.storage().instance().get(&ReentryKey::Registry).unwrap();
+        let actor: Address = env.storage().instance().get(&ReentryKey::Provider).unwrap();
+        let lease_id: u64 = env.storage().instance().get(&ReentryKey::LeaseId).unwrap();
+        let mode: u32 = env.storage().instance().get(&ReentryKey::Mode).unwrap_or(0);
+
+        let client = KeyLeaseRegistryClient::new(&env, &registry);
+
         // Disarm so the attack is attempted exactly once per settlement.
         env.storage().instance().set(&ReentryKey::Armed, &false);
 
-        let registry: Address = env.storage().instance().get(&ReentryKey::Registry).unwrap();
-        let provider: Address = env.storage().instance().get(&ReentryKey::Provider).unwrap();
-        let lease_id: u64 = env.storage().instance().get(&ReentryKey::LeaseId).unwrap();
-
-        let client = KeyLeaseRegistryClient::new(&env, &registry);
-        let blocked = client.try_settle_lease(&provider, &lease_id, &0).is_err();
-        env.storage().instance().set(&ReentryKey::Blocked, &blocked);
+        let outcome = if mode == MODE_REVOKE {
+            client.try_revoke_expired_lease(&actor, &lease_id)
+        } else {
+            client.try_settle_lease(&actor, &lease_id, &0)
+        };
+        // Classes: 0 = unexpectedly succeeded, a bare code = the contract error
+        // the host decoded back to us, 100_000 + c = a raw contract status,
+        // 200_000 = any other invoke failure.
+        let code = match outcome {
+            Ok(_) => 0,
+            Err(Ok(error)) => error as u32,
+            Err(Err(soroban_sdk::InvokeError::Contract(c))) => 100_000 + c,
+            Err(Err(_)) => 200_000,
+        };
+        env.storage()
+            .instance()
+            .set(&ReentryKey::Blocked, &(code != 0));
+        env.storage()
+            .instance()
+            .set(&ReentryKey::BlockedCode, &code);
     }
 
     pub fn blocked(env: Env) -> bool {
@@ -1119,6 +1348,34 @@ impl ReentrantToken {
             .get(&ReentryKey::Blocked)
             .unwrap_or(false)
     }
+
+    pub fn blocked_code(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&ReentryKey::BlockedCode)
+            .unwrap_or(0)
+    }
+}
+
+/// `blocked_code()` value meaning the host aborted the re-entrant call before it
+/// reached the registry: Soroban rejects re-entry into a contract that is already
+/// on the call stack.
+const REENTRY_ABORTED: u32 = 200_000;
+
+/// Assert the hostile token's callback was rejected, and that it was rejected
+/// either by the persisted `settled` flag (`LeaseAlreadySettled`) or, as the
+/// host does today, before it could reach the registry at all.
+///
+/// Both outcomes are acceptable here, and the assertion accepts both on purpose:
+/// the host-level ban is not something this contract can promise, while the
+/// persisted flag is. If a future host version lifts the ban, this test keeps
+/// passing because it is then the flag that rejects the second release.
+fn assert_reentrant_was_rejected(token: &ReentrantTokenClient) {
+    let code = token.blocked_code();
+    assert!(
+        code == Error::LeaseAlreadySettled as u32 || code == REENTRY_ABORTED,
+        "the re-entrant call was rejected for an unexpected reason: {code}"
+    );
 }
 
 #[test]
@@ -1150,7 +1407,183 @@ fn test_reentrant_token_cannot_settle_a_lease_twice() {
         token_client.blocked(),
         "re-entrant settle_lease should have been rejected"
     );
+    assert_reentrant_was_rejected(&token_client);
     assert!(registry.get_lease(&lease_id).settled);
+}
+
+#[test]
+fn test_persisted_settled_flag_blocks_a_second_release() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &10);
+
+    // The state effect the re-entrancy ordering relies on: a settled lease
+    // rejects *both* money paths, whichever one is attempted next.
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &lease_id, &10),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_revoke_expired_lease(&ctx.consumer, &lease_id),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+
+    // And the mirror image: a revoked lease cannot be settled afterwards.
+    let revoked = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &revoked);
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &revoked, &0),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+}
+
+#[test]
+fn test_reentrant_token_cannot_revoke_a_lease_twice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let consumer = Address::generate(&env);
+
+    let token_id = env.register(ReentrantToken, ());
+    let token_client = ReentrantTokenClient::new(&env, &token_id);
+
+    let registry_id = env.register(KeyLeaseRegistry, ());
+    let registry = KeyLeaseRegistryClient::new(&env, &registry_id);
+    registry.init(&admin);
+    registry.set_token(&admin, &token_id);
+
+    let service_id = registry.register_service(&provider, &RATE, &endpoint_hash(&env));
+    let lease_id = registry.create_lease(&consumer, &service_id, &10, &100);
+
+    // The refund transfer re-enters `revoke_expired_lease` for the same lease.
+    token_client.arm_revoke(&registry_id, &consumer, &lease_id);
+    env.ledger().set_timestamp(1_100 + GRACE);
+    registry.revoke_expired_lease(&consumer, &lease_id);
+
+    assert!(
+        token_client.blocked(),
+        "re-entrant revoke_expired_lease should have been rejected"
+    );
+    assert_reentrant_was_rejected(&token_client);
+    assert!(registry.get_lease(&lease_id).settled);
+}
+
+#[test]
+fn test_failed_escrow_transfer_rolls_back_the_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    // Never funded: the SEP-41 token rejects the deposit transfer.
+    let consumer = Address::generate(&env);
+
+    let token_id = env.register(MockToken, ());
+    let token = MockTokenClient::new(&env, &token_id);
+    token.init(&admin);
+
+    let registry_id = env.register(KeyLeaseRegistry, ());
+    let registry = KeyLeaseRegistryClient::new(&env, &registry_id);
+    registry.init(&admin);
+    registry.set_token(&admin, &token_id);
+
+    let service_id = registry.register_service(&provider, &RATE, &endpoint_hash(&env));
+
+    // `create_lease` writes the lease row before it calls the token, so the
+    // failed transfer has to undo that write and the id counter with it: there
+    // is no state in which a lease exists but its deposit never arrived.
+    assert!(registry
+        .try_create_lease(&consumer, &service_id, &10, &3_600)
+        .is_err());
+    assert_eq!(registry.lease_count(), 0);
+    assert_eq!(registry.try_get_lease(&1), Err(Ok(Error::LeaseNotFound)));
+    assert_eq!(token.balance(&registry_id), 0);
+}
+
+#[test]
+fn test_settlement_conserves_the_locked_deposit() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    // Full consumption before expiry: payout == deposit, refund == 0.
+    let full = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let full_lease = ctx.registry.get_lease(&full);
+    ctx.registry.settle_lease(&ctx.provider, &full, &10);
+    assert_eq!(
+        ctx.registry.get_lease(&full).used_calls as i128 * RATE,
+        full_lease.locked_deposit
+    );
+
+    // Partial settlement after expiry: payout + refund == deposit, exactly.
+    let partial = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let partial_lease = ctx.registry.get_lease(&partial);
+    env.ledger().set_timestamp(4_601);
+    ctx.registry.settle_lease(&ctx.provider, &partial, &6);
+
+    let payout = RATE * 6;
+    let refund = partial_lease.locked_deposit - payout;
+    assert_eq!(
+        payout + refund,
+        partial_lease.locked_deposit,
+        "payout + refund must equal the locked deposit"
+    );
+    // The token agrees: escrow is empty and the two parties hold every stroop
+    // that was locked, no more and no less.
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 10 + payout);
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        FUNDING - full_lease.locked_deposit - partial_lease.locked_deposit + refund
+    );
+}
+
+#[test]
+fn test_revocation_conserves_the_locked_deposit() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    let locked = ctx.registry.get_lease(&lease_id).locked_deposit;
+
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        FUNDING,
+        "the consumer must be made whole to the stroop"
+    );
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert_eq!(
+        ctx.registry.get_lease(&lease_id).locked_deposit,
+        locked,
+        "revocation must not rewrite the recorded deposit"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -106,6 +106,24 @@ pub struct ServiceStatusChanged {
     pub is_active: bool,
 }
 
+/// Emitted when the owning provider hands a service to a new address.
+///
+/// The payload carries both addresses so an indexer that followed the service
+/// can re-point its settlement signer without replaying `service_registered`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceProviderTransferred {
+    /// Service whose ownership moved.
+    #[topic]
+    pub service_id: u64,
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Provider that authorized the transfer.
+    pub previous_provider: Address,
+    /// Provider that now owns the service and settles its leases.
+    pub new_provider: Address,
+}
+
 /// Emitted when a consumer escrows a deposit and a lease is minted.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

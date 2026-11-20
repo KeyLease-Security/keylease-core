@@ -44,4 +44,7 @@ pub enum Error {
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.
     DepositTooLarge = 17,
+    /// `transfer_service` was called with the address that already owns the
+    /// service.
+    ProviderUnchanged = 18,
 }

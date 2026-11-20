@@ -62,6 +62,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build Soroban contracts
         run: cargo build --target wasm32v1-none --release --all
+      # The deployable artifact, not the debug build. 48,576 bytes is the size
+      # this repository produced after #7, #6 and #128 (46,262 bytes) plus a 5%
+      # margin, so ordinary work has room and a real code-size regression fails
+      # the build instead of being noticed in a deploy. The check prints the
+      # actual size and the budget on failure.
+      - name: Check Wasm size budget
+        run: |
+          set -euo pipefail
+          artifact=target/wasm32v1-none/release/keylease_registry.wasm
+          budget=48576
+          if [ ! -f "$artifact" ]; then
+            echo "::error::$artifact was not produced by the build"
+            exit 1
+          fi
+          size=$(wc -c < "$artifact" | tr -d '[:space:]')
+          echo "keylease_registry.wasm: ${size} bytes (budget ${budget} bytes)"
+          if [ "$size" -gt "$budget" ]; then
+            echo "::error::keylease_registry.wasm is ${size} bytes, over the ${budget}-byte budget by $((size - budget)) bytes"
+            exit 1
+          fi
 
   spellcheck:
     name: Spell Check

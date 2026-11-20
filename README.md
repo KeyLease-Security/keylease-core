@@ -83,6 +83,7 @@ keylease-core/
 │   │   │   ├── types.rs   # Service, Lease, LeaseStatus
 │   │   │   ├── storage.rs # DataKey layout + duration-aware TTL policy
 │   │   │   ├── errors.rs  # stable error codes
+│   │   │   ├── model.rs   # exhaustive escrow state-machine model (tests only)
 │   │   │   └── test.rs    # lifecycle, SAC, events, upgrade, re-entrancy tests
 │   │   └── Cargo.toml
 │   └── mock_token/        # minimal SEP-41 token for tests & local sandboxes
@@ -108,6 +109,7 @@ keylease-core/
 | `upgrade(admin, new_wasm_hash)` | `admin` | Install a new Wasm through the Soroban deployer. Emits `contract_upgraded`. |
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
+| `transfer_service(provider, service_id, new_provider)` | `provider` (current owner only) | Hand the service, and settlement of its in-flight leases, to a new address. Emits `service_provider_transferred`. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
 | `settle_lease(provider, lease_id, verified_calls)` | `provider` | Pay the provider, refund the remainder. Emits `lease_settled`. |
 | `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
@@ -134,6 +136,7 @@ consumer of the stream should branch on it.
 | `escrow_token_set` | — | `schema_version`, `admin`, `token` |
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
+| `service_provider_transferred` | `service_id` | `schema_version`, `previous_provider`, `new_provider` |
 | `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
@@ -176,6 +179,20 @@ cargo clippy --all-targets -- -D warnings
 cargo build --target wasm32v1-none --release --all
 # → target/wasm32v1-none/release/keylease_registry.wasm
 # → target/wasm32v1-none/release/keylease_mock_token.wasm
+```
+
+### Wasm size budget
+
+The `Build (wasm32v1-none)` CI job fails if
+`target/wasm32v1-none/release/keylease_registry.wasm` grows past **48,576
+bytes**. That budget is the current artifact (46,262 bytes) plus a 5% margin, so
+routine changes have room and a real code-size regression is caught before
+deploy. The check prints the measured size and the budget, and can be reproduced
+locally after the release build:
+
+```bash
+size=$(wc -c < target/wasm32v1-none/release/keylease_registry.wasm)
+echo "${size} bytes (budget 48576)"
 ```
 
 ---
@@ -251,11 +268,17 @@ invariants:
 1. **Checked arithmetic everywhere.** Deposit (`rate × calls`) and payout math
    use `checked_mul`/`checked_add`; overflow aborts the transaction instead of
    minting a cheap lease or a truncated refund.
-2. **Checks-effects-interactions.** Every money path persists the settlement
-   (`settled = true`) *before* calling the token, so a re-entrant SEP-41 token
-   cannot be paid twice. `test_reentrant_token_cannot_settle_a_lease_twice`
-   installs a hostile token that calls back into `settle_lease` and asserts the
-   second attempt is rejected.
+2. **Checks-effects-interactions on every money path.** `create_lease`,
+   `settle_lease` and `revoke_expired_lease` persist all their state — the lease
+   row, `used_calls`, `settled`, the recorded lock — *before* the SEP-41 token is
+   called. A re-entrant token therefore reads a settled lease and is rejected
+   with `LeaseAlreadySettled` before it can move anything. Two adversarial
+   tokens attempt exactly that from inside `transfer`
+   (`test_reentrant_token_cannot_settle_a_lease_twice`,
+   `test_reentrant_token_cannot_revoke_a_lease_twice`) and
+   `test_persisted_settled_flag_blocks_a_second_release` pins the flag layer
+   they depend on; the ordering is written out per entry point in
+   [Security model](./docs/security.md).
 3. **Bounded provider claims.** A provider can never withdraw more than
    `allocated_calls × rate_per_call`, and only for leases it owns
    (`InvalidCalls`, `Unauthorized`).
@@ -298,7 +321,8 @@ re-entrant token.
 cargo test --all
 ```
 
-The 44 tests in `contracts/registry/src/test.rs` cover:
+The 75 tests in `contracts/registry/src/test.rs` — 77 in the crate, counting the
+two model tests below — cover:
 
 - service registration and ID monotonicity,
 - the happy path (lock → full-usage settle before expiry),
@@ -310,7 +334,15 @@ The 44 tests in `contracts/registry/src/test.rs` cover:
 - the deposit ceiling at the limit, one unit above it, and against `Overflow`,
 - every emitted event, including its topics and payload,
 - the full lifecycle escrowed with the **native Stellar Asset Contract**,
-- a **re-entrant token** attempting a second settlement,
+- a **re-entrant token** attempting a second settlement and a second
+  revocation, each rejected with `LeaseAlreadySettled`,
+- a failed escrow transfer rolling back the lease id and the lease row with it,
+- conservation (`payout + refund == locked_deposit`) on settlement and
+  revocation, checked against both the lease and the token balances,
+- an exhaustive bounded model of the create / settle / revoke machine
+  (`contracts/registry/src/model.rs`) plus a conformance test that drives the
+  real contract through the same transitions and compares the outcome and
+  balances at every step,
 - status transitions and derived views.
 
 ---
