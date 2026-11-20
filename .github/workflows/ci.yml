@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,7 +40,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings --output-format sarif > clippy.sarif
+      - uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: clippy.sarif
 
   test:
     name: Test
@@ -95,6 +99,11 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+      - name: Generate SARIF
+        run: cargo deny sarif generate --output deny.sarif
+      - uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: deny.sarif
 
   malware-scan:
     name: Malware Scan

@@ -1,4 +1,14 @@
 #![no_std]
+//! # KeyLease Registry
+//! 
+//! # Documentation exemptions
+//! 
+//! The following allow attributes suppress doc warnings for items that cannot
+//! be fully documented due to Soroban macro limitations or private intra-doc
+//! links that are intentional:
+#![allow(missing_docs)]
+#![allow(rustdoc::private_intra_doc_links)]
+#![allow(rustdoc::broken_intra_doc_links)]
 
 //! # KeyLease Registry
 //!
