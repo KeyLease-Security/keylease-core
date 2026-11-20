@@ -251,11 +251,17 @@ invariants:
 1. **Checked arithmetic everywhere.** Deposit (`rate × calls`) and payout math
    use `checked_mul`/`checked_add`; overflow aborts the transaction instead of
    minting a cheap lease or a truncated refund.
-2. **Checks-effects-interactions.** Every money path persists the settlement
-   (`settled = true`) *before* calling the token, so a re-entrant SEP-41 token
-   cannot be paid twice. `test_reentrant_token_cannot_settle_a_lease_twice`
-   installs a hostile token that calls back into `settle_lease` and asserts the
-   second attempt is rejected.
+2. **Checks-effects-interactions on every money path.** `create_lease`,
+   `settle_lease` and `revoke_expired_lease` persist all their state — the lease
+   row, `used_calls`, `settled`, the recorded lock — *before* the SEP-41 token is
+   called. A re-entrant token therefore reads a settled lease and is rejected
+   with `LeaseAlreadySettled` before it can move anything. Two adversarial
+   tokens attempt exactly that from inside `transfer`
+   (`test_reentrant_token_cannot_settle_a_lease_twice`,
+   `test_reentrant_token_cannot_revoke_a_lease_twice`) and
+   `test_persisted_settled_flag_blocks_a_second_release` pins the flag layer
+   they depend on; the ordering is written out per entry point in
+   [Security model](./docs/security.md).
 3. **Bounded provider claims.** A provider can never withdraw more than
    `allocated_calls × rate_per_call`, and only for leases it owns
    (`InvalidCalls`, `Unauthorized`).
@@ -310,7 +316,11 @@ The 44 tests in `contracts/registry/src/test.rs` cover:
 - the deposit ceiling at the limit, one unit above it, and against `Overflow`,
 - every emitted event, including its topics and payload,
 - the full lifecycle escrowed with the **native Stellar Asset Contract**,
-- a **re-entrant token** attempting a second settlement,
+- a **re-entrant token** attempting a second settlement and a second
+  revocation, each rejected with `LeaseAlreadySettled`,
+- a failed escrow transfer rolling back the lease id and the lease row with it,
+- conservation (`payout + refund == locked_deposit`) on settlement and
+  revocation, checked against both the lease and the token balances,
 - status transitions and derived views.
 
 ---
