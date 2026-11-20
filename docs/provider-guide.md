@@ -68,6 +68,8 @@ token to mint.
 2. Read the lease with `get_lease(lease_id)` over Soroban RPC and cache it briefly.
 3. Reject if `settled`, if `now ≥ expires_at`, if the caller is not
    `lease.consumer`, or if your counter has consumed `allocated_calls`.
+   `consumer` is mutable: the owner can transfer the lease, so refresh your cache
+   when the authenticated address does not match instead of rejecting forever.
 4. Count the call, return the response.
 
 ```bash
@@ -132,6 +134,9 @@ manage.
 
 - **Watch expiry.** A lease you forget to settle becomes revocable 24 hours after
   it expires. Subscribe to `lease_created` and settle from that queue.
+- **Ownership moves.** A consumer can transfer an unsettled lease; the refund
+  then goes to the new consumer at settlement. Re-read `consumer` rather than
+  caching it for the whole term. Watch `lease_transferred` if you project events.
 - **Changing your rate.** Today you register a new service; an update entry point
   is a `wave-medium` issue. In-flight leases keep their original escrow.
 - **Rotating your key.** A service is bound to the registering address; key

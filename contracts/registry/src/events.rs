@@ -127,6 +127,22 @@ pub struct LeaseCreated {
     pub locked_deposit: i128,
 }
 
+/// Emitted when a lease is transferred to a new consumer.
+///
+/// The access right and the refund path move together, so an indexer can follow
+/// who is entitled to use the lease and reclaim its deposit.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseTransferred {
+    /// Lease that changed hands.
+    #[topic]
+    pub lease_id: u64,
+    /// Previous consumer, which authorized the transfer.
+    pub from: Address,
+    /// New consumer and owner of the refund path.
+    pub to: Address,
+}
+
 /// Emitted when a provider settles a lease from escrow.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

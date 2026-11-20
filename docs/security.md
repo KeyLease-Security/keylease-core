@@ -29,13 +29,17 @@ take more than it is owed, and it cannot prevent the consumer's refund.
 3. **Only the consumer can revoke, and only after the grace window.** Combined
    checks for ownership, expiry and elapsed grace (`Unauthorized`,
    `LeaseNotExpired`, `RevokeWindowNotElapsed`).
-4. **A lease releases funds once.** Every money path checks `settled` first,
+4. **Only the current consumer can transfer, and never after settlement.**
+   `transfer_lease` rewrites the single `Lease.consumer` field, so access and the
+   refund path always belong to the same address (`Unauthorized`,
+   `LeaseNotTransferable`, `InvalidConsumer`).
+5. **A lease releases funds once.** Every money path checks `settled` first,
    persists `settled = true`, and only then calls the token
    (`LeaseAlreadySettled`). Checks-effects-interactions is enforced by
    `test_reentrant_token_cannot_settle_a_lease_twice`.
-5. **Overflow aborts.** Deposit, payout and expiry arithmetic use
+6. **Overflow aborts.** Deposit, payout and expiry arithmetic use
    `checked_mul`/`checked_add`/`checked_sub` and revert with `Overflow`.
-6. **Lease durations are storage-safe.** Durations above
+7. **Lease durations are storage-safe.** Durations above
    `MAX_LEASE_DURATION_SECS` (30 days) revert with `DurationTooLong`, and the
    persistent entry is extended for the term plus the grace window, so escrow
    cannot be evicted while it is claimable.
@@ -58,9 +62,11 @@ Asserted in `contracts/registry/src/test.rs`. The
 violation.
 
 - `payout + refund == locked_deposit` for every lease.
-- A settled lease never transitions again.
+- A settled lease never transitions again and cannot be transferred.
 - `settled` is true on-chain before any value leaves the contract.
 - No lease can leave more value than was escrowed.
+- Every lease has exactly one consumer, and it owns both access and the refund
+  path for its entire TTL.
 - Every lease has a consumer path to a full refund, for its entire TTL.
 
 ## Threats considered
@@ -71,6 +77,9 @@ violation.
 | Provider settles a lease twice | `settled` flag persisted before transfers + `LeaseAlreadySettled` |
 | Attacker settles someone else's lease | `service.provider == provider` check |
 | Attacker revokes someone else's lease | `lease.consumer == consumer` check |
+| Attacker transfers someone else's lease | `lease.consumer == consumer` check + `require_auth` on the current consumer |
+| Consumer transfers, then revokes as the old owner | Ownership is one field; the revoke/refund path reads the new consumer |
+| Lease changes hands after payout | `settled` check in `transfer_lease` (`LeaseNotTransferable`) |
 | Re-entrant token pays a lease twice | checks-effects-interactions; adversarial test |
 | Provider strands funds by never settling | 24h grace, then full consumer refund |
 | Consumer races the provider at expiry | 24h grace window reserved for the provider |
@@ -89,6 +98,10 @@ These are real and tracked as Drips Wave issues rather than hidden.
 - **Upgrade trust.** The admin can replace the contract Wasm. This is a
   deliberate operational capability, but it means a compromised admin key can
   change protocol rules. A timelock or multisig requirement is future work.
+- **Transfers are final.** `transfer_lease` is a direct assignment: the recipient
+  does not accept, and there is no protocol-level reversal. A mistyped address
+  hands the lease (and its refund right) to an unreachable account. Verify the
+  destination before signing.
 - **No provider key rotation.** A service is bound to the address that registered
   it. Transferring a service is a `wave-medium` issue.
 - **No rate updates.** Changing `rate_per_call` requires registering a new

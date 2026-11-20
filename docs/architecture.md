@@ -18,7 +18,7 @@ flowchart TB
     subgraph "Stellar ledger"
         REG[["KeyLeaseRegistry<br/>services · leases · escrow"]]
         TOK[["SEP-41 token<br/>native SAC or custom"]]
-        EV[["Contract events<br/>lease_created · lease_settled · lease_revoked"]]
+        EV[["Contract events<br/>lease_created · lease_transferred · lease_settled · lease_revoked"]]
     end
 
     DEV -- "create_lease (auth: consumer)" --> REG
@@ -65,7 +65,7 @@ standard Stellar tooling:
 | Consumer | How it reads the protocol |
 | --- | --- |
 | Provider request path | `get_lease` over Soroban RPC (cached for a short TTL), or a local projection built from the event stream. |
-| Accounting / dashboards | `stellar events`, Horizon or an indexer subscribing to `lease_created` / `lease_settled` / `lease_revoked`. |
+| Accounting / dashboards | `stellar events`, Horizon or an indexer subscribing to `lease_created` / `lease_transferred` / `lease_settled` / `lease_revoked`. |
 | CLI tooling | `stellar contract invoke` for writes and reads (reads need any funded `--source-account`). |
 
 See [Integration](integration.md) for the concrete verification pipeline.

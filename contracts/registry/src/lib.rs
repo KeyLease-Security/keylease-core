@@ -18,6 +18,8 @@
 //!     |                            |                                |
 //!     |-- settle_lease(used) ----->|  pay provider, refund rest --->|
 //!     |                            |                                |
+//!     |                            |<-- transfer_lease(new owner) --|
+//!     |                            |                                |
 //!                                  |  (if provider never settles)   |
 //!                                  |<-- revoke_expired_lease ------ |
 //!                                  |  (full refund after 24h)       |
@@ -380,6 +382,51 @@ impl KeyLeaseRegistry {
         .publish(&env);
 
         Ok(lease_id)
+    }
+
+    /// Transfer a lease to a new consumer, moving the access right and the
+    /// refund path together. Requires the current consumer's auth.
+    ///
+    /// The transfer is a direct assignment: the new consumer does not have to
+    /// accept it. Because the provider and every settlement path read
+    /// `lease.consumer`, a later settlement refunds `new_consumer` and the old
+    /// consumer loses both the access right and any claim on the deposit.
+    ///
+    /// Only an unsettled, unrevoked lease can change hands. A settled lease has
+    /// no rights left to transfer, and a settled lease is exactly what a
+    /// proposed settlement produces, so a lease inside a challenge window cannot
+    /// be moved out from under its dispute.
+    pub fn transfer_lease(
+        env: Env,
+        consumer: Address,
+        lease_id: u64,
+        new_consumer: Address,
+    ) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let mut lease = storage::get_lease(&env, lease_id)?;
+        if lease.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        if lease.settled {
+            return Err(Error::LeaseNotTransferable);
+        }
+        if lease.consumer == new_consumer {
+            return Err(Error::InvalidConsumer);
+        }
+
+        let previous = lease.consumer.clone();
+        lease.consumer = new_consumer.clone();
+        storage::save_lease(&env, &lease);
+
+        LeaseTransferred {
+            lease_id,
+            from: previous,
+            to: new_consumer,
+        }
+        .publish(&env);
+
+        Ok(())
     }
 
     /// Settle a lease, paying the provider for `verified_calls` consumed calls

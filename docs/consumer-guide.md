@@ -107,6 +107,24 @@ stellar contract invoke --id $REGISTRY --source-account consumer \
 
 `lease_status` is `0` (Active), `1` (Expired) or `2` (Settled).
 
+### Hand the lease to another account
+
+You can transfer an unsettled lease to any Stellar address. The recipient gets
+the remaining access **and** the refund right; your account loses both.
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account consumer --network testnet \
+  --send=yes -- transfer_lease \
+     --consumer $CONSUMER --lease_id 1 --new_consumer <NEW_ADDRESS>
+```
+
+This is a direct assignment — the recipient does not need to accept — and it
+emits `lease_transferred { lease_id, from, to }`. A settled or revoked lease
+cannot be transferred, and neither can a lease whose settlement is pending under
+a challenge window. An expired, unsettled lease can still be transferred: you
+are selling the refund claim, not access.
+
 ## 6. Get your money back
 
 **Normal path — automatic.** When the provider settles, the unused balance is
@@ -139,6 +157,7 @@ constant in the contract (`SETTLE_GRACE_PERIOD_SECS = 86_400`).
 | Provider settles with `verified_calls = 0` | You get the entire deposit back |
 | Provider never settles, `now ≥ expiry + 24h` | You `revoke` and get the entire deposit |
 | Provider never settles, inside the 24h window | Nothing yet — wait |
+| You transferred the lease | The new consumer receives all later refunds |
 
 ## Costs
 

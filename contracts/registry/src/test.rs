@@ -363,6 +363,166 @@ fn test_create_lease_requires_configured_token() {
 }
 
 // ---------------------------------------------------------------------------
+// Lease transfer
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_transfer_moves_access_and_refund_right() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let new_consumer = Address::generate(&env);
+
+    ctx.registry
+        .transfer_lease(&ctx.consumer, &lease_id, &new_consumer);
+
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseTransferred {
+            lease_id,
+            from: ctx.consumer.clone(),
+            to: new_consumer.clone(),
+        },
+    );
+
+    // The whole lease moved: one consumer field owns both access and refunds.
+    assert_eq!(ctx.registry.get_lease(&lease_id).consumer, new_consumer);
+    assert_eq!(ctx.registry.remaining_calls(&lease_id), 10);
+
+    // The previous consumer has no claim; the new consumer owns the refund path.
+    env.ledger().set_timestamp(4_600 + GRACE);
+    assert_eq!(
+        ctx.registry
+            .try_revoke_expired_lease(&ctx.consumer, &lease_id),
+        Err(Ok(Error::Unauthorized))
+    );
+    ctx.registry.revoke_expired_lease(&new_consumer, &lease_id);
+    assert_eq!(ctx.token.balance(&new_consumer), RATE * 10);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - RATE * 10);
+}
+
+#[test]
+fn test_settlement_after_transfer_pays_new_consumer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let new_consumer = Address::generate(&env);
+
+    ctx.registry
+        .transfer_lease(&ctx.consumer, &lease_id, &new_consumer);
+
+    env.ledger().set_timestamp(4_601);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &6);
+
+    // The provider is paid for used calls; the refund follows the transfer.
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 6);
+    assert_eq!(ctx.token.balance(&new_consumer), RATE * 4);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - RATE * 10);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+
+    let lease = ctx.registry.get_lease(&lease_id);
+    assert_eq!(lease.used_calls, 6);
+    assert_eq!(lease.consumer, new_consumer);
+    assert!(lease.settled);
+}
+
+#[test]
+fn test_transfer_requires_the_current_consumer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let impostor = Address::generate(&env);
+    let target = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry
+            .try_transfer_lease(&impostor, &lease_id, &target),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_transfer_lease(&ctx.provider, &lease_id, &target),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_transfer_lease(&ctx.consumer, &lease_id, &ctx.consumer),
+        Err(Ok(Error::InvalidConsumer))
+    );
+
+    // Every rejected attempt left ownership untouched.
+    assert_eq!(ctx.registry.get_lease(&lease_id).consumer, ctx.consumer);
+}
+
+#[test]
+fn test_settled_lease_cannot_be_transferred() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let target = Address::generate(&env);
+
+    let settled_lease = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    ctx.registry
+        .settle_lease(&ctx.provider, &settled_lease, &10);
+    assert_eq!(
+        ctx.registry
+            .try_transfer_lease(&ctx.consumer, &settled_lease, &target),
+        Err(Ok(Error::LeaseNotTransferable))
+    );
+
+    let revoked_lease = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry
+        .revoke_expired_lease(&ctx.consumer, &revoked_lease);
+    assert_eq!(
+        ctx.registry
+            .try_transfer_lease(&ctx.consumer, &revoked_lease, &target),
+        Err(Ok(Error::LeaseNotTransferable))
+    );
+}
+
+#[test]
+fn test_transfer_after_expiry_moves_refund_right() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    let new_consumer = Address::generate(&env);
+
+    // Access has lapsed, but the refund claim is still transferable.
+    env.ledger().set_timestamp(1_100);
+    ctx.registry
+        .transfer_lease(&ctx.consumer, &lease_id, &new_consumer);
+    assert_eq!(ctx.registry.remaining_calls(&lease_id), 0);
+
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&new_consumer, &lease_id);
+    assert_eq!(ctx.token.balance(&new_consumer), RATE * 10);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - RATE * 10);
+}
+
+// ---------------------------------------------------------------------------
 // Settlement
 // ---------------------------------------------------------------------------
 
