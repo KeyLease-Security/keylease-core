@@ -66,7 +66,8 @@ use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
 pub use crate::errors::Error;
 pub use crate::events::{
     ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
-    RegistryInitialized, ServiceRegistered, ServiceStatusChanged, EVENT_SCHEMA_VERSION,
+    RegistryInitialized, ServiceProviderTransferred, ServiceRegistered, ServiceStatusChanged,
+    EVENT_SCHEMA_VERSION,
 };
 pub use crate::types::{Lease, LeaseStatus, Service};
 
@@ -267,6 +268,61 @@ impl KeyLeaseRegistry {
             schema_version: EVENT_SCHEMA_VERSION,
             provider,
             is_active,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Hand a service to a new provider address. Current provider only.
+    ///
+    /// The provider that registered a service is the only address that can
+    /// settle its leases or change its status, so a key that is about to be
+    /// rotated has to be able to move the service before it is discarded.
+    /// `provider` must authorize; `new_provider` is not asked to, because
+    /// ownership is handed over by the party that already owns it, exactly like
+    /// the transfer of any other bearer capability.
+    ///
+    /// The transfer is a **single storage write** of `Service.provider` and no
+    /// external contract is called, so there is no window in which neither party
+    /// can settle: every settlement reads the stored provider when it executes
+    /// (see [`Self::settle_lease`]), so before the write the old provider settles
+    /// and after it the new one does, with no intermediate state between them.
+    ///
+    /// **In-flight leases keep working.** A lease refers to `service_id`, not to
+    /// an address, so it is unaffected: leases created before the transfer are
+    /// settled by the new provider, and the old provider is rejected with
+    /// `Unauthorized`. The escrow amount, `rate_per_call`, the expiry and the
+    /// consumer's revoke path are all unchanged.
+    ///
+    /// Repeating the call with the address that already owns the service is
+    /// rejected with `ProviderUnchanged` rather than reported as a transfer, so
+    /// an event never claims an ownership change that did not happen.
+    pub fn transfer_service(
+        env: Env,
+        provider: Address,
+        service_id: u64,
+        new_provider: Address,
+    ) -> Result<(), Error> {
+        provider.require_auth();
+
+        let mut service = storage::get_service(&env, service_id)?;
+        if service.provider != provider {
+            return Err(Error::Unauthorized);
+        }
+        if new_provider == service.provider {
+            return Err(Error::ProviderUnchanged);
+        }
+
+        // Effect: one write, no external call in between, so no observer can see
+        // a service owned by neither address.
+        service.provider = new_provider.clone();
+        storage::save_service(&env, &service);
+
+        ServiceProviderTransferred {
+            schema_version: EVENT_SCHEMA_VERSION,
+            service_id,
+            previous_provider: provider,
+            new_provider,
         }
         .publish(&env);
         Ok(())

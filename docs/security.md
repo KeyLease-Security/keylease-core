@@ -137,6 +137,31 @@ violation.
   is held to the deployed contract by a conformance test (see
   [Formal escrow model](#formal-escrow-model)).
 
+## Provider key rotation (`transfer_service`)
+
+`transfer_service(provider, service_id, new_provider)` re-points
+`Service.provider`. It is **not** a money path and it is deliberately narrow:
+
+- **Auth.** `provider.require_auth()` only, and the authenticated address must
+  equal the stored owner (`Unauthorized` otherwise). The new address is not
+  asked to co-sign because ownership is handed over by the party that already
+  owns it.
+- **No no-op.** `new_provider == service.provider` returns `ProviderUnchanged`,
+  so an event never claims a transfer that did not happen.
+- **One write, no external call.** Ownership is a single `save_service` write,
+  so there is no intermediate ledger state. Settlement reads the stored provider
+  when it executes, which is why there is no window where neither party can
+  settle: up to the write the old provider settles, from the write onward the new
+  one does.
+- **In-flight leases are unaffected.** A lease references `service_id`, never an
+  address. Leases created before the transfer are settled by the new provider
+  with the same `locked_deposit`, `rate_per_call` and `expires_at`; the old
+  provider is rejected with `Unauthorized` and can no longer pause, settle or
+  transfer the service. The consumer's revoke path is untouched, so a transfer
+  can never be used to strand a deposit.
+- **Not a third-party seizure path.** No admin, consumer or arbitrary caller can
+  call it for a service they do not own.
+
 ## Threats considered
 
 | Threat | Mitigation |
@@ -144,6 +169,8 @@ violation.
 | Provider claims more calls than allocated | `InvalidCalls` |
 | Provider settles a lease twice | `settled` flag persisted before transfers + `LeaseAlreadySettled` |
 | Attacker settles someone else's lease | `service.provider == provider` check |
+| Attacker transfers a service they do not own | `transfer_service` owner check → `Unauthorized` |
+| A provider transfer strands in-flight escrow | leases bind to `service_id`; new owner settles, consumer still revokes |
 | Attacker revokes someone else's lease | `lease.consumer == consumer` check |
 | Re-entrant token pays a lease twice | checks-effects-interactions; adversarial test |
 | Provider strands funds by never settling | 24h grace, then full consumer refund |
@@ -163,8 +190,12 @@ These are real and tracked as Drips Wave issues rather than hidden.
 - **Upgrade trust.** The admin can replace the contract Wasm. This is a
   deliberate operational capability, but it means a compromised admin key can
   change protocol rules. A timelock or multisig requirement is future work.
-- **No provider key rotation.** A service is bound to the address that registered
-  it. Transferring a service is a `wave-medium` issue.
+- **Provider key rotation requires the old key.** `transfer_service` moves a
+  service — and the right to settle its in-flight leases — to a new address, but
+  only the address that owns it can authorize the hand-over, and the new address
+  is not asked to accept it. A lost provider key therefore cannot be recovered
+  by the protocol; the admin cannot reassign a service, by design, because that
+  would be a path by which a third party seizes a service.
 - **No rate updates.** Changing `rate_per_call` requires registering a new
   service; in-flight leases keep their original escrow.
 - **Settlement is a single report.** The contract trusts the provider's

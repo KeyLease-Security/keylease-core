@@ -108,6 +108,7 @@ keylease-core/
 | `upgrade(admin, new_wasm_hash)` | `admin` | Install a new Wasm through the Soroban deployer. Emits `contract_upgraded`. |
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
+| `transfer_service(provider, service_id, new_provider)` | `provider` (current owner only) | Hand the service, and settlement of its in-flight leases, to a new address. Emits `service_provider_transferred`. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
 | `settle_lease(provider, lease_id, verified_calls)` | `provider` | Pay the provider, refund the remainder. Emits `lease_settled`. |
 | `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
@@ -134,6 +135,7 @@ consumer of the stream should branch on it.
 | `escrow_token_set` | — | `schema_version`, `admin`, `token` |
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
+| `service_provider_transferred` | `service_id` | `schema_version`, `previous_provider`, `new_provider` |
 | `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
