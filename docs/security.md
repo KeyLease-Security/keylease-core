@@ -11,7 +11,8 @@ reporting a vulnerability, see
 | --- | --- |
 | The admin configures a well-behaved SEP-41 token. | A malicious token contract could revert transfers and stall settlement. It cannot be paid twice: `settled` is persisted before the transfer, and a re-entrant token is rejected (`LeaseAlreadySettled`). |
 | The admin does not upgrade to a malicious Wasm. | An upgrade can change the contract logic. The admin key should be cold or multisig; upgrades emit `contract_upgraded`. |
-| The provider reports `verified_calls` honestly. | It can under-report (it gets paid less) but never over-report past `allocated_calls`. |
+| The provider reports `verified_calls` honestly, or the consumer and admin can correct it. | It can under-report (it gets paid less) and can over-report up to `allocated_calls`; the consumer has 24h to challenge the report, and the admin resolves the dispute. |
+| The admin adjudicates challenges honestly. | A compromised admin can zero a legitimate payout by upholding a challenge, or refuse to resolve one. It cannot redirect funds to itself. Use a cold or multisig admin. |
 | Soroban ledger time is monotonic and honest. | Validity windows would be unreliable. |
 | Consumers keep their own key safe. | Anyone with the consumer key can create leases that spend its balance. |
 
@@ -29,13 +30,18 @@ take more than it is owed, and it cannot prevent the consumer's refund.
 3. **Only the consumer can revoke, and only after the grace window.** Combined
    checks for ownership, expiry and elapsed grace (`Unauthorized`,
    `LeaseNotExpired`, `RevokeWindowNotElapsed`).
-4. **A lease releases funds once.** Every money path checks `settled` first,
-   persists `settled = true`, and only then calls the token
-   (`LeaseAlreadySettled`). Checks-effects-interactions is enforced by
-   `test_reentrant_token_cannot_settle_a_lease_twice`.
-5. **Overflow aborts.** Deposit, payout and expiry arithmetic use
+4. **A lease releases funds once.** A settlement is proposed once (`settled` is
+   persisted at proposal time), its state is persisted as `Finalized` before any
+   token call, and every payout path rejects an already-finalized settlement
+   (`LeaseAlreadySettled`, `SettlementFinalized`). Checks-effects-interactions is
+   enforced by `test_reentrant_token_cannot_settle_a_lease_twice`.
+5. **The payout is locked during a dispute.** A pending settlement cannot be
+   finalized before `challengeable_until`, and a challenged one cannot be
+   finalized at all until the admin resolves it (`ChallengeWindowStillOpen`,
+   `SettlementChallenged`).
+6. **Overflow aborts.** Deposit, payout and expiry arithmetic use
    `checked_mul`/`checked_add`/`checked_sub` and revert with `Overflow`.
-6. **Lease durations are storage-safe.** Durations above
+7. **Lease durations are storage-safe.** Durations above
    `MAX_LEASE_DURATION_SECS` (30 days) revert with `DurationTooLong`, and the
    persistent entry is extended for the term plus the grace window, so escrow
    cannot be evicted while it is claimable.
@@ -57,10 +63,12 @@ Asserted in `contracts/registry/src/test.rs`. The
 [contract reference](contract-reference.md) lists the exact error code for each
 violation.
 
-- `payout + refund == locked_deposit` for every lease.
+- `payout + refund == locked_deposit` for every settlement.
 - A settled lease never transitions again.
 - `settled` is true on-chain before any value leaves the contract.
-- No lease can leave more value than was escrowed.
+- A settlement is `Finalized` on-chain before any value leaves the contract.
+- No settlement can release more value than was escrowed.
+- A challenged settlement moves no value until the admin resolves it.
 - Every lease has a consumer path to a full refund, for its entire TTL.
 
 ## Threats considered
@@ -68,7 +76,11 @@ violation.
 | Threat | Mitigation |
 | --- | --- |
 | Provider claims more calls than allocated | `InvalidCalls` |
+| Provider over-reports within the allotment | Consumer challenges inside the 24h window; admin can uphold a full refund |
 | Provider settles a lease twice | `settled` flag persisted before transfers + `LeaseAlreadySettled` |
+| Payout released while a challenge is open | `SettlementChallenged`; only the admin can resolve |
+| Finalize races the challenge deadline | `now < challengeable_until` → `ChallengeWindowStillOpen`; at the boundary challenges are closed |
+| Admin upholds every challenge to deny payouts | On-chain `lease_challenge_resolved` events; admin should be cold/multisig; consumer and provider can both observe |
 | Attacker settles someone else's lease | `service.provider == provider` check |
 | Attacker revokes someone else's lease | `lease.consumer == consumer` check |
 | Re-entrant token pays a lease twice | checks-effects-interactions; adversarial test |
@@ -93,10 +105,14 @@ These are real and tracked as Drips Wave issues rather than hidden.
   it. Transferring a service is a `wave-medium` issue.
 - **No rate updates.** Changing `rate_per_call` requires registering a new
   service; in-flight leases keep their original escrow.
-- **Settlement is a single report.** The contract trusts the provider's
-  `verified_calls`; it cannot independently observe HTTP usage. Consumers are
-  protected by the fixed allotment and the refund path, not by proof of
-  non-delivery.
+- **Settlement disputes are adjudicated, not proven.** The contract trusts the
+  provider's `verified_calls` unless the consumer challenges it. The challenge is
+  a 32-byte evidence commitment, and the admin decides off chain; the contract
+  cannot verify usage or evidence. Consumers are still protected by the fixed
+  allotment and the refund path.
+- **Resolution depends on the admin.** A challenged settlement stays locked until
+  the admin acts. Settlement entries live for the standard ~30-day persistent TTL,
+  so disputes should be resolved well inside that horizon.
 - **Not audited.** Do not escrow mainnet value you would be unhappy to lose.
 
 ## Deployment hygiene

@@ -18,7 +18,7 @@ flowchart TB
     subgraph "Stellar ledger"
         REG[["KeyLeaseRegistry<br/>services · leases · escrow"]]
         TOK[["SEP-41 token<br/>native SAC or custom"]]
-        EV[["Contract events<br/>lease_created · lease_settled · lease_revoked"]]
+        EV[["Contract events<br/>lease_created · settlement_proposed · challenged · lease_settled"]]
     end
 
     DEV -- "create_lease (auth: consumer)" --> REG
@@ -36,14 +36,15 @@ A pure Rust Soroban contract. It is the only component that can move value.
 | Module | Role |
 | --- | --- |
 | `lib.rs` | Entry points, `contractmeta!`, upgrade, lifecycle documentation. |
-| `types.rs` | `Service`, `Lease`, `LeaseStatus`. |
+| `types.rs` | `Service`, `Lease`, `LeaseStatus`, `Settlement`, `SettlementState`. |
 | `storage.rs` | `DataKey` layout, instance/persistent split, duration-aware TTL policy. |
 | `events.rs` | Typed `#[contractevent]` payloads for every transition. |
 | `errors.rs` | Stable error codes (part of the ABI). |
 
 The registry is deliberately small. It does not know what an HTTP request is,
 what the endpoint does, or who is calling it. It knows `service_id`,
-`allocated_calls`, `expires_at` and `locked_deposit`.
+`allocated_calls`, `expires_at`, `locked_deposit` and — once a provider settles —
+the proposed payout/refund split and any consumer challenge against it.
 
 ### SEP-41 token
 
@@ -65,7 +66,7 @@ standard Stellar tooling:
 | Consumer | How it reads the protocol |
 | --- | --- |
 | Provider request path | `get_lease` over Soroban RPC (cached for a short TTL), or a local projection built from the event stream. |
-| Accounting / dashboards | `stellar events`, Horizon or an indexer subscribing to `lease_created` / `lease_settled` / `lease_revoked`. |
+| Accounting / dashboards | `stellar events`, Horizon or an indexer subscribing to `lease_created` / `lease_settlement_proposed` / `lease_challenged` / `lease_settled` / `lease_revoked`. |
 | CLI tooling | `stellar contract invoke` for writes and reads (reads need any funded `--source-account`). |
 
 See [Integration](integration.md) for the concrete verification pipeline.
@@ -94,6 +95,15 @@ sequenceDiagram
         P-->>C: 401 / 403 / 429
     end
     P->>R: settle_lease(provider, lease_id, verified_calls)
+    R-->>P: lease_settlement_proposed event (funds still locked)
+    Note over C,R: 24h consumer challenge window
+    C->>R: challenge_settlement(consumer, lease_id, evidence_hash)  (optional)
+    R-->>P: lease_challenged event (payout frozen)  (optional)
+    alt no challenge, or consumer cancelled
+        P->>R: finalize_settlement(lease_id)
+    else challenge active
+        R->>R: resolve_challenge(admin, lease_id, upheld)
+    end
     R->>T: payout + refund
     R-->>P: lease_settled event
 ```

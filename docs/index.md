@@ -45,6 +45,12 @@ sequenceDiagram
     P->>R: get_lease(lease_id) / read the event stream
     P-->>P: verify expiry + quota, serve the call
     P->>R: settle_lease(provider, lease_id, verified_calls)
+    R-->>I: lease_settlement_proposed (funds still locked)
+    opt consumer disputes the reported count
+        C->>R: challenge_settlement(consumer, lease_id, evidence_hash)
+        R-->>I: lease_challenged
+    end
+    P->>R: finalize_settlement(lease_id) (after the 24h window)
     R->>T: payout used × rate → provider
     R->>T: refund the remainder → consumer
     R-->>I: lease_settled

@@ -16,8 +16,11 @@
 //!     |                            |<-- create_lease(calls, secs) --|
 //!     |                            |    (escrow = rate * calls)     |
 //!     |                            |                                |
-//!     |-- settle_lease(used) ----->|  pay provider, refund rest --->|
-//!     |                            |                                |
+//!     |-- settle_lease(used) ----->|  propose payout + refund       |
+//!     |                            |  (24h challenge window opens)  |
+//!                                  |<-- challenge_settlement ------ |
+//!                                  |-- resolve_challenge (admin) -->|
+//!     |                            |  finalize after window         |
 //!                                  |  (if provider never settles)   |
 //!                                  |<-- revoke_expired_lease ------ |
 //!                                  |  (full refund after 24h)       |
@@ -30,6 +33,9 @@
 //!   `allocated_calls * rate_per_call`, and it can only settle once.
 //! * A consumer can always reclaim the full deposit if the provider fails to
 //!   settle within [`SETTLE_GRACE_PERIOD_SECS`] of expiry.
+//! * A settlement does not pay out immediately: the consumer has
+//!   [`CHALLENGE_WINDOW_SECS`] to dispute the reported call count, and the
+//!   admin resolves a raised challenge.
 //! * All ledger math uses checked arithmetic; overflow reverts the transaction.
 //!
 //! ## Stellar / Soroban dependencies
@@ -68,7 +74,7 @@ pub use crate::events::{
     ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
     RegistryInitialized, ServiceRegistered, ServiceStatusChanged, EVENT_SCHEMA_VERSION,
 };
-pub use crate::types::{Lease, LeaseStatus, Service};
+pub use crate::types::{Lease, LeaseStatus, Service, Settlement, SettlementState};
 
 // On-chain contract metadata, readable from the ledger without the source.
 soroban_sdk::contractmeta!(key = "name", val = "KeyLeaseRegistry");
@@ -88,6 +94,10 @@ soroban_sdk::contractmeta!(
 /// Grace period after lease expiry during which the provider may still settle.
 /// After this window elapses, the consumer may reclaim the full deposit.
 pub const SETTLE_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60;
+
+/// Window after a settlement is proposed during which the consumer may dispute
+/// the provider's reported call count. The payout stays locked until it closes.
+pub const CHALLENGE_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 /// Longest lease the TTL policy is guaranteed to keep alive.
 ///
@@ -382,14 +392,21 @@ impl KeyLeaseRegistry {
         Ok(lease_id)
     }
 
-    /// Settle a lease, paying the provider for `verified_calls` consumed calls
-    /// and refunding the remainder to the consumer. Requires provider auth.
+    /// Propose a settlement and open the consumer challenge window. Requires
+    /// provider auth.
     ///
     /// A lease may only be settled when it has **expired** or when
     /// `verified_calls == allocated_calls` (the consumer got everything it
-    /// paid for, so there is no reason to wait). Settling pays out
-    /// `verified_calls * rate_per_call` and returns
-    /// `locked_deposit - payout` to the consumer. A lease can be settled once.
+    /// paid for, so there is no reason to wait). The proposal records
+    /// `verified_calls * rate_per_call` as the provider's payout and
+    /// `locked_deposit - payout` as the consumer's refund, but moves no funds.
+    ///
+    /// The lease can no longer be settled again or revoked from this point. The
+    /// payout stays locked in escrow for [`CHALLENGE_WINDOW_SECS`] (24 hours),
+    /// during which the consumer may call [`Self::challenge_settlement`]. Once
+    /// the window closes, anyone may call [`Self::finalize_settlement`] to
+    /// release the funds. A raised challenge is decided by the admin through
+    /// [`Self::resolve_challenge`].
     pub fn settle_lease(
         env: Env,
         provider: Address,
@@ -425,35 +442,185 @@ impl KeyLeaseRegistry {
             .locked_deposit
             .checked_sub(payout)
             .ok_or(Error::Overflow)?;
+        let challengeable_until = now
+            .checked_add(CHALLENGE_WINDOW_SECS)
+            .ok_or(Error::Overflow)?;
 
-        // checks-effects-interactions: persist the settlement before any token
-        // transfer, so a re-entrant token sees a settled lease and reverts.
+        // The lease is committed to this settlement: it can no longer be settled
+        // again or revoked, even though the funds stay in escrow.
         lease.used_calls = verified_calls;
         lease.settled = true;
         storage::save_lease(&env, &lease);
 
-        let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
-        let client = token::Client::new(&env, &token_addr);
-        let contract = env.current_contract_address();
+        storage::save_settlement(
+            &env,
+            &Settlement {
+                lease_id,
+                consumer: lease.consumer.clone(),
+                provider: service.provider.clone(),
+                verified_calls,
+                payout,
+                refund,
+                proposed_at: now,
+                challengeable_until,
+                state: SettlementState::Pending,
+                challenge_evidence: BytesN::from_array(&env, &[0u8; 32]),
+                challenged_at: 0,
+            },
+        );
 
-        if payout > 0 {
-            client.transfer(&contract, &service.provider, &payout);
-        }
-        if refund > 0 {
-            client.transfer(&contract, &lease.consumer, &refund);
-        }
-
-        LeaseSettled {
+        LeaseSettlementProposed {
             lease_id,
             schema_version: EVENT_SCHEMA_VERSION,
             provider,
             verified_calls,
             payout,
             refund,
+            challengeable_until,
         }
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Release a proposed settlement after its challenge window has closed.
+    ///
+    /// Permissionless: the provider, the consumer or any keeper can call it once
+    /// `now >= challengeable_until` and no challenge is active. Funds move to
+    /// the provider and consumer exactly as proposed by the provider.
+    pub fn finalize_settlement(env: Env, lease_id: u64) -> Result<(), Error> {
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Challenged => return Err(Error::SettlementChallenged),
+            SettlementState::Pending => {}
+        }
+
+        if env.ledger().timestamp() < settlement.challengeable_until {
+            return Err(Error::ChallengeWindowStillOpen);
+        }
+
+        let (payout, refund) = (settlement.payout, settlement.refund);
+        pay_settlement(&env, &mut settlement, payout, refund)
+    }
+
+    /// Dispute a proposed settlement with an evidence hash. Requires consumer
+    /// auth and must happen inside the challenge window.
+    ///
+    /// The settlement is frozen until the admin resolves the challenge; the
+    /// payout cannot be finalized while it is active. A consumer may withdraw
+    /// the challenge with [`Self::cancel_challenge`].
+    pub fn challenge_settlement(
+        env: Env,
+        consumer: Address,
+        lease_id: u64,
+        evidence_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        if settlement.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Challenged => return Err(Error::SettlementChallenged),
+            SettlementState::Pending => {}
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= settlement.challengeable_until {
+            return Err(Error::ChallengeWindowClosed);
+        }
+        if evidence_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEvidence);
+        }
+
+        settlement.challenge_evidence = evidence_hash.clone();
+        settlement.challenged_at = now;
+        settlement.state = SettlementState::Challenged;
+        storage::save_settlement(&env, &settlement);
+
+        LeaseChallenged {
+            lease_id,
+            consumer,
+            evidence_hash,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Withdraw an active challenge, returning the settlement to `Pending`.
+    /// Requires consumer auth.
+    ///
+    /// Cancelling does not pay out immediately: the original challenge window
+    /// still has to close before [`Self::finalize_settlement`] can release the
+    /// funds. While the window remains open the consumer may challenge again.
+    pub fn cancel_challenge(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        if settlement.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Pending => return Err(Error::NoActiveChallenge),
+            SettlementState::Challenged => {}
+        }
+
+        settlement.challenge_evidence = BytesN::from_array(&env, &[0u8; 32]);
+        settlement.challenged_at = 0;
+        settlement.state = SettlementState::Pending;
+        storage::save_settlement(&env, &settlement);
+
+        LeaseChallengeCancelled { lease_id, consumer }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Resolve an active challenge. Admin only.
+    ///
+    /// `upheld = true` refunds the entire deposit to the consumer and pays the
+    /// provider nothing. `upheld = false` releases the proposal unchanged. The
+    /// admin may resolve before or after the challenge window closes.
+    pub fn resolve_challenge(
+        env: Env,
+        admin: Address,
+        lease_id: u64,
+        upheld: bool,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Pending => return Err(Error::NoActiveChallenge),
+            SettlementState::Challenged => {}
+        }
+
+        let (payout, refund) = if upheld {
+            (
+                0,
+                settlement
+                    .payout
+                    .checked_add(settlement.refund)
+                    .ok_or(Error::Overflow)?,
+            )
+        } else {
+            (settlement.payout, settlement.refund)
+        };
+
+        LeaseChallengeResolved {
+            lease_id,
+            admin: admin.clone(),
+            upheld,
+        }
+        .publish(&env);
+
+        pay_settlement(&env, &mut settlement, payout, refund)
     }
 
     /// Reclaim the full deposit for a lease the provider never settled.
@@ -633,11 +800,56 @@ impl KeyLeaseRegistry {
     /// time. Pure read.
     pub fn locked_balance(env: Env, lease_id: u64) -> Result<i128, Error> {
         let lease = storage::get_lease(&env, lease_id)?;
-        if lease.settled {
-            return Ok(0);
+        if !lease.settled {
+            return Ok(lease.locked_deposit);
         }
-        Ok(lease.locked_deposit)
+        match storage::get_settlement(&env, lease_id) {
+            Ok(settlement) if settlement.state != SettlementState::Finalized => settlement
+                .payout
+                .checked_add(settlement.refund)
+                .ok_or(Error::Overflow),
+            // Revoked leases never have a settlement, and finalized ones hold nothing.
+            _ => Ok(0),
+        }
     }
+}
+
+/// Release the funds recorded in `settlement` and mark it finalized.
+///
+/// checks-effects-interactions: the finalized state is persisted before any
+/// token transfer, so a re-entrant token cannot release the same funds twice.
+fn pay_settlement(
+    env: &Env,
+    settlement: &mut Settlement,
+    payout: i128,
+    refund: i128,
+) -> Result<(), Error> {
+    let token_addr = storage::get_token(env).ok_or(Error::TokenNotSet)?;
+
+    settlement.payout = payout;
+    settlement.refund = refund;
+    settlement.state = SettlementState::Finalized;
+    storage::save_settlement(env, settlement);
+
+    let client = token::Client::new(env, &token_addr);
+    let contract = env.current_contract_address();
+    if payout > 0 {
+        client.transfer(&contract, &settlement.provider, &payout);
+    }
+    if refund > 0 {
+        client.transfer(&contract, &settlement.consumer, &refund);
+    }
+
+    LeaseSettled {
+        lease_id: settlement.lease_id,
+        provider: settlement.provider.clone(),
+        verified_calls: settlement.verified_calls,
+        payout,
+        refund,
+    }
+    .publish(env);
+
+    Ok(())
 }
 
 /// Ensure `caller` matches the stored admin.

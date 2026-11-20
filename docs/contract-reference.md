@@ -184,22 +184,118 @@ pub fn settle_lease(
 ) -> Result<(), Error>
 ```
 
-Pay the provider for verified calls and refund the remainder to the consumer.
+Propose a settlement and open the consumer challenge window. No funds move yet.
 
 - **Caller / auth:** `provider`, and it must own the lease's service.
 - **Trigger:** at or after expiry, or as soon as every allocated call is consumed.
 - **Preconditions:** lease exists, is not settled, `verified_calls ≤
   allocated_calls`, the caller owns the service, and the lease has expired **or**
   `verified_calls == allocated_calls`.
-- **Effects:** persists `used_calls` and `settled = true` **first**, then calls
-  `transfer(contract → provider, verified_calls × rate_per_call)` and
-  `transfer(contract → consumer, locked_deposit − payout)`.
-- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Effects:** persists `used_calls` and `settled = true`, then writes a
+  `Settlement(lease_id)` entry with `state = Pending`,
+  `payout = verified_calls × rate_per_call`, `refund = locked_deposit − payout`
+  and `challengeable_until = now + CHALLENGE_WINDOW_SECS`. No token transfer
+  happens.
+- **Events:** `lease_settlement_proposed { lease_id, provider, verified_calls,
+  payout, refund, challengeable_until }`.
 - **Errors:** `LeaseNotFound`, `LeaseAlreadySettled`, `InvalidCalls`,
-  `Unauthorized`, `LeaseNotSettleable`, `TokenNotSet`, `Overflow`.
-- **Notes:** zero-value transfers are skipped. Settling with
-  `verified_calls = 0` is a legitimate way for a provider to refund an
-  unusable lease. A re-entrant token sees `settled = true` and is rejected.
+  `Unauthorized`, `LeaseNotSettleable`, `Overflow`.
+- **Notes:** the lease can no longer be settled again or revoked once a proposal
+  exists. The payout stays locked until the challenge window closes and
+  `finalize_settlement` (or `resolve_challenge`) releases it. Settling with
+  `verified_calls = 0` proposes a full consumer refund.
+
+### `finalize_settlement`
+
+```rust
+pub fn finalize_settlement(env: Env, lease_id: u64) -> Result<(), Error>
+```
+
+Release a pending proposal once its challenge window has closed.
+
+- **Caller / auth:** none — permissionless. The provider, consumer or any keeper
+  can finalize.
+- **Preconditions:** a settlement exists, `state == Pending`, and
+  `now ≥ challengeable_until`.
+- **Effects:** persists `state = Finalized`, then calls
+  `transfer(contract → provider, payout)` and
+  `transfer(contract → consumer, refund)` (zero-value transfers are skipped).
+- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `SettlementChallenged`, `ChallengeWindowStillOpen`, `TokenNotSet`.
+- **Notes:** `lease_settled` is now only emitted when funds actually move.
+
+### `challenge_settlement`
+
+```rust
+pub fn challenge_settlement(
+    env: Env,
+    consumer: Address,
+    lease_id: u64,
+    evidence_hash: BytesN<32>,
+) -> Result<(), Error>
+```
+
+Dispute a proposed settlement inside the challenge window.
+
+- **Caller / auth:** the lease's `consumer` must authorize.
+- **Preconditions:** a settlement exists, is `Pending` (not already challenged
+  or finalized), `now < challengeable_until`, and `evidence_hash` is not all
+  zeroes.
+- **Effects:** stores `challenge_evidence` and `challenged_at`; sets
+  `state = Challenged`. Funds remain locked.
+- **Events:** `lease_challenged { lease_id, consumer, evidence_hash }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `SettlementChallenged`, `ChallengeWindowClosed`, `InvalidEvidence`,
+  `Unauthorized`.
+- **Notes:** the evidence itself stays off chain; only its 32-byte commitment is
+  stored. The admin resolves the dispute.
+
+### `cancel_challenge`
+
+```rust
+pub fn cancel_challenge(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error>
+```
+
+Withdraw an active challenge and return the settlement to `Pending`.
+
+- **Caller / auth:** the lease's `consumer` must authorize.
+- **Preconditions:** a settlement exists, `state == Challenged`.
+- **Effects:** clears the evidence fields and sets `state = Pending`. The
+  original `challengeable_until` is unchanged.
+- **Events:** `lease_challenge_cancelled { lease_id, consumer }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `NoActiveChallenge`, `Unauthorized`.
+- **Notes:** cancellation does not pay out early and does not extend the window.
+  While the window is still open the consumer may challenge again.
+
+### `resolve_challenge`
+
+```rust
+pub fn resolve_challenge(
+    env: Env,
+    admin: Address,
+    lease_id: u64,
+    upheld: bool,
+) -> Result<(), Error>
+```
+
+Decide an active challenge. Admin only.
+
+- **Caller / auth:** the stored `admin` must authorize.
+- **Preconditions:** a settlement exists and `state == Challenged`.
+- **Effects:** persists `state = Finalized`, then pays the outcome:
+  - `upheld = true` — `payout = 0`, `refund = locked_deposit` (full consumer
+    refund),
+  - `upheld = false` — the proposal's payout and refund stand.
+- **Events:** `lease_challenge_resolved { lease_id, admin, upheld }` followed by
+  `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `NoActiveChallenge`, `NotInitialized`, `Unauthorized`, `TokenNotSet`,
+  `Overflow`.
+- **Notes:** resolution may happen before or after the window closes. The admin
+  can only choose between the proposal and a full refund; it cannot redirect
+  funds elsewhere.
 
 ### `revoke_expired_lease`
 
@@ -221,7 +317,9 @@ Reclaim the **full** deposit when the provider never settled.
 - **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
   `LeaseNotExpired`, `RevokeWindowNotElapsed`, `TokenNotSet`, `Overflow`.
 - **Notes:** this is the consumer's escape hatch, and the reason escrow is safe
-  against an unresponsive provider.
+  against an unresponsive provider. It is unavailable once a settlement has been
+  proposed: the lease is marked settled at proposal time and the challenge
+  window is the consumer's remedy from then on.
 
 ---
 
@@ -346,7 +444,8 @@ performed one could not be used to price a read.
 | `get_lease` | `(env, lease_id: u64) -> Result<Lease, Error>` | the `Lease`, else `LeaseNotFound` |
 | `lease_status` | `(env, lease_id: u64) -> Result<LeaseStatus, Error>` | derived status at current ledger time |
 | `remaining_calls` | `(env, lease_id: u64) -> Result<u32, Error>` | calls left; `0` once settled **or** expired |
-| `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; `0` once settled |
+| `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; stays at `locked_deposit` while a settlement is pending or challenged; `0` once finalized or revoked |
+| `get_settlement` | `(env, lease_id: u64) -> Result<Settlement, Error>` | the `Settlement`, else `SettlementNotFound` |
 
 > `remaining_calls` returns `0` as soon as the lease expires, even if calls were
 > never consumed. A caller that wants the raw allotment should read
@@ -401,7 +500,25 @@ pub struct Lease {
     pub settled: bool,
 }
 
+// `Settled` means no further lease transition is possible (revoked, or a
+// settlement was proposed); use `get_settlement` for the payout state.
 pub enum LeaseStatus { Active = 0, Expired = 1, Settled = 2 }
+
+pub enum SettlementState { Pending = 0, Challenged = 1, Finalized = 2 }
+
+pub struct Settlement {
+    pub lease_id: u64,
+    pub consumer: Address,
+    pub provider: Address,
+    pub verified_calls: u32,
+    pub payout: i128,
+    pub refund: i128,
+    pub proposed_at: u64,
+    pub challengeable_until: u64,
+    pub state: SettlementState,
+    pub challenge_evidence: BytesN<32>, // all zeroes when no challenge is active
+    pub challenged_at: u64,            // 0 when no challenge is active
+}
 ```
 
 ## Storage layout
@@ -412,8 +529,9 @@ pub enum DataKey {
     Token,        // instance
     ServiceCount, // instance
     LeaseCount,   // instance
-    Service(u64), // persistent
-    Lease(u64),   // persistent
+    Service(u64),    // persistent
+    Lease(u64),      // persistent
+    Settlement(u64), // persistent
 }
 ```
 
@@ -465,9 +583,21 @@ stellar contract invoke --id $REGISTRY --source-account consumer --network testn
      --requested_calls 500 \
      --duration_secs 3600
 
-# settle
+# propose a settlement
 stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
   -- settle_lease --provider $PROVIDER --lease_id 1 --verified_calls 320
+
+# finalize after the 24h challenge window (anyone may call this)
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  -- finalize_settlement --lease_id 1
+
+# the consumer can dispute inside the window
+stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
+  -- challenge_settlement --consumer $CONSUMER --lease_id 1 --evidence_hash <64_HEX_CHARS>
+
+# the admin resolves the dispute
+stellar contract invoke --id $REGISTRY --source-account admin --network testnet \
+  -- resolve_challenge --admin $ADMIN --lease_id 1 --upheld true
 
 # upgrade (after `stellar contract upload`)
 stellar contract invoke --id $REGISTRY --source-account admin --network testnet \

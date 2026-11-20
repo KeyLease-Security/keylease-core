@@ -22,8 +22,8 @@ KeyLease turns metered access into a **lease**, and puts the lease on Stellar.
 A consumer locks a SEP-41 micropayment in Soroban escrow and receives an
 on-chain authorization for a fixed allotment of calls. The provider verifies the
 lease against Stellar instead of trusting a password, settles once with a
-verified call count, and is paid from escrow. Unused balance refunds
-automatically.
+verified call count, and is paid from escrow after the consumer's 24-hour
+challenge window. Unused balance refunds automatically.
 
 ```text
 consumer                         registry                        provider
@@ -33,6 +33,10 @@ consumer                         registry                        provider
    |<-- lease_id ------------------ |                                |
    |                                |                                |
    |                                |<-- settle_lease(used_calls) ---|
+   |                                |    (proposal, funds locked)    |
+   |-- challenge_settlement ------->|    (optional, inside 24h)      |
+   |                                |                                |
+   |                                |<-- finalize_settlement --------|
    |<-- refund of unused ---------- |---- payout of used ----------->|
    |                                |                                |
 ```

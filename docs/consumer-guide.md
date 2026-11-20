@@ -105,12 +105,39 @@ stellar contract invoke --id $REGISTRY --source-account consumer \
   --network testnet -- lease_status --lease_id 1
 ```
 
-`lease_status` is `0` (Active), `1` (Expired) or `2` (Settled).
+`lease_status` is `0` (Active), `1` (Expired) or `2` (Settled). A lease becomes
+`Settled` as soon as the provider proposes a settlement; read `get_settlement`
+to see whether the payout is still in the challenge window or has been released.
 
 ## 6. Get your money back
 
 **Normal path — automatic.** When the provider settles, the unused balance is
-transferred back to you in the same transaction. Nothing to claim.
+returned to you once the challenge window closes. Nothing to claim.
+
+A settlement is a two-phase flow: `settle_lease` only proposes the split and
+locks the funds for 24 hours. If you disagree with the reported call count, you
+can dispute it inside that window with a 32-byte evidence hash:
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account consumer --network testnet \
+  --send=yes -- challenge_settlement \
+     --consumer $CONSUMER --lease_id 1 \
+     --evidence_hash <sha256-of-your-evidence>
+```
+
+The challenge freezes the payout until the registry admin resolves it. If the
+dispute is upheld you get the entire deposit back; if it is rejected the original
+proposal is released. You can withdraw a challenge with `cancel_challenge`; the
+settlement returns to pending and the original deadline is unchanged.
+
+Otherwise the payout can be released by anyone after the window closes:
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account consumer --network testnet \
+  --send=yes -- finalize_settlement --lease_id 1
+```
 
 **Provider went dark.** After `expires_at + 24 hours`, reclaim everything:
 
@@ -134,9 +161,11 @@ constant in the contract (`SETTLE_GRACE_PERIOD_SECS = 86_400`).
 
 | Lease state | What happens |
 | --- | --- |
-| Provider settles before/at expiry | You get `locked_deposit − used × rate` back |
-| Provider settles after expiry within 24h | Same as above |
-| Provider settles with `verified_calls = 0` | You get the entire deposit back |
+| Provider proposes a settlement | Funds stay locked; you have 24h to challenge |
+| You challenge inside 24h | Payout frozen until the admin resolves it |
+| Dispute upheld | You get the entire deposit back |
+| Dispute rejected or no challenge | `locked_deposit − used × rate` returns to you at finalization |
+| Provider proposes `verified_calls = 0` | You get the entire deposit back |
 | Provider never settles, `now ≥ expiry + 24h` | You `revoke` and get the entire deposit |
 | Provider never settles, inside the 24h window | Nothing yet — wait |
 

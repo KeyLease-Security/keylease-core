@@ -54,11 +54,20 @@ pub struct Lease {
 stateDiagram-v2
     [*] --> Active: create_lease<br/>(escrow rate × calls)
     Active --> Expired: now ≥ expires_at
-    Active --> Settled: settle_lease<br/>(verified_calls == allocated_calls)
-    Expired --> Settled: settle_lease<br/>(provider, within grace)
+    Active --> SettlementPending: settle_lease<br/>(verified_calls == allocated_calls)
+    Expired --> SettlementPending: settle_lease<br/>(provider, within grace)
     Expired --> Settled: revoke_expired_lease<br/>(consumer, after 24h grace)
+    SettlementPending --> Challenged: challenge_settlement<br/>(consumer, inside 24h)
+    Challenged --> SettlementPending: cancel_challenge
+    SettlementPending --> Settled: finalize_settlement<br/>(window closed)
+    Challenged --> Settled: resolve_challenge<br/>(admin)
     Settled --> [*]
 ```
+
+A settlement is a **two-phase** flow. `settle_lease` proposes a payout and
+refund but moves nothing; the consumer has 24 hours to dispute the reported call
+count; only after that window closes do the funds leave escrow. A raised
+dispute is decided by the registry admin.
 
 `lease_status` derives the state from `settled` and `expires_at`:
 
@@ -66,7 +75,7 @@ stateDiagram-v2
 | --- | --- | --- |
 | `Active` | `0` | not settled, `now < expires_at` |
 | `Expired` | `1` | not settled, `now ≥ expires_at` |
-| `Settled` | `2` | `settled == true` |
+| `Settled` | `2` | `settled == true` (revoked, or committed to a settlement) |
 
 Discriminants are **stable on the wire**. They will never be renumbered.
 
@@ -111,6 +120,33 @@ and how to consume the two events is in
 The second clause is the "consumer got what it paid for" fast path: if every
 allocated call was consumed, the provider should not have to wait for expiry to
 be paid.
+
+Settlement itself does not pay out. It writes a `Settlement` entry with
+`state = Pending` and `challengeable_until = now + CHALLENGE_WINDOW_SECS`
+(24 hours). During that window the consumer may challenge the reported call
+count with an evidence commitment; otherwise anyone can call
+`finalize_settlement` once the window closes.
+
+### The consumer challenge window
+
+| Timestamp | `challenge_settlement` | `finalize_settlement` |
+| --- | --- | --- |
+| `now < challengeable_until` | allowed | `ChallengeWindowStillOpen` |
+| `now ≥ challengeable_until` | `ChallengeWindowClosed` | allowed if `Pending` |
+
+- A **challenge** stores a 32-byte evidence hash and freezes the settlement.
+  While it is active, `finalize_settlement` returns `SettlementChallenged`.
+- The consumer may **cancel** a challenge. The settlement returns to `Pending`;
+  the original deadline is unchanged and cancellation never pays early.
+- The **admin resolves** an active challenge. Upholding it refunds the entire
+  deposit to the consumer and pays the provider nothing; rejecting it releases
+  the original proposal. Resolution may happen before or after the window closes.
+- Once finalized, the settlement is immutable and the lease can never be settled
+  or revoked again.
+
+The lease is marked settled at proposal time, so the consumer cannot revoke while
+a proposal is pending. The challenge window, not the revoke path, is the
+consumer's remedy from that point.
 
 ### The 24-hour grace window
 
@@ -184,6 +220,11 @@ refund = 500_000_000 − 320_000_000
        = 180_000_000                     (18 XLM back to the consumer)
 ```
 
+Those amounts stay in escrow for the 24-hour challenge window. If the consumer
+does not dispute them, `finalize_settlement` releases 32 XLM to the provider and
+18 XLM to the consumer. If the admin upholds a challenge, the provider receives
+0 and the consumer receives the full 50 XLM.
+
 **2b. Provider goes dark; consumer calls `revoke_expired_lease` after 24h**
 
 ```text
@@ -216,16 +257,21 @@ thirty-day default.
 
 These must hold for every reachable state. They are asserted in tests.
 
-1. **Conservation.** For every lease, `payout + refund == locked_deposit`.
+1. **Conservation.** For every settlement, `payout + refund == locked_deposit`.
 2. **Single release.** A settled lease can never be settled or revoked again
-   (`LeaseAlreadySettled`), and `settled` is persisted before any token call.
+   (`LeaseAlreadySettled`), and a finalized settlement is persisted before any
+   token call.
 3. **Bounded claim.** A provider can never receive more than
    `allocated_calls × rate_per_call`, and only for a service it owns.
-4. **Guaranteed exit.** Every lease has a consumer path to a full refund.
-5. **Checked math.** Deposit, payout and timestamp arithmetic abort on overflow
+4. **Locked while disputed.** No payout leaves escrow while a challenge is
+   active; only the admin can resolve it.
+5. **Guaranteed exit.** Every lease has a consumer path to a full refund, through
+   the revoke path or the challenge path.
+6. **Checked math.** Deposit, payout and timestamp arithmetic abort on overflow
    rather than truncating.
-6. **Claimable storage.** A lease's persistent entry outlives its term plus the
-   grace window (`MAX_LEASE_DURATION_SECS = 30 days`).
+7. **Claimable storage.** A lease's persistent entry outlives its term plus the
+   grace window, and settlement entries are kept for the standard persistent
+   horizon (`MAX_LEASE_DURATION_SECS = 30 days`).
 
 ## Storage and lifetime
 

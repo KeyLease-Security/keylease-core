@@ -39,7 +39,9 @@ A provider should implement these steps, in order, and fail closed at every one:
 6. **Serve the request**, adding the remaining-calls header if you want the
    client to see its budget.
 7. **Settle** with `settle_lease` when the lease expires or when the allotment is
-   fully consumed.
+   fully consumed, then **finalize** with `finalize_settlement` after the
+   24-hour challenge window. Settlement only proposes the split; funds move at
+   finalization.
 
 Step 5's local counter is an optimisation, not the source of truth. On-chain
 `allocated_calls × rate_per_call` bounds what the provider can ever be paid, so a
@@ -240,8 +242,8 @@ that is being read and not written for the length of its horizon.
 
 ## Settling
 
-Settlement is one signed transaction from the provider account, at or after
-expiry, or as soon as every allocated call is consumed:
+Settlement is two transactions. The provider proposes a split at or after expiry,
+or as soon as every allocated call is consumed:
 
 ```bash
 stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
@@ -249,9 +251,45 @@ stellar contract invoke --id $REGISTRY --source-account provider --network testn
     --provider $PROVIDER --lease_id 1 --verified_calls 320
 ```
 
-Reporting `verified_calls = 0` refunds the entire deposit for a lease you could
-not serve. Choose a settlement cadence that fits your traffic: one settlement per
+That transaction moves no funds. It emits `lease_settlement_proposed` and opens a
+24-hour consumer challenge window. Once the window closes, anyone can release the
+funds:
+
+```bash
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  --send=yes -- finalize_settlement --lease_id 1
+```
+
+Reporting `verified_calls = 0` proposes a full refund for a lease you could not
+serve. Choose a settlement cadence that fits your traffic: one settlement per
 lease, not per request.
+
+## The consumer challenge window
+
+The consumer can dispute the provider's reported call count while the window is
+open:
+
+```bash
+stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
+  --send=yes -- challenge_settlement \
+    --consumer $CONSUMER --lease_id 1 \
+    --evidence_hash <sha256-of-your-evidence>
+```
+
+Only a 32-byte commitment goes on chain; the evidence itself is presented to the
+admin off chain. A challenge freezes the payout. The consumer may withdraw it
+(`cancel_challenge`) and the settlement returns to pending, with the original
+deadline unchanged. The registry admin resolves an active challenge on chain:
+
+```bash
+stellar contract invoke --id $REGISTRY --source-account admin --network testnet \
+  --send=yes -- resolve_challenge --admin $ADMIN --lease_id 1 --upheld true
+```
+
+`upheld = true` refunds the entire deposit to the consumer and pays the provider
+nothing. `upheld = false` releases the proposal unchanged. Index `upheld` from
+the `lease_challenge_resolved` event and reconcile the following `lease_settled`
+event.
 
 ## Hardening checklist
 

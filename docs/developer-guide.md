@@ -301,6 +301,7 @@ If you must read storage directly, `#[contracttype]` enums encode as an
 | `DataKey::Admin` | `Symbol("Admin")` |
 | `DataKey::Lease(7)` | `Vec[Symbol("Lease"), u64(7)]` |
 | `DataKey::Service(3)` | `Vec[Symbol("Service"), u64(3)]` |
+| `DataKey::Settlement(7)` | `Vec[Symbol("Settlement"), u64(7)]` |
 
 With `@stellar/stellar-sdk`:
 
@@ -316,9 +317,11 @@ xdr.ScVal.scvVec([
 
 `getContractData` returns a `scvMap` of the `Lease` struct fields. Decode it as
 `{ lease_id, service_id, consumer, allocated_calls, used_calls, expires_at,
-locked_deposit, settled }`. Full details are in the
-[contract reference](contract-reference.md#storage-layout), and the supported
-way to verify leases is described in [Integration](integration.md).
+locked_deposit, settled }`. A proposed settlement is a separate
+`Settlement(u64)` entry; prefer the `get_settlement` view over raw storage. Full
+details are in the [contract reference](contract-reference.md#storage-layout),
+and the supported way to verify leases is described in
+[Integration](integration.md).
 
 ## Deploying
 
