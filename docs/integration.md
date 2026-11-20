@@ -39,7 +39,10 @@ A provider should implement these steps, in order, and fail closed at every one:
 6. **Serve the request**, adding the remaining-calls header if you want the
    client to see its budget.
 7. **Settle** with `settle_lease` when the lease expires or when the allotment is
-   fully consumed.
+   fully consumed. If the consumer asks to end the lease early
+   (`request_early_cancel`), decide with `approve_early_cancel` (report served
+   calls and release the unused balance) or `reject_early_cancel` (leave the
+   lease running).
 
 Step 5's local counter is an optimisation, not the source of truth. On-chain
 `allocated_calls × rate_per_call` bounds what the provider can ever be paid, so a

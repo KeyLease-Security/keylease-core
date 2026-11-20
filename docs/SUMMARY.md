@@ -26,6 +26,7 @@
 
 ## Project
 
+- [Design: early cancellation](design/early-cancellation.md)
 - [Deployments](deployments.md)
 - Design notes
   - [Provider staking and slashing (#137)](design/137-provider-staking.md)

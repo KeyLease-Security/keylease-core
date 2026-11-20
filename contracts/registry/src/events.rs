@@ -127,6 +127,58 @@ pub struct LeaseCreated {
     pub locked_deposit: i128,
 }
 
+/// Emitted when a consumer asks to end a lease early.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancellationRequested {
+    /// Lease the consumer wants to end.
+    #[topic]
+    pub lease_id: u64,
+    /// Consumer that requested cancellation.
+    pub consumer: Address,
+}
+
+/// Emitted when a provider declines an early-cancellation request.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancellationRejected {
+    /// Lease whose cancellation was declined.
+    #[topic]
+    pub lease_id: u64,
+    /// Provider that declined it.
+    pub provider: Address,
+}
+
+/// Emitted when a consumer withdraws an early-cancellation request.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancellationWithdrawn {
+    /// Lease whose request was withdrawn.
+    #[topic]
+    pub lease_id: u64,
+    /// Consumer that withdrew it.
+    pub consumer: Address,
+}
+
+/// Emitted when an early cancellation is approved and funds are released.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancelled {
+    /// Lease that was ended early.
+    #[topic]
+    pub lease_id: u64,
+    /// Provider that consented and received the payout.
+    pub provider: Address,
+    /// Consumer that received the refund.
+    pub consumer: Address,
+    /// Calls the provider reported as served.
+    pub verified_calls: u32,
+    /// Amount paid to the provider.
+    pub payout: i128,
+    /// Unused-call amount refunded to the consumer.
+    pub refund: i128,
+}
+
 /// Emitted when a provider settles a lease from escrow.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
