@@ -59,6 +59,8 @@ mod storage;
 mod types;
 
 #[cfg(test)]
+mod model;
+#[cfg(test)]
 mod test;
 
 use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};

@@ -83,6 +83,7 @@ keylease-core/
 │   │   │   ├── types.rs   # Service, Lease, LeaseStatus
 │   │   │   ├── storage.rs # DataKey layout + duration-aware TTL policy
 │   │   │   ├── errors.rs  # stable error codes
+│   │   │   ├── model.rs   # exhaustive escrow state-machine model (tests only)
 │   │   │   └── test.rs    # lifecycle, SAC, events, upgrade, re-entrancy tests
 │   │   └── Cargo.toml
 │   └── mock_token/        # minimal SEP-41 token for tests & local sandboxes
@@ -323,6 +324,10 @@ The 44 tests in `contracts/registry/src/test.rs` cover:
 - a failed escrow transfer rolling back the lease id and the lease row with it,
 - conservation (`payout + refund == locked_deposit`) on settlement and
   revocation, checked against both the lease and the token balances,
+- an exhaustive bounded model of the create / settle / revoke machine
+  (`contracts/registry/src/model.rs`) plus a conformance test that drives the
+  real contract through the same transitions and compares the outcome and
+  balances at every step,
 - status transitions and derived views.
 
 ---

@@ -162,6 +162,78 @@ violation.
 - **Not a third-party seizure path.** No admin, consumer or arbitrary caller can
   call it for a service they do not own.
 
+## Formal escrow model
+
+> Design note for issue #128. **Pending maintainer approval.**
+
+The escrow machine is small enough to check exhaustively, so it is checked in
+CI by an ordinary `cargo test` run. No new tooling is needed:
+
+- `contracts/registry/src/model.rs` is a bounded state machine — the
+  specification below, in Rust.
+- `test_model_explores_the_escrow_state_machine_exhaustively` walks **every**
+  sequence of up to four actions from every create shape, under each of the three
+  time regimes, and panics on the first violating transition.
+- `test_model_matches_the_deployed_contract` drives the **real** registry through
+  the same alphabet and compares the outcome and the resulting balances after
+  every step, which is what keeps the model honest.
+
+### Transitions
+
+Let `L = rate_per_call × allocated_calls`, `verified` the provider's report and
+`g` the 24-hour grace window. `now` is ledger time.
+
+| # | Transition | Guard | Effect |
+| --- | --- | --- | --- |
+| T1 | `create(calls, rate)` | `calls > 0`, `rate > 0`, `rate × calls` fits `i128` and is `≤ MAX_LEASE_DEPOSIT` | `Active`, `locked = rate × calls`, `used = 0` |
+| T2 | `settle(verified)` | `¬settled`, `verified ≤ allocated_calls`, caller is the stored provider, and `(now ≥ expires_at ∨ verified = allocated_calls)`, `payout`/`refund` fit | `Settled`, `used = verified`, `payout = rate × verified`, `refund = locked − payout` |
+| T3 | `revoke()` | caller is the consumer, `¬settled`, `now ≥ expires_at`, `now ≥ expires_at + g` | `Settled`, `refund = locked` |
+| T4 | any action on `Settled` | always false | rejected (`LeaseAlreadySettled`), no state change |
+
+Error order is part of the spec, because clients branch on it: `settle` checks
+`settled`, then the call count, then ownership, then the window; `revoke` checks
+ownership, then `settled`, then expiry, then the grace window. The conformance
+test compares the exact `Error`, so a reordered guard fails CI.
+
+### Invariants
+
+1. **Conservation.** In every reachable state `payout + refund ≤ locked`; on
+   every successful release `payout + refund = locked`. Value is never created
+   and never stranded: a lease is either fully escrowed or fully released.
+2. **No double release.** A lease releases value at most once. Every action from
+   `Settled` is rejected and leaves the state untouched, and the cumulative
+   released amount is monotone and never exceeds `locked`.
+3. **Rejections are no-ops.** A guarded transition that fails changes nothing,
+   so a rejected call cannot be used to move value or rewrite a lease.
+
+### Assumptions the model makes
+
+1. The configured SEP-41 token moves exactly the requested amount or reverts.
+   Token misbehaviour is covered by the re-entrancy tests, not by the model.
+2. Every input except the lease shape is valid: the service exists, is active,
+   has a configured token, `duration_secs` is within `1..=MAX_LEASE_DURATION_SECS`,
+   and ledger time is monotonic. Each of those guards has its own unit test.
+3. The clock is read once per call, as the entry points do.
+4. `rate_per_call` is immutable for a service; a new price is a new service.
+5. Leases are independent accounting units: one lease's escrow never backs
+   another's payout.
+6. `transfer_service` changes which address passes the provider guard, never the
+   escrow arithmetic, so the model parameterises that guard as "is the caller the
+   owner" and the rotation behaviour is pinned by its own tests.
+
+### How the implementation stays in sync
+
+The model does not read the contract's source; it is held to it by
+`test_model_matches_the_deployed_contract`, which runs the real registry against
+the same alphabet and compares, after every transition: the returned `Error`,
+`settled`, `used_calls`, the provider's balance, the consumer's balance and the
+balance left in escrow. Any change to a guard, its order, the payout formula, or
+the field that is persisted first breaks one of those six comparisons.
+
+An optional human-readable TLA+-style sketch is deliberately not committed: a
+spec file CI does not check drifts, and the executable model above is the one
+CI runs.
+
 ## Threats considered
 
 | Threat | Mitigation |
