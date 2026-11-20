@@ -181,6 +181,20 @@ cargo build --target wasm32v1-none --release --all
 # → target/wasm32v1-none/release/keylease_mock_token.wasm
 ```
 
+### Wasm size budget
+
+The `Build (wasm32v1-none)` CI job fails if
+`target/wasm32v1-none/release/keylease_registry.wasm` grows past **48,576
+bytes**. That budget is the current artifact (46,262 bytes) plus a 5% margin, so
+routine changes have room and a real code-size regression is caught before
+deploy. The check prints the measured size and the budget, and can be reproduced
+locally after the release build:
+
+```bash
+size=$(wc -c < target/wasm32v1-none/release/keylease_registry.wasm)
+echo "${size} bytes (budget 48576)"
+```
+
 ---
 
 ## Deploy to Stellar Testnet
