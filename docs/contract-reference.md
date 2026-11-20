@@ -347,10 +347,30 @@ performed one could not be used to price a read.
 | `lease_status` | `(env, lease_id: u64) -> Result<LeaseStatus, Error>` | derived status at current ledger time |
 | `remaining_calls` | `(env, lease_id: u64) -> Result<u32, Error>` | calls left; `0` once settled **or** expired |
 | `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; `0` once settled |
+| `get_services` | `(env, start: u64, limit: u32) -> Result<ServicePage, Error>` | up to `limit` services, ascending from `start` |
+| `get_leases` | `(env, start: u64, limit: u32) -> Result<LeasePage, Error>` | up to `limit` leases, ascending from `start` |
 
 > `remaining_calls` returns `0` as soon as the lease expires, even if calls were
 > never consumed. A caller that wants the raw allotment should read
 > `get_lease().allocated_calls`.
+
+### Paging the catalogue
+
+`get_services` and `get_leases` exist so a dashboard does not have to replay the
+event history to learn what exists. Ids are monotonic from 1 and are never
+reused, so a page is a window over `1..=service_count` (or `1..=lease_count`):
+
+- `limit` is at most `MAX_PAGE_SIZE` (`100`), because the page reads one ledger
+  entry per id it walks over. `0` or anything above the cap is `InvalidLimit`,
+  not a silent clamp.
+- `done`, not the page length, ends the walk. `next_start` is the first id the
+  call did not read, so the next request is `get_services(next_start, limit)`.
+- An id whose entry has been evicted is skipped rather than reported, which is
+  why a page can be short while `done` is still `false`. `service_count` and
+  `lease_count` still count those ids, and `get_service`/`get_lease` on them
+  still return `ServiceNotFound`/`LeaseNotFound`.
+- Like every other view, a page extends no TTL — not its own counters and not
+  the entries it reads. Use `bump_service`/`bump_lease` to keep something alive.
 
 ## Events
 
@@ -402,6 +422,18 @@ pub struct Lease {
 }
 
 pub enum LeaseStatus { Active = 0, Expired = 1, Settled = 2 }
+
+pub struct ServicePage {
+    pub services: Vec<Service>,
+    pub next_start: u64,
+    pub done: bool,
+}
+
+pub struct LeasePage {
+    pub leases: Vec<Lease>,
+    pub next_start: u64,
+    pub done: bool,
+}
 ```
 
 ## Storage layout
@@ -446,6 +478,7 @@ never reused.
 | 15 | `Overflow` | checked arithmetic failed |
 | 16 | `DurationTooLong` | lease duration above `MAX_LEASE_DURATION_SECS` |
 | 17 | `DepositTooLarge` | deposit above `MAX_LEASE_DEPOSIT` |
+| 18 | `InvalidLimit` | paged view asked for `0` or more than `MAX_PAGE_SIZE` |
 
 ## Invoking with the Stellar CLI
 
@@ -472,13 +505,19 @@ stellar contract invoke --id $REGISTRY --source-account provider --network testn
 # upgrade (after `stellar contract upload`)
 stellar contract invoke --id $REGISTRY --source-account admin --network testnet \
   -- upgrade --admin $ADMIN --new_wasm_hash <64_HEX_CHARS>
+
+# page the catalogue (a read view, but the CLI still needs a fee payer)
+stellar contract invoke --id $REGISTRY --source-account reader --network testnet \
+  -- get_services --start 1 --limit 100
 ```
 
 ## MockToken (test only)
 
 `contracts/mock_token` implements a minimal SEP-41 surface — `init`, `mint`,
 `transfer`, `transfer_from`, `approve`, `allowance`, `balance`, `decimals` (7),
-`name`, `symbol`, `admin` — with an **unlimited mint**.
+`name`, `symbol`, `admin` — with an **unlimited mint**: the admin chooses every
+amount, and the only ceiling is `i128`, where a mint or a recipient credit
+returns `Overflow` (7) instead of trapping.
 
 It exists so local sandboxes do not depend on a live SAC, but it must **never**
 be deployed to a network holding value. The registry's own tests escrow against

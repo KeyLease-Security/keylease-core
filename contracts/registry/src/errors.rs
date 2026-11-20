@@ -44,4 +44,9 @@ pub enum Error {
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.
     DepositTooLarge = 17,
+    /// A paged view was asked for an empty page or one larger than
+    /// `MAX_PAGE_SIZE`. Zero is rejected rather than served as an empty page
+    /// because an empty page would be indistinguishable from an exhausted
+    /// catalogue.
+    InvalidLimit = 18,
 }

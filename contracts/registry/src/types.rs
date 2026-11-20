@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracttype, Address, BytesN, Vec};
 
 /// A provider-published API or RPC service that can be leased by consumers.
 ///
@@ -40,6 +40,34 @@ pub struct Lease {
     pub locked_deposit: i128,
     /// Whether funds have been released (settled by provider or reclaimed by consumer).
     pub settled: bool,
+}
+
+/// One page of the service catalogue, as returned by
+/// [`crate::KeyLeaseRegistry::get_services`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServicePage {
+    /// The services read on this call, ascending by id.
+    pub services: Vec<Service>,
+    /// The lowest id this call did not read. Pass it back as `start`.
+    pub next_start: u64,
+    /// `true` once the id space has been read to the end. A page shorter than
+    /// the requested `limit` with `done == false` means ids were skipped, not
+    /// that the catalogue ended.
+    pub done: bool,
+}
+
+/// One page of the lease record, as returned by
+/// [`crate::KeyLeaseRegistry::get_leases`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeasePage {
+    /// The leases read on this call, ascending by id.
+    pub leases: Vec<Lease>,
+    /// The lowest id this call did not read. Pass it back as `start`.
+    pub next_start: u64,
+    /// `true` once the id space has been read to the end.
+    pub done: bool,
 }
 
 /// Derived lifecycle state of a [`Lease`]. Discriminants are stable on the wire.

@@ -42,14 +42,14 @@
 //! * **`Address` auth** — every actor is a Stellar account (`G...`) or contract
 //!   (`C...`) address authenticated by the host's `require_auth()`.
 //! * **Contract events** — every transition emits a typed Soroban event (see
-//!   [`events`]) so indexers can follow escrow without polling. Every payload
+//!   [`LeaseCreated`]) so indexers can follow escrow without polling. Every payload
 //!   carries a `schema_version` key so a stream that spans an upgrade stays
 //!   decodable.
 //! * **Ledger time** — expiry is measured in ledger timestamps, not wall clocks.
 //! * **Persistent storage TTL** — a lease entry is extended for its full
 //!   duration plus the grace period whenever it is written, so escrow cannot
-//!   fall off the ledger. Reads never extend: `bump_lease` and `bump_service`
-//!   keep an entry alive on their own terms (see [`storage`]).
+//!   fall off the ledger. Reads never extend: [`KeyLeaseRegistry::bump_lease`] and
+//!   [`KeyLeaseRegistry::bump_service`] keep an entry alive on their own terms.
 //! * **Wasm upgrades** — the admin can install a new Wasm through the Soroban
 //!   deployer, and `contractmeta!` identifies the running version on-chain.
 
@@ -68,7 +68,7 @@ pub use crate::events::{
     ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
     RegistryInitialized, ServiceRegistered, ServiceStatusChanged, EVENT_SCHEMA_VERSION,
 };
-pub use crate::types::{Lease, LeaseStatus, Service};
+pub use crate::types::{Lease, LeasePage, LeaseStatus, Service, ServicePage};
 
 // On-chain contract metadata, readable from the ledger without the source.
 soroban_sdk::contractmeta!(key = "name", val = "KeyLeaseRegistry");
@@ -121,6 +121,19 @@ pub const MAX_LEASE_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
 /// cost a Wasm upgrade and a release note, not one unsigned transaction.
 pub const MAX_LEASE_DEPOSIT: i128 = 1_000_000_000_000;
 
+/// Largest page [`KeyLeaseRegistry::get_services`] and [`KeyLeaseRegistry::get_leases`]
+/// will serve in one call.
+///
+/// Every id a page walks over costs one ledger read, so an unbounded `limit`
+/// would let a single view ask for the whole catalogue: the read count, and the
+/// rent the caller is billed for it, would grow with the protocol instead of
+/// with the request. The cap is what makes a page's cost a constant.
+///
+/// Asking for more is rejected with [`Error::InvalidLimit`] rather than
+/// silently clamped, so a caller cannot mistake a truncated page for the whole
+/// answer.
+pub const MAX_PAGE_SIZE: u32 = 100;
+
 #[contract]
 pub struct KeyLeaseRegistry;
 
@@ -133,8 +146,8 @@ impl KeyLeaseRegistry {
     /// Initialize the registry and appoint `admin`.
     ///
     /// Can only be called once. The admin is the only account allowed to
-    /// configure the escrow token via [`Self::set_token`] or upgrade the
-    /// contract via [`Self::upgrade`].
+    /// configure the escrow token via [`KeyLeaseRegistry::set_token`] or upgrade
+    /// the contract via [`KeyLeaseRegistry::upgrade`].
     pub fn init(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         if storage::is_initialized(&env) {
@@ -606,7 +619,7 @@ impl KeyLeaseRegistry {
 
     /// Fetch a lease. Pure read: never extends a TTL.
     ///
-    /// Use [`Self::bump_lease`] to keep an entry alive.
+    /// Use [`KeyLeaseRegistry::bump_lease`] to keep an entry alive.
     pub fn get_lease(env: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&env, lease_id)
     }
@@ -637,6 +650,43 @@ impl KeyLeaseRegistry {
             return Ok(0);
         }
         Ok(lease.locked_deposit)
+    }
+
+    /// One bounded page of the service catalogue, ascending by id.
+    ///
+    /// This exists so a dashboard or indexer does not have to replay the whole
+    /// event history to learn what is registered. `start` is the first id to
+    /// read (ids begin at 1, so `start` of 0 reads from the beginning) and
+    /// `limit` is at most [`MAX_PAGE_SIZE`]. Pass `next_start` back as `start`
+    /// until `done` is `true`.
+    ///
+    /// `done`, not the page length, is the end of the catalogue: ids whose
+    /// entry has been evicted are skipped, so a short page with `done == false`
+    /// just means the walk passed entries that are no longer on the ledger.
+    /// [`KeyLeaseRegistry::service_count`] still counts them.
+    ///
+    /// Pure read: extends no TTL, including the entries it walks over.
+    pub fn get_services(env: Env, start: u64, limit: u32) -> Result<ServicePage, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidLimit);
+        }
+        Ok(storage::services_page(&env, start, limit))
+    }
+
+    /// One bounded page of the lease record, ascending by id.
+    ///
+    /// Same paging contract as [`KeyLeaseRegistry::get_services`]: page until `done`, and
+    /// treat a short page as evicted entries rather than as the end. Lease ids
+    /// are global and monotonic across services, so a page mixes services;
+    /// filter by `service_id` client side.
+    ///
+    /// Pure read: extends no TTL. Use [`KeyLeaseRegistry::bump_lease`] to keep an entry
+    /// readable.
+    pub fn get_leases(env: Env, start: u64, limit: u32) -> Result<LeasePage, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidLimit);
+        }
+        Ok(storage::leases_page(&env, start, limit))
     }
 }
 
