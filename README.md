@@ -321,7 +321,8 @@ re-entrant token.
 cargo test --all
 ```
 
-The 44 tests in `contracts/registry/src/test.rs` cover:
+The 75 tests in `contracts/registry/src/test.rs` — 77 in the crate, counting the
+two model tests below — cover:
 
 - service registration and ID monotonicity,
 - the happy path (lock → full-usage settle before expiry),
