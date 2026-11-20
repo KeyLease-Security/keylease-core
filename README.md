@@ -116,6 +116,7 @@ keylease-core/
 | `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. Never extend a TTL. |
 | `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)` | — | Derived lifecycle queries. Never extend a TTL. |
 | `service_count()`, `lease_count()` | — | Monotonic counters. |
+| `get_services(start, limit)`, `get_leases(start, limit)` | — | Bounded pages over the id space, oldest id first, `done` as the end marker. `limit` ≤ `MAX_PAGE_SIZE`. Never extend a TTL. |
 
 ### Events
 

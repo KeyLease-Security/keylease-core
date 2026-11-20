@@ -47,18 +47,24 @@ a downloaded artifact, and see `--help` for the other flags. The policy lives in
 
 ## Text and documentation checks
 
-Three non-Rust checks run in CI, and each reads its configuration from this
-repository, so the local command below is the same check and fails the same way:
+Five checks run in CI outside the Rust build, and each reads its configuration
+from this repository, so the local command below is the same check and fails the
+same way:
 
 | Check | Command | Config | CI job |
 | --- | --- | --- | --- |
 | Spell check | `typos` | [`_typos.toml`](./_typos.toml) | `Spell Check` |
 | Markdown lint | `npx markdownlint-cli2@0.24.0` | [`.markdownlint-cli2.jsonc`](./.markdownlint-cli2.jsonc) | `Markdown Lint` |
-| Nav, anchors, links | `mkdocs build --strict` | [`mkdocs.yml`](./mkdocs.yml) | `Docs → Build & deploy` |
+| Workflow lint | `actionlint` | none; it lints every file under `.github/workflows/` | `Action Lint` |
+| Crate documentation | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items` | the doc comments themselves | `Rustdoc` |
+| Nav, anchors, links | `mkdocs build --strict` | [`mkdocs.yml`](./mkdocs.yml) | `Docs → Build preview` |
 
 ```bash
 cargo install typos-cli --locked            # one-time
 typos
+
+brew install actionlint shellcheck          # one-time; see the note below
+actionlint                                  # every file in .github/workflows
 
 pip install -r requirements-docs.txt        # one-time
 mkdocs build --strict
@@ -72,11 +78,21 @@ arguments lints exactly what CI lints. `mkdocs build --strict` promotes a broken
 nav entry or a missing in-page anchor to an error, which is why internal links
 must target real heading slugs.
 
-The Docs workflow runs on `push` to `main` and `workflow_dispatch` only, so a
-broken anchor will not fail your PR — run `mkdocs build --strict` locally before
-opening one. The checks that guard your branch are the CI jobs `Format`,
-`Clippy`, `Test`, `Build (wasm32v1-none)`, `Spell Check`, `Markdown Lint`,
-`Dependency Policy` and the required `Malware Scan`.
+`actionlint` checks the workflow files themselves: expression syntax, `needs:`
+targets, and, through `shellcheck`, every inline `run:` script. That last part is
+delegated, so `actionlint` skips it silently when `shellcheck` is not on `PATH`;
+the CI job installs both, and so must you if the local run is to match.
+`cargo doc` with `RUSTDOCFLAGS=-D warnings` turns an intra-doc link that does not
+resolve, or a manifest field cargo calls redundant, into a build failure. It does
+not enable `missing_docs`: the Soroban macros generate items nobody can annotate,
+and silencing them would weaken the check instead of documenting the contract.
+
+The Docs workflow builds a preview for any PR that touches `docs/`,
+`mkdocs.yml`, `requirements-docs.txt` or `docs.yml` itself, so a broken anchor
+fails that PR; only the deploy job waits for `main`. The checks that guard your
+branch are the CI jobs `Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`,
+`Rustdoc`, `Spell Check`, `Markdown Lint`, `Action Lint`, `Dependency Policy` and
+the required `Malware Scan`.
 
 ## Repository layout
 

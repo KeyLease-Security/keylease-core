@@ -1,6 +1,9 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{storage::Instance as _, Address as _, Events as _, Ledger as _},
+    testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, Events as _, Ledger as _,
+    },
     token, xdr, Address, BytesN, Env, Event, IntoVal, Map, Symbol, TryFromVal, Val, Vec,
 };
 
@@ -13,7 +16,7 @@ use crate::events::{
 use crate::storage::{self, LEDGER_BUMP_EXTEND, LEDGER_BUMP_THRESHOLD, MAX_ENTRY_TTL_LEDGERS};
 use crate::{
     Error, KeyLeaseRegistry, KeyLeaseRegistryClient, Lease, LeaseStatus, MAX_LEASE_DEPOSIT,
-    MAX_LEASE_DURATION_SECS,
+    MAX_LEASE_DURATION_SECS, MAX_PAGE_SIZE,
 };
 
 /// Per-call rate used across the tests.
@@ -1602,4 +1605,193 @@ fn test_lease_ttl_ask_follows_a_lowered_network_max_entry_ttl() {
         "the contract ceiling must yield to a lower network cap"
     );
     assert_eq!(ask, env.storage().max_ttl());
+}
+
+// ---------------------------------------------------------------------------
+// Paged views
+// ---------------------------------------------------------------------------
+
+/// Persistent TTL of a service entry, read from outside the contract.
+fn service_ttl(env: &Env, registry_id: &Address, service_id: u64) -> u32 {
+    env.as_contract(registry_id, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&storage::DataKey::Service(service_id))
+    })
+}
+
+/// Instance TTL, read from outside the contract.
+fn instance_ttl(env: &Env, registry_id: &Address) -> u32 {
+    env.as_contract(registry_id, || env.storage().instance().get_ttl())
+}
+
+#[test]
+fn test_get_services_pages_to_the_end() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    for _ in 0..5 {
+        register_default_service(&env, &ctx);
+    }
+
+    let first = ctx.registry.get_services(&1, &2);
+    assert_eq!(first.services.len(), 2);
+    assert_eq!(first.services.get(0).unwrap().service_id, 1);
+    assert_eq!(first.services.get(1).unwrap().service_id, 2);
+    assert_eq!(first.next_start, 3);
+    assert!(!first.done);
+
+    let second = ctx.registry.get_services(&first.next_start, &2);
+    assert_eq!(second.services.len(), 2);
+    assert_eq!(second.services.get(1).unwrap().service_id, 4);
+    assert_eq!(second.next_start, 5);
+    assert!(!second.done);
+
+    let last = ctx.registry.get_services(&second.next_start, &2);
+    assert_eq!(last.services.len(), 1);
+    assert_eq!(last.services.get(0).unwrap().service_id, 5);
+    assert!(last.done);
+    assert_eq!(last.next_start, 6);
+}
+
+#[test]
+fn test_get_services_bounds_the_page_size() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    register_default_service(&env, &ctx);
+
+    assert_eq!(
+        ctx.registry.try_get_services(&1, &0),
+        Err(Ok(Error::InvalidLimit))
+    );
+    assert_eq!(
+        ctx.registry.try_get_services(&1, &(MAX_PAGE_SIZE + 1)),
+        Err(Ok(Error::InvalidLimit))
+    );
+    assert_eq!(
+        ctx.registry.try_get_leases(&1, &0),
+        Err(Ok(Error::InvalidLimit))
+    );
+    assert_eq!(
+        ctx.registry.try_get_leases(&1, &(MAX_PAGE_SIZE + 1)),
+        Err(Ok(Error::InvalidLimit))
+    );
+
+    // The largest legal page is served, not just accepted.
+    let page = ctx.registry.get_services(&1, &MAX_PAGE_SIZE);
+    assert_eq!(page.services.len(), 1);
+    assert!(page.done);
+}
+
+#[test]
+fn test_paging_past_the_end_is_empty_and_done() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    // Nothing registered yet: the id space is already exhausted.
+    let empty = ctx.registry.get_services(&1, &10);
+    assert_eq!(empty.services.len(), 0);
+    assert!(empty.done);
+
+    register_default_service(&env, &ctx);
+    let past = ctx.registry.get_services(&2, &10);
+    assert_eq!(past.services.len(), 0);
+    assert!(past.done);
+    assert_eq!(past.next_start, 2);
+
+    let past_leases = ctx.registry.get_leases(&2, &10);
+    assert_eq!(past_leases.leases.len(), 0);
+    assert!(past_leases.done);
+}
+
+#[test]
+fn test_get_services_skips_an_evicted_entry_and_keeps_going() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    for _ in 0..4 {
+        register_default_service(&env, &ctx);
+    }
+
+    let registry_id = ctx.registry_id();
+    env.as_contract(&registry_id, || {
+        env.storage()
+            .persistent()
+            .remove(&storage::DataKey::Service(2));
+    });
+
+    let first = ctx.registry.get_services(&1, &2);
+    assert_eq!(first.services.len(), 1);
+    assert_eq!(first.services.get(0).unwrap().service_id, 1);
+    assert_eq!(first.next_start, 3);
+    assert!(!first.done, "a short page is not the end of the catalogue");
+
+    let rest = ctx.registry.get_services(&first.next_start, &2);
+    assert_eq!(rest.services.len(), 2);
+    assert_eq!(rest.services.get(1).unwrap().service_id, 4);
+    assert!(rest.done);
+
+    // The page skipped the gap; the single lookup still reports it.
+    assert_eq!(
+        ctx.registry.try_get_service(&2),
+        Err(Ok(Error::ServiceNotFound))
+    );
+    assert_eq!(ctx.registry.service_count(), 4);
+}
+
+#[test]
+fn test_get_leases_pages_across_services_in_id_order() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let first_service = register_default_service(&env, &ctx);
+    let second_service = register_default_service(&env, &ctx);
+
+    ctx.registry
+        .create_lease(&ctx.consumer, &first_service, &10, &3_600);
+    ctx.registry
+        .create_lease(&ctx.consumer, &second_service, &10, &3_600);
+    ctx.registry
+        .create_lease(&ctx.consumer, &first_service, &5, &3_600);
+
+    let page = ctx.registry.get_leases(&1, &2);
+    assert_eq!(page.leases.len(), 2);
+    assert_eq!(page.leases.get(0).unwrap().lease_id, 1);
+    assert_eq!(page.leases.get(1).unwrap().lease_id, 2);
+    assert_eq!(page.next_start, 3);
+    assert!(!page.done);
+
+    let tail = ctx.registry.get_leases(&page.next_start, &2);
+    assert_eq!(tail.leases.len(), 1);
+    assert_eq!(tail.leases.get(0).unwrap().lease_id, 3);
+    assert_eq!(tail.leases.get(0).unwrap().service_id, first_service);
+    assert!(tail.done);
+}
+
+#[test]
+fn test_paged_views_extend_no_ttl() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    for _ in 0..3 {
+        register_default_service(&env, &ctx);
+    }
+    let registry_id = ctx.registry_id();
+
+    let before = [
+        service_ttl(&env, &registry_id, 1),
+        service_ttl(&env, &registry_id, 2),
+        service_ttl(&env, &registry_id, 3),
+    ];
+    let instance_before = instance_ttl(&env, &registry_id);
+
+    let page = ctx.registry.get_services(&1, &MAX_PAGE_SIZE);
+    assert_eq!(page.services.len(), 3);
+    let lease_page = ctx.registry.get_leases(&1, &MAX_PAGE_SIZE);
+    assert_eq!(lease_page.leases.len(), 0);
+
+    for (index, id) in (1..=3u64).enumerate() {
+        assert_eq!(
+            service_ttl(&env, &registry_id, id),
+            before[index],
+            "reading a page must not charge rent on entry {id}"
+        );
+    }
+    assert_eq!(instance_ttl(&env, &registry_id), instance_before);
 }

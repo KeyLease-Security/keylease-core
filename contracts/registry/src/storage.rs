@@ -20,16 +20,17 @@
 //! | [`crate::KeyLeaseRegistry::bump_service`] | — | extend | — |
 //! | [`crate::KeyLeaseRegistry::bump_lease`] | — | — | extend |
 //! | `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance` | — | — | — |
+//! | [`crate::KeyLeaseRegistry::get_services`], [`crate::KeyLeaseRegistry::get_leases`] | — | — | — |
 //!
 //! The last row is the read-only surface: it never extends anything, so a
 //! simulation of it costs instructions and no rent. A lease or service that is
 //! merely *read* for months has to be bumped explicitly, which is what the two
 //! `bump_*` entry points are for.
 
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::Error;
-use crate::types::{Lease, Service};
+use crate::types::{Lease, LeasePage, Service, ServicePage};
 use crate::SETTLE_GRACE_PERIOD_SECS;
 
 /// Expected Stellar ledger close time, used to translate lease durations into
@@ -199,6 +200,37 @@ pub fn get_service(env: &Env, service_id: u64) -> Result<Service, Error> {
         .ok_or(Error::ServiceNotFound)
 }
 
+/// Read up to `limit` service entries from `start`, ascending by id.
+///
+/// The ids are `1..=service_count` with no gaps by construction, so the page
+/// walks a fixed window and stops there; work per call is bounded by
+/// [`crate::MAX_PAGE_SIZE`] rather than by how many services exist. An entry
+/// that has been evicted is skipped instead of reported: a catalogue that
+/// answers with one missing service would leave the caller unable to continue.
+///
+/// Pure reads throughout, so nothing here extends a TTL, including the entries
+/// it walks over.
+pub fn services_page(env: &Env, start: u64, limit: u32) -> ServicePage {
+    let count = service_count(env);
+    let first = start.max(1);
+    let end = first.saturating_add(limit as u64);
+    let mut services = Vec::new(env);
+    let mut next = first;
+
+    while next < end && next <= count {
+        if let Some(service) = env.storage().persistent().get(&DataKey::Service(next)) {
+            services.push_back(service);
+        }
+        next += 1;
+    }
+
+    ServicePage {
+        services,
+        next_start: next,
+        done: next > count,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Leases
 // ---------------------------------------------------------------------------
@@ -263,4 +295,31 @@ pub fn get_lease(env: &Env, lease_id: u64) -> Result<Lease, Error> {
         .persistent()
         .get(&DataKey::Lease(lease_id))
         .ok_or(Error::LeaseNotFound)
+}
+
+/// Read up to `limit` lease entries from `start`, ascending by id.
+///
+/// Same bounded-window shape as [`services_page`]: the ids are `1..=
+/// lease_count`, a lease whose entry was evicted is skipped, and no TTL is
+/// extended by looking at one. Callers that need a lease to stay readable use
+/// [`crate::KeyLeaseRegistry::bump_lease`].
+pub fn leases_page(env: &Env, start: u64, limit: u32) -> LeasePage {
+    let count = lease_count(env);
+    let first = start.max(1);
+    let end = first.saturating_add(limit as u64);
+    let mut leases = Vec::new(env);
+    let mut next = first;
+
+    while next < end && next <= count {
+        if let Some(lease) = env.storage().persistent().get(&DataKey::Lease(next)) {
+            leases.push_back(lease);
+        }
+        next += 1;
+    }
+
+    LeasePage {
+        leases,
+        next_start: next,
+        done: next > count,
+    }
 }
