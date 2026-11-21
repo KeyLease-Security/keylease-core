@@ -296,7 +296,9 @@ call `admin.require_auth()`, delegating authorization enforcement to the Stellar
 
 Upgrades with a multisig admin are coordinated through transaction envelopes:
 
-1. **Upload the new Wasm:** Any account can upload the compiled bytecode to obtain its hash:
+1. **Upload the new Wasm:** Any account can upload the compiled bytecode to obtain
+   its hash:
+
    ```bash
    WASM_HASH=$(stellar contract upload \
      --wasm target/wasm32v1-none/release/keylease_registry.wasm \
@@ -304,6 +306,7 @@ Upgrades with a multisig admin are coordinated through transaction envelopes:
    ```
 
 2. **Construct the unsigned invocation transaction:**
+
    ```bash
    stellar contract invoke --id "$REGISTRY" \
      --source-account "$MULTISIG_ADMIN" \
@@ -312,14 +315,17 @@ Upgrades with a multisig admin are coordinated through transaction envelopes:
      -- upgrade --admin "$MULTISIG_ADMIN" --new_wasm_hash "$WASM_HASH" > upgrade_tx.xdr
    ```
 
-3. **Collect signatures from signers:** Each required co-signer signs the envelope until
-   the cumulative signature weight meets or exceeds the admin account's threshold:
+3. **Collect signatures from signers:** Each required co-signer signs the envelope
+   until the cumulative signature weight meets or exceeds the admin account's
+   threshold:
+
    ```bash
    stellar tx sign --network testnet --source-account signer-alice upgrade_tx.xdr > signed_1.xdr
    stellar tx sign --network testnet --source-account signer-bob signed_1.xdr > signed_threshold.xdr
    ```
 
 4. **Submit the fully-signed transaction:**
+
    ```bash
    stellar tx send --network testnet signed_threshold.xdr
    ```

@@ -47,6 +47,102 @@ sudo freshclam                      # one-time ClamAV signature update
 a downloaded artifact, and see `--help` for the other flags. The policy lives in
 [`deny.toml`](./deny.toml).
 
+## Dependency updates
+
+`soroban-sdk` decides the contract's ABI and the Wasm artifact we deploy, so
+dependency updates are not routine maintenance. This is the rule for how quickly
+an update lands, who reviews it, and what an upgrade PR must contain.
+
+**`soroban-sdk` is workspace-pinned.** The single version lives in
+`[workspace.dependencies]` in [`Cargo.toml`](./Cargo.toml); every member declares
+`soroban-sdk = { workspace = true }`. Never add a version requirement to a
+member crate, and never let two SDK lines resolve at once — bump the workspace
+pin, not the crates.
+
+### Timing and review
+
+| Update class | Typical trigger | When it lands | Review |
+| --- | --- | --- | --- |
+| **Security** — a RustSec advisory or a yanked crate in the build graph | The `Dependency Policy` job goes red, or an advisory is published upstream | Blocking. Merge as soon as the fix is green: **within 7 days** of publication, and **within 72 hours** if the affected code is reachable from a money path (`create_lease`, `settle_lease`, `revoke_expired_lease`, `set_token`, `upgrade`) | One maintainer, plus a second reviewer whenever `deny.toml` or the public interface changes |
+| **Minor / patch** — non-security updates inside the pinned SDK line, and all transitive crates | The weekly Dependabot PR (`.github/dependabot.yml`) | Merge within **14 days** of opening, provided CI is green and the diff is mechanical | One maintainer |
+| **Major `soroban-sdk` upgrade** — `26` → `27`, or any `soroban-env-*` major | A maintainer opens an issue; Dependabot does not file these | Planned work with an explicit target release — no automatic deadline, but it is tracked until merged | Two maintainers, and the Testnet redeploy recorded in [`docs/deployments.md`](./docs/deployments.md) before tagging |
+
+A security update that needs a contract change (not just a version bump) is
+exempt from the usual "design note first" step in
+[`high` issues](#design-notes-for-high-200-pt-issues) so the fix can ship
+inside the window above; the note and the adversarial test are added in the same
+PR. Do not discuss the vulnerability in the public issue — follow
+[SECURITY.md](./SECURITY.md).
+
+### How the advisory scan enforces it
+
+The **`Dependency Policy`** CI job runs `cargo deny check` against the committed
+`Cargo.lock` and [`deny.toml`](./deny.toml). It fails the PR on any RustSec
+advisory, yanked crate, unlicensed dependency, wildcard requirement or unknown
+git/registry source that is not explicitly accounted for. Because it is a
+required status check, **an advisory cannot reach `main` unless a human writes an
+ignore entry** — so an ignore is a reviewed security decision, not a mute button:
+
+- Every `[advisories].ignore` entry needs a reason, a linked tracking issue and a
+  date by which it must be revisited.
+- Adding or removing an ignore needs two maintainer approvals in addition to the
+  green checks, and the PR must say why the vulnerable code is unreachable from
+  the contract and what upstream release will clear it.
+- Ignoring an advisory whose code *is* reachable is not allowed. Fix or pin the
+  dependency instead; if there is no compatible release yet, `cargo update
+  --precise` the smallest subtree that clears it, or document the block in the
+  issue and hold the release.
+
+The malware scan and the build do not replace this check: `Dependency Policy`
+is the only job that inspects the dependency graph.
+
+### Review requirements for any dependency PR
+
+A dependency PR is merged when all of the following hold:
+
+1. Every required check is green — `Format`, `Clippy`, `Test`,
+   `Build (wasm32v1-none)`, `Dependency Policy` and `Malware Scan`.
+2. The reviewer count for its class above has approved, and a maintainer signed
+   off on any change under `deny.toml`.
+3. `Cargo.lock` is the only diff, unless a manifest bump was genuinely required.
+4. The Wasm hash check below is recorded in the PR description.
+
+### Upgrade PR checklist
+
+Copy this into the PR body for any change to `Cargo.lock`, `Cargo.toml` or the
+SDK pin:
+
+- [ ] The update is one class only (security, minor/patch, or a major SDK bump);
+      unrelated bumps are split into their own PRs.
+- [ ] `cargo deny check` passes locally, and no `deny.toml` ignore was added — or
+      every added ignore has a reason, a tracking issue and a revisit date, plus
+      two maintainer approvals.
+- [ ] `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
+      `cargo test --all` and `cargo build --target wasm32v1-none --release --all`
+      all pass.
+- [ ] **Wasm hash check** — build the release artifact and compare it with the
+      deployed hash in [`docs/deployments.md`](./docs/deployments.md):
+
+  ```bash
+  cargo build --target wasm32v1-none --release --all
+  sha256sum target/wasm32v1-none/release/keylease_registry.wasm
+  ```
+
+  Paste both hashes (new and the one currently recorded) in the PR. An unchanged
+  hash means no on-chain action is needed; a changed hash must be recorded with
+  the new version in `docs/deployments.md` before the release is tagged.
+- [ ] The Wasm still exposes the same interface: `contractmeta!` and `version()`
+      are bumped with the workspace version, and no entry point, event or error
+      code was renumbered.
+- [ ] For a major SDK bump: the workspace version is bumped, the release notes
+      name the new SDK line, and the new Wasm is uploaded and deployed to
+      Testnet with one full `create_lease` → `settle_lease` lifecycle replayed
+      afterwards.
+- [ ] `stellar contract info meta --id <REGISTRY> --network testnet` shows the
+      new `version` and `rssdkver` after the redeploy.
+- [ ] `rssdkver`-dependent docs and badges (`README.md`, `docs/developer-guide.md`,
+      `docs/architecture.md`) are updated when the SDK line changes.
+
 ## Text and documentation checks
 
 Three non-Rust checks run in CI, and each reads its configuration from this
@@ -193,6 +289,8 @@ A maintainer will approve the note before you begin coding.
 ## Pull requests
 
 - Keep the diff focused; split unrelated changes into separate PRs.
+- Dependency bumps follow the timing, review and checklists in
+  [Dependency updates](#dependency-updates).
 - Fill in `.github/pull_request_template.md`, including the security checklist.
 - Reference the issue you are closing (`Closes #123`).
 - A PR is merged once CI is green and a maintainer approves.

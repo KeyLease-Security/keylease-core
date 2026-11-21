@@ -150,12 +150,20 @@ The exact inclusive and exclusive boundary conditions are:
 These boundary conditions are unit-tested and asserted in
 [`contracts/registry/src/test.rs`](https://github.com/KeyLease-Security/keylease-core/blob/main/contracts/registry/src/test.rs):
 
-- `test_revoke_before_expiry_is_rejected`: verifies that when `now < expires_at`, `revoke_expired_lease` returns `Err(Error::LeaseNotExpired)`.
-- `test_full_usage_can_settle_before_expiry`: confirms early settlement when `verified_calls == allocated_calls` even when `now < expires_at`.
-- `test_provider_can_settle_within_grace_window`: confirms provider payout at `expires_at + GRACE / 2` (12 hours into grace).
-- `test_revoke_during_grace_window_is_rejected`: asserts `revoke_expired_lease` reverts with `Err(Error::RevokeWindowNotElapsed)` at `expires_at + GRACE - 1` (the final second of provider grace).
-- `test_expired_unsettled_lease_is_fully_reclaimed`: verifies consumer revocation succeeds at exactly `expires_at + GRACE`, returning 100% of escrowed deposit.
-- `test_lease_ttl_ask_floors_once_the_grace_window_is_past`: ensures storage rent bumps clamp gracefully after the grace period has elapsed.
+- `test_revoke_before_expiry_is_rejected`: verifies that when
+  `now < expires_at`, `revoke_expired_lease` returns
+  `Err(Error::LeaseNotExpired)`.
+- `test_full_usage_can_settle_before_expiry`: confirms early settlement when
+  `verified_calls == allocated_calls` even when `now < expires_at`.
+- `test_provider_can_settle_within_grace_window`: confirms provider payout at
+  `expires_at + GRACE / 2` (12 hours into grace).
+- `test_revoke_during_grace_window_is_rejected`: asserts `revoke_expired_lease`
+  reverts with `Err(Error::RevokeWindowNotElapsed)` at `expires_at + GRACE - 1`
+  (the final second of provider grace).
+- `test_expired_unsettled_lease_is_fully_reclaimed`: verifies consumer revocation
+  succeeds at exactly `expires_at + GRACE`, returning 100% of escrowed deposit.
+- `test_lease_ttl_ask_floors_once_the_grace_window_is_past`: ensures storage rent
+  bumps clamp gracefully after the grace period has elapsed.
 
 ## Events
 
