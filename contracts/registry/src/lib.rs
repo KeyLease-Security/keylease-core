@@ -563,9 +563,8 @@ impl KeyLeaseRegistry {
         // fail before mutating state.
         let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
 
-        let expires_at = env
-            .ledger()
-            .timestamp()
+        let created_at = env.ledger().timestamp();
+        let expires_at = created_at
             .checked_add(duration_secs)
             .ok_or(Error::Overflow)?;
 
@@ -576,6 +575,7 @@ impl KeyLeaseRegistry {
             consumer: consumer.clone(),
             allocated_calls: requested_calls,
             used_calls: 0,
+            created_at,
             expires_at,
             locked_deposit: required_deposit,
             settled: false,

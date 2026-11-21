@@ -42,11 +42,18 @@ pub struct Lease {
     pub consumer: Address,
     pub allocated_calls: u32,
     pub used_calls: u32,
-    pub expires_at: u64,       // unix seconds, ledger time
+    pub created_at: u64,       // unix seconds, ledger time of create_lease
+    pub expires_at: u64,       // created_at + duration_secs
     pub locked_deposit: i128,  // rate_per_call * allocated_calls
     pub settled: bool,
 }
 ```
+
+`created_at` and `expires_at` are both ledger timestamps, so a lease's age,
+remaining term and original duration (`expires_at - created_at`) can be derived
+from the stored lease alone. A `created_at` of `0` marks a lease written by a
+release that predates the field; such leases remain settleable and report an
+unknown creation time (see the [contract reference](contract-reference.md#created_at-and-upgrade-compatibility)).
 
 ## Lifecycle
 
@@ -150,12 +157,20 @@ The exact inclusive and exclusive boundary conditions are:
 These boundary conditions are unit-tested and asserted in
 [`contracts/registry/src/test.rs`](https://github.com/KeyLease-Security/keylease-core/blob/main/contracts/registry/src/test.rs):
 
-- `test_revoke_before_expiry_is_rejected`: verifies that when `now < expires_at`, `revoke_expired_lease` returns `Err(Error::LeaseNotExpired)`.
-- `test_full_usage_can_settle_before_expiry`: confirms early settlement when `verified_calls == allocated_calls` even when `now < expires_at`.
-- `test_provider_can_settle_within_grace_window`: confirms provider payout at `expires_at + GRACE / 2` (12 hours into grace).
-- `test_revoke_during_grace_window_is_rejected`: asserts `revoke_expired_lease` reverts with `Err(Error::RevokeWindowNotElapsed)` at `expires_at + GRACE - 1` (the final second of provider grace).
-- `test_expired_unsettled_lease_is_fully_reclaimed`: verifies consumer revocation succeeds at exactly `expires_at + GRACE`, returning 100% of escrowed deposit.
-- `test_lease_ttl_ask_floors_once_the_grace_window_is_past`: ensures storage rent bumps clamp gracefully after the grace period has elapsed.
+- `test_revoke_before_expiry_is_rejected`: verifies that when
+  `now < expires_at`, `revoke_expired_lease` returns
+  `Err(Error::LeaseNotExpired)`.
+- `test_full_usage_can_settle_before_expiry`: confirms early settlement when
+  `verified_calls == allocated_calls` even when `now < expires_at`.
+- `test_provider_can_settle_within_grace_window`: confirms provider payout at
+  `expires_at + GRACE / 2` (12 hours into grace).
+- `test_revoke_during_grace_window_is_rejected`: asserts `revoke_expired_lease`
+  reverts with `Err(Error::RevokeWindowNotElapsed)` at `expires_at + GRACE - 1`
+  (the final second of provider grace).
+- `test_expired_unsettled_lease_is_fully_reclaimed`: verifies consumer revocation
+  succeeds at exactly `expires_at + GRACE`, returning 100% of escrowed deposit.
+- `test_lease_ttl_ask_floors_once_the_grace_window_is_past`: ensures storage rent
+  bumps clamp gracefully after the grace period has elapsed.
 
 ## Events
 

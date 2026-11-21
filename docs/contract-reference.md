@@ -382,7 +382,7 @@ performed one could not be used to price a read.
 | `service_count` | `(env) -> u64` | total services ever registered |
 | `lease_count` | `(env) -> u64` | total leases ever created |
 | `get_service` | `(env, service_id: u64) -> Result<Service, Error>` | the `Service`, else `ServiceNotFound` |
-| `get_lease` | `(env, lease_id: u64) -> Result<Lease, Error>` | the `Lease`, else `LeaseNotFound` |
+| `get_lease` | `(env, lease_id: u64) -> Result<Lease, Error>` | the `Lease` (including `created_at`), else `LeaseNotFound` |
 | `lease_status` | `(env, lease_id: u64) -> Result<LeaseStatus, Error>` | derived status at current ledger time |
 | `remaining_calls` | `(env, lease_id: u64) -> Result<u32, Error>` | calls left; `0` once settled **or** expired |
 | `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; `0` once settled |
@@ -440,13 +440,31 @@ pub struct Lease {
     pub consumer: Address,
     pub allocated_calls: u32,
     pub used_calls: u32,
-    pub expires_at: u64,
+    pub created_at: u64,       // ledger timestamp of create_lease
+    pub expires_at: u64,       // created_at + duration_secs
     pub locked_deposit: i128,
     pub settled: bool,
 }
 
 pub enum LeaseStatus { Active = 0, Expired = 1, Settled = 2 }
 ```
+
+### `created_at` and upgrade compatibility
+
+The lease value is a `SCV_MAP` keyed by field name, and decoding unpacks exactly
+the fields the current `Lease` declares. `created_at` was therefore added in the
+only compatible way: **appended** to the field list, with no `DataKey` added,
+removed or renumbered and no existing field touched. Concretely:
+
+- Entries written by a release that predates `created_at` are decoded through a
+  legacy fallback in `storage::get_lease` and report `created_at = 0`, which means
+  “written before creation times were recorded — unknown”. They stay settleable
+  and revocable, so an upgrade can neither strand escrow nor block a refund.
+- Nothing has to be migrated before an upgrade. Each entry is rewritten in the
+  current shape the next time it is saved (settlement or revocation), keeping
+  `created_at = 0` if it was already unknown.
+- Never reorder, rename or remove a field: the field names are the storage key
+  set, so doing so would make existing entries undecodable.
 
 ## Storage layout
 

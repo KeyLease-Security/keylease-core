@@ -411,7 +411,9 @@ fn test_create_lease_locks_deposit_and_records_terms() {
     assert_eq!(lease.consumer, ctx.consumer);
     assert_eq!(lease.allocated_calls, 10);
     assert_eq!(lease.used_calls, 0);
+    assert_eq!(lease.created_at, 1_000);
     assert_eq!(lease.expires_at, 1_000 + 3_600);
+    assert_eq!(lease.expires_at, lease.created_at + 3_600);
     assert_eq!(lease.locked_deposit, RATE * 10);
     assert!(!lease.settled);
 
@@ -420,6 +422,67 @@ fn test_create_lease_locks_deposit_and_records_terms() {
     assert_eq!(ctx.token.balance(&ctx.registry_id()), RATE * 10);
     assert_eq!(ctx.registry.remaining_calls(&lease_id), 10);
     assert_eq!(ctx.registry.locked_balance(&lease_id), RATE * 10);
+}
+
+#[test]
+fn test_created_at_is_stable_across_later_reads() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    // Reading later must report the creation time, not the read time.
+    env.ledger().set_timestamp(5_000);
+    let lease = ctx.registry.get_lease(&lease_id);
+    assert_eq!(lease.created_at, 1_000);
+    assert_eq!(lease.expires_at, 4_600);
+}
+
+#[test]
+fn test_lease_written_before_created_at_still_reads_and_settles() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    // Rewrite the entry in the pre-`created_at` shape, as a deployment upgraded
+    // from an earlier release would still be holding it.
+    let stored = ctx.registry.get_lease(&lease_id);
+    let registry_id = ctx.registry_id();
+    env.as_contract(&registry_id, || {
+        crate::storage::save_legacy_lease_for_test(&env, &stored);
+    });
+
+    // It still decodes, with the unrecoverable creation time reported as 0.
+    let legacy = ctx.registry.get_lease(&lease_id);
+    assert_eq!(legacy.created_at, 0);
+    assert_eq!(legacy.lease_id, stored.lease_id);
+    assert_eq!(legacy.expires_at, stored.expires_at);
+    assert_eq!(legacy.allocated_calls, 10);
+    assert_eq!(legacy.locked_deposit, RATE * 10);
+    assert!(!legacy.settled);
+
+    // And escrow is still releasable: an upgrade must never strand funds.
+    env.ledger().set_timestamp(10_000);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &4);
+
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 4);
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        FUNDING - RATE * 10 + RATE * 6
+    );
+
+    // Saving rewrites the entry in the current shape, still unknown creation time.
+    let settled = ctx.registry.get_lease(&lease_id);
+    assert!(settled.settled);
+    assert_eq!(settled.used_calls, 4);
+    assert_eq!(settled.created_at, 0);
 }
 
 #[test]
@@ -1989,6 +2052,7 @@ fn lease_expiring_at(env: &Env, expires_at: u64) -> Lease {
         consumer: Address::generate(env),
         allocated_calls: 1,
         used_calls: 0,
+        created_at: 0,
         expires_at,
         locked_deposit: RATE,
         settled: false,

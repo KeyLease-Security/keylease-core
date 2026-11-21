@@ -21,6 +21,11 @@ pub struct Service {
 }
 
 /// A funded, time-bound authorization for a fixed allotment of metered calls.
+///
+/// `created_at` was **appended** to the persisted shape, so entries written by an
+/// earlier release (which lack the field) are decoded by a legacy fallback in
+/// [`crate::storage::get_lease`] rather than trapping. Never reorder or remove an
+/// existing field: the field list is the storage key set.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lease {
@@ -40,6 +45,12 @@ pub struct Lease {
     pub locked_deposit: i128,
     /// Whether funds have been released (settled by provider or reclaimed by consumer).
     pub settled: bool,
+    /// Unix timestamp (ledger time) of the `create_lease` call, so a lease's age
+    /// is readable from storage instead of being reconstructed from events.
+    ///
+    /// `0` only ever appears on entries written before this field existed; see
+    /// [`crate::storage::get_lease`] for how those are read.
+    pub created_at: u64,
 }
 
 /// A proposed Wasm upgrade waiting out its mandatory delay.

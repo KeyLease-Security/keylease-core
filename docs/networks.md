@@ -65,13 +65,24 @@ interface (`token::Client`). Escrow invariants (`payout + refund == locked_depos
 hold equally across both.
 
 However, external contract risk differs:
-- **Native SAC**: The transfer cannot be blocked, paused, or redirected by any third party.
-- **Custom Token**: If a custom token contract fails, pauses, or blacklists a participant, calls to `settle_lease` or `revoke_expired_lease` will revert. KeyLease uses checks-effects-interactions (`lease.settled = true` persisted *before* transfer) to prevent double-spend or re-entrancy attacks, but cannot force a failing external token to execute transfers.
+
+- **Native SAC**: The transfer cannot be blocked, paused, or redirected by any
+  third party.
+- **Custom Token**: If a custom token contract fails, pauses, or blacklists a
+  participant, calls to `settle_lease` or `revoke_expired_lease` will revert.
+  KeyLease uses checks-effects-interactions (`lease.settled = true` persisted
+  *before* transfer) to prevent double-spend or re-entrancy attacks, but cannot
+  force a failing external token to execute transfers.
 
 ### Deployment recommendations
 
-- **Testnet**: Use the **Native SAC (XLM)**. It requires zero setup, is automatically derived from the network passphrase, and accounts can be funded immediately via Friendbot.
-- **Mainnet**: Use **USDC via SAC** for commercial API and RPC leases where price volatility between fiat costs and crypto balances is undesirable. Use **Native SAC (XLM)** for network infrastructure services, peer-to-peer compute, or micro-metered telemetry where native settlement is preferred.
+- **Testnet**: Use the **Native SAC (XLM)**. It requires zero setup, is
+  automatically derived from the network passphrase, and accounts can be funded
+  immediately via Friendbot.
+- **Mainnet**: Use **USDC via SAC** for commercial API and RPC leases where price
+  volatility between fiat costs and crypto balances is undesirable. Use **Native
+  SAC (XLM)** for network infrastructure services, peer-to-peer compute, or
+  micro-metered telemetry where native settlement is preferred.
 
 ## Funding accounts
 

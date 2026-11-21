@@ -28,7 +28,7 @@
 //! merely *read* for months has to be bumped explicitly, which is what the two
 //! `bump_*` entry points are for.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, Symbol, TryFromVal, Val};
 
 use crate::errors::Error;
 use crate::types::{Lease, PendingUpgrade, Service};
@@ -272,6 +272,36 @@ pub fn get_service(env: &Env, service_id: u64) -> Result<Service, Error> {
 // ---------------------------------------------------------------------------
 // Leases
 // ---------------------------------------------------------------------------
+//
+// `Lease` gained a `created_at` field, and a `#[contracttype]` struct decodes by
+// unpacking the exact field-name keys it knows: a value written before that field
+// existed cannot be decoded into the current `Lease`, and the host raises (it does
+// not return an error) when the key count differs. `get_lease` therefore inspects
+// the stored map first and reads the pre-`created_at` shape through `LegacyLease`,
+// reporting `created_at = 0` (unknown) instead of trapping. That keeps pre-upgrade
+// leases settleable and revocable, i.e. escrow stays releasable across an upgrade.
+//
+// The change is append-only in every other sense: no `DataKey` variant was added,
+// removed or renumbered, and the new field is last in the struct. Nothing has to
+// be migrated up front, and an entry is rewritten in the current shape the next
+// time it is saved (settlement or revocation).
+
+/// Number of fields in the pre-`created_at` lease encoding.
+const LEGACY_LEASE_FIELDS: u32 = 8;
+
+/// The `Lease` shape stored by releases before `created_at` existed. Used only to
+/// decode existing entries; never written except by tests.
+#[contracttype]
+struct LegacyLease {
+    lease_id: u64,
+    service_id: u64,
+    consumer: Address,
+    allocated_calls: u32,
+    used_calls: u32,
+    expires_at: u64,
+    locked_deposit: i128,
+    settled: bool,
+}
 
 /// Persist a lease and extend its entry for as long as the lease can matter.
 pub fn save_lease(env: &Env, lease: &Lease) {
@@ -329,8 +359,57 @@ pub(crate) fn lease_ttl_extend(env: &Env, lease: &Lease) -> u32 {
 /// A lease that needs to outlive its current horizon is kept alive by
 /// [`crate::KeyLeaseRegistry::bump_lease`], not by looking at it.
 pub fn get_lease(env: &Env, lease_id: u64) -> Result<Lease, Error> {
+    let key = DataKey::Lease(lease_id);
+    let val: Val = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(Error::LeaseNotFound)?;
+
+    // Decide which shape is stored *before* decoding: the derive unpacks an exact
+    // field-name key set and the host escalates a size mismatch instead of
+    // returning a recoverable error.
+    let map = Map::<Symbol, Val>::try_from_val(env, &val).map_err(|_| Error::LeaseNotFound)?;
+    if map.contains_key(Symbol::new(env, "created_at")) {
+        return Lease::try_from_val(env, &val).map_err(|_| Error::LeaseNotFound);
+    }
+    if map.len() != LEGACY_LEASE_FIELDS {
+        // Neither a current nor a pre-`created_at` lease entry.
+        return Err(Error::LeaseNotFound);
+    }
+
+    // A lease written before `created_at` existed. Its creation time is not
+    // recoverable from storage, so report `0` (unknown) rather than failing a
+    // settlement or refund that is still owed.
+    let legacy = LegacyLease::try_from_val(env, &val).map_err(|_| Error::LeaseNotFound)?;
+    Ok(Lease {
+        lease_id: legacy.lease_id,
+        service_id: legacy.service_id,
+        consumer: legacy.consumer,
+        allocated_calls: legacy.allocated_calls,
+        used_calls: legacy.used_calls,
+        created_at: 0,
+        expires_at: legacy.expires_at,
+        locked_deposit: legacy.locked_deposit,
+        settled: legacy.settled,
+    })
+}
+
+/// Test-only: rewrite a lease entry in the pre-`created_at` shape so the legacy
+/// decode path in [`get_lease`] can be exercised.
+#[cfg(test)]
+pub(crate) fn save_legacy_lease_for_test(env: &Env, lease: &Lease) {
+    let legacy = LegacyLease {
+        lease_id: lease.lease_id,
+        service_id: lease.service_id,
+        consumer: lease.consumer.clone(),
+        allocated_calls: lease.allocated_calls,
+        used_calls: lease.used_calls,
+        expires_at: lease.expires_at,
+        locked_deposit: lease.locked_deposit,
+        settled: lease.settled,
+    };
     env.storage()
         .persistent()
-        .get(&DataKey::Lease(lease_id))
-        .ok_or(Error::LeaseNotFound)
+        .set(&DataKey::Lease(lease.lease_id), &legacy);
 }
