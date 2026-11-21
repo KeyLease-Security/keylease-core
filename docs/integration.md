@@ -29,10 +29,21 @@ A provider should implement these steps, in order, and fail closed at every one:
 2. **Resolve the lease on chain.** Call `get_lease(lease_id)` over Soroban RPC
    and cache the result briefly (a few seconds is usually enough for a busy
    provider). An unreachable RPC is a **503**, never an allow.
-3. **Check the lease.** The lease must exist, must not be `settled`, and
-   `ledger.timestamp() < expires_at`. Reject otherwise (`403`).
-4. **Check ownership.** The authenticated address must equal `lease.consumer`.
-   Otherwise reject (`403`). This is what makes a stolen lease id worthless.
+3. **Check the lease, at ledger time.** The lease must exist, must not be
+   `settled`, and must not be expired. Compare `expires_at` against **ledger**
+   time, not your server's clock: `expires_at` was produced by
+   `env.ledger().timestamp()` inside the contract, so the two are different
+   instruments. `lease_status(lease_id)` and `remaining_calls(lease_id)` make
+   that comparison on-chain for you. Reject a settled or expired lease with
+   `403`, and reject *before* the request goes upstream — see
+   [Reject before you serve](#reject-before-you-serve).
+4. **Check ownership and service binding.** The authenticated address must equal
+   `lease.consumer`; that is what makes a stolen lease id worthless. It is not
+   the whole check: `lease.service_id` must also equal the service this endpoint
+   actually sells. A provider that runs more than one service and skips the
+   second half admits traffic from the wrong pool — and because `settle_lease`
+   resolves the price from `lease.service_id`, it is paid that service's rate
+   for this service's work.
 5. **Enforce the quota.** Use `max(lease.used_calls, local_counter)` against
    `lease.allocated_calls`; reject with `429` when exhausted, and increment the
    counter only for admitted requests.
@@ -45,6 +56,87 @@ Step 5's local counter is an optimisation, not the source of truth. On-chain
 `allocated_calls × rate_per_call` bounds what the provider can ever be paid, so a
 tampered counter can only make the provider charge **less**. It can never
 over-charge the consumer.
+
+### Reject before you serve
+
+Steps 3–5 are the last point at which a call can be refused at no cost. Once the
+request has been forwarded you cannot un-spend it, and the two states that should
+have blocked it are precisely the two that make being paid for it impossible:
+
+- A **settled** lease has already released its escrow — `payout + refund`
+  emptied `locked_deposit` — and a second `settle_lease` for it reverts with
+  `LeaseAlreadySettled` (7). Every call you serve against it is unpaid,
+  permanently.
+- An **expired** lease can still be settled by you, but the consumer can reclaim
+  the entire deposit once the 24-hour grace window elapses, and a revoked lease
+  is settled too: `settle` and `revoke` cannot both happen for one lease. Calls
+  you serve after a revocation can never be reported.
+
+So the order in your handler is: authenticate, read, check, count — *then*
+forward. Make it testable as a property of the whole path rather than of the
+response: assert the upstream mock received **zero** calls for a settled lease
+and for an expired one, not merely that the client saw a `403`.
+
+### Ledger time, not clock time
+
+`expires_at` is a ledger timestamp. `env.ledger().timestamp()` is the network's
+own clock, advanced by consensus roughly every five seconds, and it is not your
+server's wall clock. Skew cuts both ways:
+
+| Skew | Symptom | Who loses |
+| --- | --- | --- |
+| Your clock runs **ahead** of ledger time | nothing — you are early, you reject a lease still valid on-chain | consumer availability, your revenue |
+| Your clock runs **behind** | you keep serving a lease that has already expired on-chain, and cannot settle for it | you |
+
+Two rules follow:
+
+1. **Never let a client-supplied time be an input.** A countdown in your UI may
+   use the browser clock; the admission decision may not. If a caller can send a
+   timestamp that changes whether you serve, you have replaced an on-chain
+   check with a guess.
+2. **Do not cache past the boundary.** A cached lease must be re-read before its
+   `expires_at`, and any lease within a tolerance window of expiry (a minute is
+   plenty) should be re-read rather than trusted from cache. If you would rather
+   not compare clocks at all, ask the contract: `lease_status(lease_id)` and
+   `remaining_calls(lease_id)` evaluate expiry at ledger time for you, and a read
+   costs one simulation with no signing key involved — and no rent, because reads
+   never extend an entry's lifetime. Only writes and the two `bump_*` calls do;
+   see [Storage lifetime](#storage-lifetime).
+
+Keep SEP-10's own `timeout` separate from lease expiry. The challenge is valid
+for minutes and is measured against *your* server clock; the lease is measured
+against the ledger. A fresh SEP-10 session against an expired lease is still a
+rejected request.
+
+Testable: build a fixture whose `expires_at` falls between two wall-clock values
+and assert your decision is the same with the container clock offset by ±5
+minutes. A check that only passes when the host clock happens to be right is
+testing the host, not your code.
+
+### Settlement must be safe to retry
+
+The contract already makes it so: `settled` is persisted before any token
+transfer, so a replayed `settle_lease` reverts with `LeaseAlreadySettled` (7)
+and a re-entrant token cannot settle a lease twice
+(`test_reentrant_token_cannot_settle_a_lease_twice`). Your side of the protocol
+has to be built to the same standard:
+
+- **Treat revert-with-7 as success.** If your settler broadcasts, the
+  transaction lands, and the response never reaches you, the retry is the
+  correct recovery — and if you log it as a failure you will page someone for a
+  settlement that paid out fine.
+- **Reconcile from the event, not from your input.** Record `payout` and
+  `refund` from `lease_settled`, whose `lease_id` is a topic you can filter on.
+  The contract's numbers are the ones that moved tokens; yours are the ones you
+  asked for.
+- **Dedupe by `lease_id`.** Nothing else identifies a settlement. Your counter,
+  your queue and your revenue ledger all key on it, so a duplicate
+  `lease_created` replay cannot make you settle twice or book the income twice.
+
+Testable, as two cases: replay the same settlement against a fixture and assert
+exactly one `lease_settled` event for that lease with the second attempt reverting
+with 7; then kill the settler between broadcast and confirmation and restart it,
+asserting the lease ends settled and your ledger holds one payout for it.
 
 [sep10]: https://developers.stellar.org/docs/learn/encyclopedia/security/authentication
 
@@ -155,6 +247,71 @@ stellar events --id $REGISTRY --network testnet --start-ledger <ledger> \
 usually enough for a one-off check; the encoded filters matter when a subscriber
 needs the server to narrow the stream.
 
+### Checking a filter against the live contract
+
+The table above is read out of this repository's source. The deployment is the
+other half of the ABI, and an upgrade can move a field from one side of the
+topics line to the other, so confirm the layout you are about to hard-code:
+
+```bash
+stellar contract info interface --id $REGISTRY --network testnet
+```
+
+The spec comes back as the `#[contractevent]` structs the SDK reconstructed from
+it, and `#[topic]` marks exactly the fields that occupy a topic position:
+
+```rust
+#[soroban_sdk::contractevent(topics = ["lease_created"])]
+pub struct LeaseCreated {
+    #[topic]
+    pub lease_id: u64,
+    pub service_id: u64,
+    // remaining fields are payload-only
+}
+```
+
+A field printed without `#[topic]` cannot be narrowed on at any ledger range;
+decode it instead. Run this after an upgrade that touched an event, and treat
+the printed struct as the ABI your subscribers see rather than the Rust source
+you merged — the two can disagree for one release.
+
+### Filtering from your own code
+
+A subscriber that calls the RPC itself puts the same segments in a filter's
+`topics` field, which is an array of arrays: one inner array per topic position,
+with the same arity and `*` rules as `--topic`.
+
+```json
+{
+  "startLedger": 5819050,
+  "filters": [
+    {
+      "type": "contract",
+      "contractIds": ["CCEZYHUJUICXVPLH6UC2OFZL2RG23QQ7EMZOWE32WVQPT25DCTIAFH62"],
+      "topics": [["AAAADwAAAA1sZWFzZV9jcmVhdGVkAAAA", "*"]]
+    }
+  ]
+}
+```
+
+`@stellar/stellar-sdk` types it identically, and its request union keeps the two
+resume modes apart: `startLedger` (with optional `endLedger` and `limit`) or
+`cursor` (with `limit`), never both.
+
+```ts
+// `persistedLedger` is your own resume point, not a value the RPC owes you
+const { events, cursor, oldestLedger } = await server.getEvents({
+  startLedger: persistedLedger,
+  filters: [
+    {
+      type: "contract",
+      contractIds: [process.env.KEYLEASE_CONTRACT_ID!],
+      topics: [["AAAADwAAAA1sZWFzZV9jcmVhdGVkAAAA", "*"]],
+    },
+  ],
+});
+```
+
 ### Recipes
 
 - **`lease_created`** — open (or upsert) a lease record keyed by `lease_id`,
@@ -219,6 +376,42 @@ Prefer the payload key over the `eventSchemaVersion` metadata when decoding
 history: metadata describes the Wasm running *now*, while an event from an old
 ledger was emitted by the schema that was running *then*. Read the metadata once
 at startup to learn the current version, and index from there.
+
+### Resuming where you left off
+
+`stellar events` takes `--start-ledger` or `--cursor`, and a JSON-RPC subscriber
+takes the same pair. Persist whichever you used. Delivery is at-least-once after
+a restart, so key every projection row by `lease_id` or `service_id` and make
+the writes idempotent.
+
+Retention is the endpoint's, not yours, and it is a rolling window, so a resume
+from too far back is refused rather than answered with an empty list. The deploy
+ledger recorded in [Deployments](deployments.md) is `5382788`; asking the public
+Testnet endpoint for it today returns:
+
+```text
+startLedger must be within the ledger range: 5698139 - 5819098
+```
+
+Every response states the window it is serving, as `oldestLedger` and
+`latestLedger` with their close times, so an indexer does not have to guess when
+it is about to lose history. Measured on that same endpoint: `5698126` to
+`5819085`, which is 120,959 ledgers spanning 604,791 seconds — seven days at
+five seconds a ledger.
+
+Three consequences:
+
+- **Watch `oldestLedger` against your own cursor.** The gap closes while you are
+  still healthy, so alert on the trend rather than on the rejection you get once
+  it has already lapped you.
+- **A week of downtime is not backfillable from the ledger.** Rebuild from the
+  counters (`service_count`, `lease_count`) and the read views, continue from
+  `oldestLedger`, and mark the range you cannot replay instead of treating it as
+  empty.
+- **Anything older than the window needs the explorer.** The recorded history in
+  [Deployments](deployments.md) is provable by transaction link, not by
+  `stellar events` — and not by a read, either, once the entry's lifetime has
+  run out; see [Storage lifetime](#storage-lifetime).
 
 ## Storage lifetime
 
@@ -312,6 +505,23 @@ lease, not per request.
 - [ ] Keep provider signing keys out of the request path where possible: reads
       need no key, only settlement does.
 - [ ] Watch `lease_created` so no lease expires unsettled and becomes revocable.
+- [ ] Bind the lease to the service it is being redeemed against: reject unless
+      `lease.service_id` is the service this endpoint sells.
+      **Test:** a lease bought for service A, presented to endpoint B, gets `403`
+      and forwards nothing upstream.
+- [ ] Take expiry from ledger time, never from the host clock or a client
+      timestamp, and re-read any cached lease before its `expires_at`.
+      **Test:** the same fixture gives the same verdict with the container clock
+      offset by ±5 minutes.
+- [ ] Treat settlement as retry-safe: retry on any error, read
+      `LeaseAlreadySettled` (7) as success, and book revenue from the
+      `lease_settled` event keyed by `lease_id`.
+      **Test:** settling the same lease twice leaves exactly one payout in your
+      ledger and one event on-chain.
+- [ ] Reject `Settled` and `Expired` leases before forwarding the request, not
+      after answering it.
+      **Test:** the upstream mock records zero calls for a settled lease and for
+      an expired one.
 - [ ] Never log Stellar secret seeds.
 
 ## Read next

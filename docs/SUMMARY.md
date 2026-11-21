@@ -23,9 +23,11 @@
 - [Developer guide](developer-guide.md)
 - [Deployment](deployment.md)
 - [Troubleshooting](troubleshooting.md)
+- [Protocol FAQ](faq.md)
 
 ## Project
 
+- [Design: time-locked upgrades](design/upgrade-timelock.md)
 - [Deployments](deployments.md)
 - Design notes
   - [Provider staking and slashing (#137)](design/137-provider-staking.md)

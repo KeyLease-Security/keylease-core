@@ -60,7 +60,7 @@ primitive:
 | Prove what happened | Typed Soroban contract events (`lease_created`, `lease_settled`, …) |
 | Keep escrow claimable | Persistent-storage TTL, extended for the lease's term + grace window on every state change and by the permissionless `bump_lease` |
 | Identify the deployed code | `contractmeta!` (name, version, description, repository) and `version()` |
-| Fix a deployed bug | `upgrade(admin, new_wasm_hash)` through the Soroban deployer |
+| Fix a deployed bug | `propose_upgrade` → 24h delay → `execute_upgrade` through the Soroban deployer |
 
 The consumer's proof of access is the lease itself. A provider reads it from
 Soroban RPC (or follows the event stream) and binds the caller to the lease's

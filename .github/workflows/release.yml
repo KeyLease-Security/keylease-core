@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish tagged release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fail if the tag does not match the workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          echo "workspace version: ${VERSION} / tag: ${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match workspace version ${VERSION} (expected v${VERSION})"
+            exit 1
+          fi
+
+      - name: Fail if release notes or changelog entry are missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "::error::Missing release notes: ${NOTES}"
+            exit 1
+          fi
+          if ! grep -Fq "## [${VERSION}]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for ${VERSION}"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Soroban contracts
+        run: cargo build --target wasm32v1-none --release --all
+
+      - name: Record Wasm hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wasm=(target/wasm32v1-none/release/*.wasm)
+          if [ "${#wasm[@]}" -eq 0 ]; then
+            echo "::error::No Wasm artifacts were produced"
+            exit 1
+          fi
+          # Store bare filenames so `sha256sum -c wasm-sha256.txt` works from
+          # the release artifact directory.
+          (cd target/wasm32v1-none/release && sha256sum *.wasm) > wasm-sha256.txt
+          cat wasm-sha256.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: KeyLease Core ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          files: |
+            target/wasm32v1-none/release/*.wasm
+            wasm-sha256.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: false

@@ -1,4 +1,11 @@
 #![no_std]
+// No unsafe code in contract crates (CONTRIBUTING.md#unsafe-code-and-std).
+// `forbid` on the deployed Wasm. On the host, soroban-sdk's `testutils`
+// feature registers contracts through `ctor`, whose expansion carries its own
+// `#[allow(unsafe_code)]`, which `forbid` rejects; `deny` still rejects any
+// unsafe written in this crate. scripts/check-no-std.sh checks these lines.
+#![cfg_attr(target_family = "wasm", forbid(unsafe_code))]
+#![cfg_attr(not(target_family = "wasm"), deny(unsafe_code))]
 
 //! # KeyLease Mock Token
 //!

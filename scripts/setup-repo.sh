@@ -4,7 +4,8 @@
 #
 # Applies, in order:
 #   1. GitHub topics      (so the repo is discoverable in the Stellar ecosystem)
-#   2. Wave labels        (wave-trivial/100pts, wave-medium/150pts, wave-high/200pts, security)
+#   2. Labels             (Wave tiers and points, security, and the area: path
+#                          labels that .github/labeler.yml applies to PRs)
 #   3. Branch protection  (require PRs + approvals + the exact CI checks)
 #
 # Each section is applied independently. A section that fails (for example
@@ -49,7 +50,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Wave labels
+# 2. Labels
 # ---------------------------------------------------------------------------
 
 # name|color|description
@@ -62,6 +63,11 @@ wave-high|b60205|Drips Wave: high-impact task (200 pts)
 150pts|fef2c0|Worth 150 Wave points
 200pts|f9d0c4|Worth 200 Wave points
 security|d73a4a|Security-sensitive change
+area: registry|1d76db|Touches contracts/registry
+area: mock-token|5319e7|Touches contracts/mock_token
+area: docs|0075ca|Touches docs/, mkdocs or top-level Markdown
+area: scripts|c5def5|Touches scripts/
+area: ci|ededed|Touches .github/ (workflows, templates, labeler)
 '
 
 echo "==> Labels"
@@ -87,7 +93,17 @@ done <<< "$LABELS_OF"
 PROTECTION='{
   "required_status_checks": {
     "strict": true,
-    "contexts": ["Format", "Clippy", "Test", "Build (wasm32v1-none)", "Dependency Policy", "Malware Scan"]
+    "contexts": [
+      "Format",
+      "Shellcheck",
+      "Clippy",
+      "Test",
+      "Build (wasm32v1-none)",
+      "Spell Check",
+      "Markdown Lint",
+      "Dependency Policy",
+      "Malware Scan"
+    ]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": {
@@ -104,7 +120,9 @@ PROTECTION='{
 echo "==> Branch protection on $BRANCH"
 if [ "$DRY_RUN" = "1" ]; then
   echo "  [dry-run] PUT /repos/$REPO/branches/$BRANCH/protection"
-  echo "$PROTECTION" | sed 's/^/            /'
+  while IFS= read -r payload_line; do
+    printf '            %s\n' "$payload_line"
+  done <<< "$PROTECTION"
 elif printf '%s' "$PROTECTION" | gh api -X PUT \
        "repos/$REPO/branches/$BRANCH/protection" \
        -H "Accept: application/vnd.github+json" --input - >/dev/null 2>&1; then

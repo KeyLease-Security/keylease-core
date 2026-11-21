@@ -46,6 +46,16 @@ curl "https://friendbot.stellar.org?addr=$(stellar keys address consumer)"
 export REGISTRY=<your registry contract id>
 export CONSUMER=$(stellar keys address consumer)
 
+# optional: price it first. quote_lease is a view — no auth, no transfer — and
+# it runs the same validation as create_lease, so these are the numbers the next
+# transaction locks.
+stellar contract invoke \
+  --id $REGISTRY --source-account consumer --network testnet \
+  -- quote_lease \
+     --service_id 1 \
+     --requested_calls 500 \
+     --duration_secs 3600
+
 stellar contract invoke \
   --id $REGISTRY --source-account consumer --network testnet \
   --send=yes -- create_lease \
@@ -57,7 +67,8 @@ stellar contract invoke \
 
 This escrows `rate_per_call × 500` and prints the new `lease_id`. The transaction
 emits `lease_created { lease_id, service_id, consumer, allocated_calls,
-expires_at, locked_deposit }`; keep the transaction hash as proof of purchase.
+expires_at, locked_deposit, rate_per_call }`; keep the transaction hash as
+proof of purchase.
 
 **Choose your numbers deliberately.** If your lease expires while you still have
 unused calls, those calls are not usable — `remaining_calls` drops to `0` at

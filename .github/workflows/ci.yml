@@ -22,30 +22,65 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+      - name: Check every tracked shell script
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          # The file list comes from the index, not a working-tree glob: a script
+          # that is tracked but moved out of scripts/ still has to be linted.
+          scripts=()
+          while IFS= read -r -d '' file; do
+            scripts+=("$file")
+          done < <(git ls-files -z '*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::No tracked *.sh files matched; this check would pass without covering anything"
+            exit 1
+          fi
+          printf 'checking %d script(s):\n' "${#scripts[@]}"
+          printf '  %s\n' "${scripts[@]}"
+          shellcheck "${scripts[@]}"
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+      # The host run above lints tests and the std/testutils build. This one
+      # lints the artifact that is actually deployed: the contracts compiled
+      # no_std for the Soroban target in release, against the SDK's guest
+      # environment instead of the host one. It stays in this job so the
+      # "Clippy" required check name in branch protection does not change.
+      - name: cargo clippy (wasm32v1-none)
+        run: cargo clippy --target wasm32v1-none --release --all -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
@@ -55,19 +90,25 @@ jobs:
     name: Build (wasm32v1-none)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
       - name: Build Soroban contracts
         run: cargo build --target wasm32v1-none --release --all
+      # Fails if a contract crate drops #![no_std] or its unsafe_code lints,
+      # if the target ever ships a std to link, or if a built .wasm imports
+      # anything but Soroban host functions or carries std source paths.
+      # Kept in this job so the required check name does not change.
+      - name: Check Wasm is built without std
+        run: ./scripts/check-no-std.sh --no-build
 
   spellcheck:
     name: Spell Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Docs, README and Rust comments, over every tracked file. The version is
       # pinned to match the tool contributors run locally, and `_typos.toml` in
       # the repository root holds the project dictionary, so a local `typos` run
@@ -78,7 +119,7 @@ jobs:
     name: Markdown Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Globs and rule settings come from `.markdownlint-cli2.jsonc`, the same
       # file `markdownlint-cli2` reads in the repository root. Headings, links
       # and list style are checked here; `mkdocs build --strict` (docs.yml)
@@ -89,7 +130,7 @@ jobs:
     name: Dependency Policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Checks the committed Cargo.lock against deny.toml: RustSec advisories,
       # license allow-list, wildcard/git dependencies and unknown registries.
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -112,7 +153,7 @@ jobs:
     steps:
       # The checkout only needs to be read; do not leave the job token in
       # .git/config for the scanners to read.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -174,7 +215,7 @@ jobs:
 
       - name: Upload scan report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: clamav-report
           path: clamav-report.txt

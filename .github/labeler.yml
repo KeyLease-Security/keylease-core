@@ -1,0 +1,38 @@
+# Path labels for pull requests, applied by .github/workflows/labeler.yml
+# (actions/labeler v7). Each key is a label; a PR gets it when ANY changed
+# file matches ANY glob under it. Globs are minimatch patterns matched against
+# repository-relative paths with `dot: true`, so `.github/**` matches.
+#
+# The labels themselves are created, with colours and descriptions, by
+# scripts/setup-repo.sh. Keep the two lists in sync.
+#
+# Labels are only added, never removed (sync-labels is off), so a label a
+# maintainer adds by hand is left alone.
+
+"area: registry":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "contracts/registry/**"
+
+"area: mock-token":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "contracts/mock_token/**"
+
+"area: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "*.md"
+          - "mkdocs.yml"
+          - "requirements-docs.txt"
+
+"area: scripts":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "scripts/**"
+
+"area: ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"

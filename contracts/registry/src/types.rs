@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracttype, Address, BytesN, Vec};
 
 /// A provider-published API or RPC service that can be leased by consumers.
 ///
@@ -42,6 +42,46 @@ pub struct Lease {
     pub settled: bool,
 }
 
+/// A proposed Wasm upgrade waiting out its mandatory delay.
+///
+/// Stored in instance storage so it survives as long as the registry's
+/// configuration. The delay is 24 hours, far inside the instance TTL horizon.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    /// Hash of the Wasm that will be installed on execution.
+    pub new_wasm_hash: BytesN<32>,
+    /// Ledger timestamp at which execution becomes legal.
+    pub execute_after: u64,
+}
+
+/// What [`crate::KeyLeaseRegistry::create_lease`] would lock, computed without
+/// authorization and without moving funds.
+///
+/// The field names match [`Lease`] so a quote can be compared field by field
+/// with the lease it predicted.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseQuote {
+    /// Deposit that would be transferred: `rate_per_call * requested_calls`.
+    pub locked_deposit: i128,
+    /// `ledger.timestamp() + duration_secs` at the moment the quote was read.
+    pub expires_at: u64,
+}
+
+/// One page of a provider's service list, as returned by
+/// [`crate::KeyLeaseRegistry::services_for_provider`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderServicePage {
+    /// Ids the provider owns right now, oldest first.
+    pub service_ids: Vec<u64>,
+    /// How many index entries this call consumed. Pass it back as `after`.
+    pub next: u32,
+    /// `true` once the provider's index is exhausted; `next == 0` means no index.
+    pub done: bool,
+}
+
 /// Derived lifecycle state of a [`Lease`]. Discriminants are stable on the wire.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,4 +105,41 @@ impl LeaseStatus {
             LeaseStatus::Active
         }
     }
+}
+
+/// A signed statement from an optional attestor that a lease consumed a given
+/// number of calls.
+///
+/// This is the payload a service opts into with
+/// [`crate::KeyLeaseRegistry::set_service_attestor`]. The attestor signs
+/// [`crate::usage_attestation_message`] for exactly the fields below, so a
+/// signature only settles the lease, service and call count it was issued for:
+///
+/// * `lease_id` — replaying an attestation against another lease fails with
+///   `AttestationMismatch`.
+/// * `service_id` — an attestation issued for a service cannot settle a lease of
+///   a different service.
+/// * `verified_calls` — signed, so the provider cannot report a different count
+///   than the attestor saw. `settle_lease_attested` rejects a payload whose
+///   `verified_calls` differs from the call argument.
+/// * `valid_until` — the last ledger timestamp at which the attestation may be
+///   used (inclusive). A settlement attempt after it fails with
+///   `AttestationStale`.
+///
+/// The attestation is an *additional* check, never a replacement for the
+/// existing ones: expiry, allotment, ownership and single-settlement rules all
+/// still apply.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageAttestation {
+    /// The lease this attestation was issued for.
+    pub lease_id: u64,
+    /// The service that lease belongs to.
+    pub service_id: u64,
+    /// Calls the attestor observed (and signed) for that lease.
+    pub verified_calls: u32,
+    /// Last ledger timestamp at which this attestation is accepted, inclusive.
+    pub valid_until: u64,
+    /// Ed25519 signature over [`crate::usage_attestation_message`].
+    pub signature: BytesN<64>,
 }

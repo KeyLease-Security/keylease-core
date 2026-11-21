@@ -98,6 +98,111 @@ sequenceDiagram
     R-->>P: lease_settled event
 ```
 
+Settlement is drawn as one arrow there because the request path is the subject.
+The two transfer legs are itemised below.
+
+## The money paths in order
+
+The component diagram says who may talk to whom; it does not say in what order
+value moves. The order is the security property. There are exactly three paths
+that move tokens, only one of them moves twice, and in every one of them the
+lease is written to storage **before** the token is called — so a token that
+tries to re-enter the registry during the transfer sees the final state, not the
+state before the money moved.
+
+Each step below is labelled with the authorization that opened it and the state
+it wrote, because a reader auditing escrow needs both, not just the arrows.
+
+### 1. `create_lease` — one transfer, into escrow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Consumer
+    participant R as KeyLeaseRegistry
+    participant T as SEP-41 token
+
+    C->>R: create_lease(consumer, service_id, requested_calls, duration_secs)
+    Note over C,R: AUTH — consumer.require_auth()
+    Note over R: CHECKS — requested_calls and duration_secs both non-zero,<br/>duration_secs ≤ MAX_LEASE_DURATION_SECS,<br/>service exists and is_active, deposit = rate × calls (checked),<br/>deposit ≤ MAX_LEASE_DEPOSIT, token configured
+    Note over R: STATE WRITE — LeaseCount += 1, Lease(lease_id) saved with<br/>settled = false, expires_at and locked_deposit, lease, service<br/>and instance TTL extended
+    R->>T: TRANSFER IN — transfer(consumer → registry, rate_per_call × requested_calls)
+    Note over R: EVENT — lease_created, topic lease_id, payload { schema_version,<br/>service_id, consumer, allocated_calls, expires_at, locked_deposit }
+    R-->>C: lease_id
+```
+
+Nothing can be claimed before the `STATE WRITE` step exists: the escrow transfer
+and the lease record are the same transaction, so either both are visible
+on-chain or neither is. A consumer that cannot fund the deposit never gets a
+lease id.
+
+### 2. `settle_lease` — two transfers, out of escrow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Provider
+    participant R as KeyLeaseRegistry
+    participant T as SEP-41 token
+    participant C as Consumer
+
+    P->>R: settle_lease(provider, lease_id, verified_calls)
+    Note over P,R: AUTH — provider.require_auth()
+    Note over R: CHECKS — lease not settled, verified_calls ≤ allocated_calls,<br/>caller owns the service, and (expired OR verified_calls == allocated_calls)
+    Note over R: STATE WRITE — Lease(lease_id).used_calls = verified_calls and<br/>settled = true, persisted BEFORE any token call
+    R->>T: TRANSFER OUT 1 — transfer(registry → provider, verified_calls × rate_per_call)
+    T-->>P: payout
+    R->>T: TRANSFER OUT 2 — transfer(registry → consumer, locked_deposit − payout)
+    T-->>C: refund
+    Note over R: EVENT — lease_settled, topic lease_id, payload { schema_version,<br/>provider, verified_calls, payout, refund }
+    R-->>P: ok
+```
+
+`payout + refund == locked_deposit` always, and a leg of zero is skipped rather
+than emitted as a transfer. The `STATE WRITE` above the two arrows is what makes
+the pair atomic against a malicious token: after a re-entrant call the lease
+already reads `settled`, so the second settlement attempt fails with
+`LeaseAlreadySettled` (7) instead of paying twice.
+`test_reentrant_token_cannot_settle_a_lease_twice` holds that line.
+
+### 3. `revoke_expired_lease` — one transfer, after the grace window
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Consumer
+    participant R as KeyLeaseRegistry
+    participant T as SEP-41 token
+
+    C->>R: revoke_expired_lease(consumer, lease_id)
+    Note over C,R: AUTH — consumer.require_auth()
+    Note over R: CHECKS — caller is lease.consumer, not settled,<br/>now ≥ expires_at, and now ≥ expires_at + SETTLE_GRACE_PERIOD_SECS
+    Note over R: STATE WRITE — Lease(lease_id).settled = true, persisted<br/>BEFORE the refund transfer
+    R->>T: TRANSFER OUT — transfer(registry → consumer, locked_deposit)
+    Note over R: EVENT — lease_revoked, topic lease_id, payload { schema_version,<br/>consumer, refund }
+    R-->>C: ok
+```
+
+The provider is deliberately absent from this diagram: it has no role in a
+revocation and no way to veto one. It can only pre-empt it, by settling first —
+which is exactly what the 24-hour grace window before this point is for. Nothing
+in the contract closes the settlement door when the window ends, so a lease in
+`Expired` is still a race, and the consumer wins it by acting after the deadline.
+
+The refund is the **full** `locked_deposit`, not the unused remainder: the
+provider that never settled earned nothing. `used_calls` stays at `0` on this
+path, which keeps the accounting unambiguous — a revoked lease is a lease that
+was never paid for.
+
+| Path | Who authenticates | State written first | Token transfers out |
+| --- | --- | --- | --- |
+| `create_lease` | consumer | `Lease(lease_id)`, `LeaseCount` | — (one transfer **in**) |
+| `settle_lease` | provider (must own the service) | `used_calls`, `settled = true` | payout + refund |
+| `revoke_expired_lease` | consumer (must be the lease's) | `settled = true` | full `locked_deposit` |
+
+Read the deadlines and the worked numbers in
+[How the protocol works](protocol.md#the-24-hour-grace-window).
+
 ## Why the contract is minimal
 
 **Every line of on-chain code is attack surface for escrowed funds.**

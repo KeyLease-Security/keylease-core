@@ -43,6 +43,11 @@ allotment your typical customer wants before you pick one.
 The registration emits `service_registered { service_id, provider, rate_per_call,
 endpoint_hash }`, so your own indexer can pick it up without a separate query.
 
+To read your catalogue back from the chain instead of your own database, page
+through `services_for_provider(provider, after, limit)` — pass `next` back as
+`after` until `done`, and keep `limit` at or below `MAX_PAGE_SIZE` (`100`). See
+[contract reference](contract-reference.md#read-only-views).
+
 ## 2. Pause or resume a service
 
 ```bash

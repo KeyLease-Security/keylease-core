@@ -12,10 +12,11 @@
 #   4. stellar contract invoke -- set_token    --admin <ADMIN> --token <TOKEN>
 #   5. stellar contract invoke -- register_service --provider <P> --rate_per_call <R> --endpoint_hash <H>
 #
-# Upgrade an existing deployment in place:
-#   1. cargo build --target wasm32v1-none --release --all
-#   2. stellar contract upload   (registry)  -> Wasm hash
-#   3. stellar contract invoke -- upgrade --admin <ADMIN> --new_wasm_hash <HASH>
+# Upgrade an existing deployment in place (24h time lock):
+#   1. --upgrade          build, upload and propose (prints the execution ledger)
+#   2. wait at least 24h so consumers can settle or revoke before rules change
+#   3. --execute-upgrade  install the proposed Wasm (fails early on the contract)
+#   or --cancel-upgrade   drop the proposal before it is executed
 #   4. stellar contract invoke -- version  (verify)
 #
 # Prerequisites
@@ -30,7 +31,13 @@
 #       -> creates + Friendbot-funds the identity first (testnet only)
 #
 #   REGISTRY=C... SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.sh --upgrade
-#       -> uploads the built Wasm and installs it over an existing contract id
+#       -> uploads the built Wasm and queues it behind the 24h delay
+#
+#   REGISTRY=C... ./scripts/deploy-testnet.sh --execute-upgrade
+#       -> installs the queued Wasm once the execution ledger has been reached
+#
+#   REGISTRY=C... ./scripts/deploy-testnet.sh --cancel-upgrade
+#       -> drops the queued Wasm without installing it
 #
 # Environment
 #   SOURCE_ACCOUNT          stellar CLI identity/key used to sign. Default: keylease-admin
@@ -63,8 +70,10 @@ KEYLEASE_GENERATE_KEY="${KEYLEASE_GENERATE_KEY:-}"
 MODE="deploy"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --upgrade) MODE="upgrade" ;;
-    --deploy)  MODE="deploy" ;;
+    --upgrade)         MODE="upgrade" ;;
+    --execute-upgrade) MODE="execute-upgrade" ;;
+    --cancel-upgrade)  MODE="cancel-upgrade" ;;
+    --deploy)          MODE="deploy" ;;
     -h|--help)
       sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
@@ -112,13 +121,17 @@ ADMIN="${ADMIN:-$(stellar keys address "$SOURCE_ACCOUNT")}"
 PROVIDER="${PROVIDER:-$ADMIN}"
 
 # ---------------------------------------------------------------------------
-# Upgrade mode: build -> upload -> upgrade an existing contract id
+# Upgrade modes: propose -> wait 24h -> execute (or cancel)
 # ---------------------------------------------------------------------------
 
-if [ "$MODE" = "upgrade" ]; then
-  [ -n "${REGISTRY:-}" ] || die "REGISTRY=<contract id> is required with --upgrade"
+require_registry() {
+  [ -n "${REGISTRY:-}" ] || die "REGISTRY=<contract id> is required for upgrade modes"
   printf '%s' "$REGISTRY" | grep -Eq '^C[A-Z0-9]{55}$' \
     || die "REGISTRY must be a contract id starting with C, got: $REGISTRY"
+}
+
+if [ "$MODE" = "upgrade" ]; then
+  require_registry
 
   step "Building Soroban Wasm (wasm32v1-none, release)"
   build_wasm
@@ -133,13 +146,53 @@ if [ "$MODE" = "upgrade" ]; then
     || die "unexpected upload output, expected a 64-char Wasm hash: $WASM_HASH"
   info "wasm hash: $WASM_HASH"
 
-  step "Upgrading $REGISTRY (admin = $ADMIN)"
+  step "Proposing upgrade for $REGISTRY (admin = $ADMIN)"
   stellar contract invoke \
     --id "$REGISTRY" \
     --source-account "$SOURCE_ACCOUNT" \
     --network "$NETWORK" \
     --send=yes \
-    -- upgrade --admin "$ADMIN" --new_wasm_hash "$WASM_HASH"
+    -- propose_upgrade --admin "$ADMIN" --new_wasm_hash "$WASM_HASH"
+
+  step "Pending upgrade: Wasm hash and execution ledger"
+  stellar contract invoke \
+    --id "$REGISTRY" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" \
+    -- get_pending_upgrade
+
+  cat <<EOF
+
+============================================================================
+ KeyLeaseRegistry upgrade proposed on $NETWORK
+============================================================================
+ KEYLEASE_CONTRACT_ID=$REGISTRY
+ wasm hash            = $WASM_HASH
+============================================================================
+ The Wasm is NOT installed yet. Execution is legal only at/after the
+ execute_after ledger timestamp printed above (24h after this proposal).
+ Consumers can watch upgrade_proposed / get_pending_upgrade and settle or
+ revoke in-flight leases during that window.
+ Next steps
+   - Execute after the delay:
+       REGISTRY=$REGISTRY $0 --execute-upgrade
+   - Cancel the proposal instead:
+       REGISTRY=$REGISTRY $0 --cancel-upgrade
+============================================================================
+EOF
+  exit 0
+fi
+
+if [ "$MODE" = "execute-upgrade" ]; then
+  require_registry
+
+  step "Executing pending upgrade on $REGISTRY"
+  stellar contract invoke \
+    --id "$REGISTRY" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" \
+    --send=yes \
+    -- execute_upgrade --admin "$ADMIN"
 
   step "Verifying on-chain version"
   VERSION="$(stellar contract invoke \
@@ -156,7 +209,6 @@ if [ "$MODE" = "upgrade" ]; then
  KEYLEASE_CONTRACT_ID=$REGISTRY
  KEYLEASE_NETWORK=$NETWORK
  version()            = $VERSION
- wasm hash            = $WASM_HASH
 ============================================================================
  Next steps
    - Watch the upgrade event:
@@ -167,6 +219,21 @@ if [ "$MODE" = "upgrade" ]; then
    - Explorer: https://stellar.expert/explorer/$NETWORK/contract/$REGISTRY
 ============================================================================
 EOF
+  exit 0
+fi
+
+if [ "$MODE" = "cancel-upgrade" ]; then
+  require_registry
+
+  step "Cancelling pending upgrade on $REGISTRY"
+  stellar contract invoke \
+    --id "$REGISTRY" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --network "$NETWORK" \
+    --send=yes \
+    -- cancel_upgrade --admin "$ADMIN"
+
+  info "pending upgrade removed; the running Wasm was not changed"
   exit 0
 fi
 
