@@ -4,7 +4,9 @@ use soroban_sdk::{contracttype, Address, BytesN};
 ///
 /// `endpoint_hash` commits to the off-chain endpoint metadata (e.g. a SHA-256
 /// digest of the service descriptor) without publishing the static credential
-/// on-chain. Leases are authorized against this commitment.
+/// on-chain. Leases are authorized against this commitment, so the digest must
+/// be derived from the descriptor itself; an all-zero (placeholder) value is
+/// rejected by `register_service`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Service {
@@ -16,7 +18,8 @@ pub struct Service {
     pub rate_per_call: i128,
     /// Whether new leases may be created for this service.
     pub is_active: bool,
-    /// Commitment to the off-chain endpoint descriptor.
+    /// Commitment to the off-chain endpoint descriptor: a digest over the
+    /// descriptor's actual content, never a placeholder. All-zero is rejected.
     pub endpoint_hash: BytesN<32>,
 }
 

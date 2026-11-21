@@ -351,8 +351,14 @@ impl KeyLeaseRegistry {
     /// Publish a new leasable service and return its `service_id`.
     ///
     /// `rate_per_call` is denominated in the escrow token's smallest unit and
-    /// must be strictly positive. `endpoint_hash` commits to the off-chain
-    /// endpoint descriptor.
+    /// must be strictly positive.
+    ///
+    /// `endpoint_hash` is the service's only commitment to its off-chain
+    /// descriptor: a 32-byte digest over the descriptor a consumer retrieves out
+    /// of band (for example its SHA-256). It must be the digest of real
+    /// descriptor content, **not** a placeholder — an all-zero value commits to
+    /// nothing, matches every unset field, and is rejected with
+    /// [`Error::InvalidEndpointHash`].
     pub fn register_service(
         env: Env,
         provider: Address,
@@ -363,6 +369,12 @@ impl KeyLeaseRegistry {
 
         if rate_per_call <= 0 {
             return Err(Error::InvalidRate);
+        }
+        // A zero digest is a placeholder, not a commitment: it would let a
+        // provider list a service whose descriptor is unpublished and
+        // unverifiable while still looking registered on-chain.
+        if endpoint_hash.to_array() == [0u8; 32] {
+            return Err(Error::InvalidEndpointHash);
         }
 
         let service_id = storage::next_service_id(&env)?;

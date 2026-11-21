@@ -24,7 +24,7 @@ Key facts you must not guess:
   **`consumer` is the first argument.**
 - `settle_lease(provider, lease_id, verified_calls)` — allowed only when the
   lease has expired **or** `verified_calls == allocated_calls`.
-- Error codes 1–17 in `errors.rs` are part of the ABI. **Append, never
+- Error codes 1–24 in `errors.rs` are part of the ABI. **Append, never
   renumber.**
 - Events in `events.rs` are part of the ABI too: `lease_created`,
   `lease_settled`, `lease_revoked`, etc. Their names, topics and payload fields

@@ -91,6 +91,7 @@ can be a native Stellar multi-signature account (`G...`) or a multisig smart con
 ### Host-enforced authentication
 
 When `admin.require_auth()` is called inside `set_token` or `upgrade`:
+
 - If `admin` is a Stellar account, Soroban's runtime delegates authentication to
   Stellar's native account signing engine.
 - If the account is configured with multi-signature weights and operation thresholds

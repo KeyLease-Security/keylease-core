@@ -242,6 +242,42 @@ fn test_register_service_rejects_non_positive_rate() {
 }
 
 #[test]
+fn test_register_service_rejects_all_zero_endpoint_hash() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let zero = BytesN::from_array(&env, &[0u8; 32]);
+
+    assert_eq!(
+        ctx.registry
+            .try_register_service(&ctx.provider, &RATE, &zero),
+        Err(Ok(Error::InvalidEndpointHash))
+    );
+    assert_eq!(ctx.registry.service_count(), 0);
+}
+
+#[test]
+fn test_register_service_accepts_a_single_nonzero_endpoint_hash_byte() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    // One nonzero byte anywhere in the 32-byte digest is a real commitment, so
+    // both the most and the least significant byte must be accepted.
+    let mut leading = [0u8; 32];
+    leading[0] = 1;
+    let mut trailing = [0u8; 32];
+    trailing[31] = 1;
+
+    for bytes in [leading, trailing] {
+        let hash = BytesN::from_array(&env, &bytes);
+        let service_id = ctx.registry.register_service(&ctx.provider, &RATE, &hash);
+
+        let service = ctx.registry.get_service(&service_id);
+        assert_eq!(service.endpoint_hash, hash);
+    }
+    assert_eq!(ctx.registry.service_count(), 2);
+}
+
+#[test]
 fn test_deactivated_service_rejects_new_leases() {
     let env = Env::default();
     let ctx = setup(&env);

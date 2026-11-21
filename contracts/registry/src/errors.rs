@@ -59,4 +59,7 @@ pub enum Error {
     NoPendingUpgrade = 22,
     /// The proposed upgrade is still inside its mandatory delay window.
     UpgradeDelayNotElapsed = 23,
+    /// The service's `endpoint_hash` is all zero bytes, so it commits to nothing.
+    /// A placeholder hash must be refused at registration.
+    InvalidEndpointHash = 24,
 }
