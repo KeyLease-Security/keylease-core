@@ -65,7 +65,7 @@ jobs:
           fi
           # Store bare filenames so `sha256sum -c wasm-sha256.txt` works from
           # the release artifact directory.
-          (cd target/wasm32v1-none/release && sha256sum *.wasm) > wasm-sha256.txt
+          (cd target/wasm32v1-none/release && sha256sum ./*.wasm) > wasm-sha256.txt
           cat wasm-sha256.txt
 
       - name: Create GitHub release

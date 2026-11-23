@@ -57,14 +57,14 @@
 //! * **`Address` auth** — every actor is a Stellar account (`G...`) or contract
 //!   (`C...`) address authenticated by the host's `require_auth()`.
 //! * **Contract events** — every transition emits a typed Soroban event (see
-//!   [`events`]) so indexers can follow escrow without polling. Every payload
+//!   [`LeaseCreated`]) so indexers can follow escrow without polling. Every payload
 //!   carries a `schema_version` key so a stream that spans an upgrade stays
 //!   decodable.
 //! * **Ledger time** — expiry is measured in ledger timestamps, not wall clocks.
 //! * **Persistent storage TTL** — a lease entry is extended for its full
 //!   duration plus the grace period whenever it is written, so escrow cannot
 //!   fall off the ledger. Reads never extend: `bump_lease` and `bump_service`
-//!   keep an entry alive on their own terms (see [`storage`]).
+//!   keep an entry alive on their own terms (see `storage`).
 //! * **Wasm upgrades** — the admin proposes a new Wasm through the Soroban
 //!   deployer and may only execute it after a 24-hour on-ledger delay, giving
 //!   consumers time to exit; `contractmeta!` identifies the running version.
@@ -92,8 +92,8 @@ pub use crate::events::{
     ServiceStatusChanged, UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
 };
 pub use crate::types::{
-    Lease, LeaseQuote, LeaseStatus, PendingUpgrade, ProviderServicePage, Service, ServiceStats,
-    UsageAttestation,
+    Lease, LeasePage, LeaseQuote, LeaseStatus, PendingUpgrade, ProviderServicePage, Service,
+    ServicePage, ServiceStats, UsageAttestation,
 };
 
 // On-chain contract metadata, readable from the ledger without the source.
@@ -175,10 +175,15 @@ pub const MAX_LEASE_DEPOSIT: i128 = 1_000_000_000_000;
 /// pricing.
 pub const MAX_RATE_PER_CALL: i128 = MAX_LEASE_DEPOSIT;
 
-/// Largest page [`KeyLeaseRegistry::services_for_provider`] will serve.
+/// Largest page [`KeyLeaseRegistry::services_for_provider`], [`KeyLeaseRegistry::get_services`]
+/// and [`KeyLeaseRegistry::get_leases`] will serve in one call.
 ///
 /// Every entry on a page costs one ledger read, so an unbounded `limit` would let
-/// a single call read a provider's whole index and blow the transaction budget.
+/// a single call read a provider's whole index or catalogue and blow the transaction budget.
+///
+/// Asking for more is rejected with [`Error::InvalidLimit`] rather than
+/// silently clamped, so a caller cannot mistake a truncated page for the whole
+/// answer.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
 /// Domain separator prefixed to every usage-attestation message.
@@ -239,9 +244,9 @@ impl KeyLeaseRegistry {
     /// Initialize the registry and appoint `admin`.
     ///
     /// Can only be called once. The admin is the only account allowed to
-    /// configure the escrow token via [`Self::set_token`] or manage upgrades via
-    /// [`Self::propose_upgrade`], [`Self::execute_upgrade`] and
-    /// [`Self::cancel_upgrade`].
+    /// configure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via
+    /// [`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and
+    /// [`KeyLeaseRegistry::cancel_upgrade`].
     pub fn init(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         if storage::is_initialized(&env) {
@@ -297,7 +302,7 @@ impl KeyLeaseRegistry {
     /// restarts the delay, so the exit window can never be shortened. The hash
     /// and the execution ledger timestamp are stored and reported by
     /// [`UpgradeProposed`]; clients can read them with
-    /// [`Self::get_pending_upgrade`].
+    /// [`KeyLeaseRegistry::get_pending_upgrade`].
     pub fn propose_upgrade(
         env: Env,
         admin: Address,
@@ -540,8 +545,8 @@ impl KeyLeaseRegistry {
     /// Only the owning provider may call this.
     ///
     /// `attestor` is an ed25519 public key. Once set, this service's leases can
-    /// only be settled through [`Self::settle_lease_attested`] with a payload
-    /// signed by that key; [`Self::settle_lease`] fails with
+    /// only be settled through [`KeyLeaseRegistry::settle_lease_attested`] with a payload
+    /// signed by that key; [`KeyLeaseRegistry::settle_lease`] fails with
     /// `AttestationRequired`. Passing `None` removes the requirement and restores
     /// the default trust model, so the no-attestor mode is one call away at all
     /// times.
@@ -557,7 +562,7 @@ impl KeyLeaseRegistry {
     ///
     /// The attestor is chosen by the provider, so this is a self-binding
     /// commitment rather than a protocol-level guarantee; a consumer should read
-    /// [`Self::get_service_attestor`] before leasing if it wants one.
+    /// `get_service_attestor` before leasing if it wants one.
     pub fn set_service_attestor(
         env: Env,
         provider: Address,
@@ -669,11 +674,11 @@ impl KeyLeaseRegistry {
     /// The consumer is asking the provider to release the unused balance now
     /// instead of waiting for expiry and the full grace window. The request
     /// alone moves no funds and changes no balances; the provider decides by
-    /// calling [`Self::approve_early_cancel`] or [`Self::reject_early_cancel`].
+    /// calling [`KeyLeaseRegistry::approve_early_cancel`] or [`KeyLeaseRegistry::reject_early_cancel`].
     ///
     /// Only an unsettled, unexpired lease can be cancelled early, and a lease
     /// can have at most one pending request. The consumer may withdraw the
-    /// request with [`Self::withdraw_early_cancel`].
+    /// request with [`KeyLeaseRegistry::withdraw_early_cancel`].
     pub fn request_early_cancel(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
 
@@ -854,7 +859,7 @@ impl KeyLeaseRegistry {
     /// `verified_calls * rate_per_call` and returns
     /// `locked_deposit - payout` to the consumer. A lease can be settled once.
     /// The settlement is added to the service's cumulative totals, which
-    /// [`Self::service_stats`] reports.
+    /// [`KeyLeaseRegistry::service_stats`] reports.
     pub fn settle_lease(
         env: Env,
         provider: Address,
@@ -879,7 +884,7 @@ impl KeyLeaseRegistry {
     /// otherwise). Verification happens before any state changes or token
     /// transfers, so a rejected attestation costs the caller nothing but the fee.
     ///
-    /// Every non-attestation rule of [`Self::settle_lease`] still applies: the
+    /// Every non-attestation rule of [`KeyLeaseRegistry::settle_lease`] still applies: the
     /// lease must be settleable, the caller must own the service, and the lease
     /// can only be settled once. A service with no attestor configured is
     /// rejected with `AttestorNotConfigured` rather than treated as
@@ -1152,7 +1157,7 @@ impl KeyLeaseRegistry {
     /// rather than an error, so a new account can page before it registers.
     ///
     /// Pure read: like every other view, it extends no TTL, its own index entry
-    /// included. Use [`Self::register_service`] or [`Self::set_service_active`]
+    /// included. Use [`KeyLeaseRegistry::register_service`] or [`KeyLeaseRegistry::set_service_active`]
     /// to keep a catalogue's index alive.
     pub fn services_for_provider(
         env: Env,
@@ -1168,12 +1173,12 @@ impl KeyLeaseRegistry {
 
     /// Fetch a lease. Pure read: never extends a TTL.
     ///
-    /// Use [`Self::bump_lease`] to keep an entry alive.
+    /// Use [`KeyLeaseRegistry::bump_lease`] to keep an entry alive.
     pub fn get_lease(env: Env, lease_id: u64) -> Result<Lease, Error> {
         storage::get_lease(&env, lease_id)
     }
 
-    /// Predict what [`Self::create_lease`] would lock, without auth or a transfer.
+    /// Predict what [`KeyLeaseRegistry::create_lease`] would lock, without auth or a transfer.
     ///
     /// Consumers and SDKs used to re-derive the deposit and the expiry off-chain,
     /// where any change to contract semantics turns into silent drift. This view
@@ -1291,9 +1296,41 @@ impl KeyLeaseRegistry {
         Ok(lease.locked_deposit)
     }
 
-    /// Query whether the registry is currently paused by admin emergency action.
-    pub fn is_paused(env: Env) -> bool {
-        storage::is_paused(&env)
+    /// One bounded page of the service catalogue, ascending by id.
+    ///
+    /// This exists so a dashboard or indexer does not have to replay the whole
+    /// event history to learn what is registered. `start` is the first id to
+    /// read (ids begin at 1, so `start` of 0 reads from the beginning) and
+    /// `limit` is at most [`MAX_PAGE_SIZE`]. Pass `next_start` back as `start`
+    /// until `done` is `true`.
+    ///
+    /// `done`, not the page length, is the end of the catalogue: ids whose
+    /// entry has been evicted are skipped, so a short page with `done == false`
+    /// just means the walk passed entries that are no longer on the ledger.
+    /// [`KeyLeaseRegistry::service_count`] still counts them.
+    ///
+    /// Pure read: extends no TTL, including the entries it walks over.
+    pub fn get_services(env: Env, start: u64, limit: u32) -> Result<ServicePage, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidLimit);
+        }
+        Ok(storage::services_page(&env, start, limit))
+    }
+
+    /// One bounded page of the lease record, ascending by id.
+    ///
+    /// Same paging contract as [`KeyLeaseRegistry::get_services`]: page until `done`, and
+    /// treat a short page as evicted entries rather than as the end. Lease ids
+    /// are global and monotonic across services, so a page mixes services;
+    /// filter by `service_id` client side.
+    ///
+    /// Pure read: extends no TTL. Use [`KeyLeaseRegistry::bump_lease`] to keep an entry
+    /// readable.
+    pub fn get_leases(env: Env, start: u64, limit: u32) -> Result<LeasePage, Error> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(Error::InvalidLimit);
+        }
+        Ok(storage::leases_page(&env, start, limit))
     }
 }
 

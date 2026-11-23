@@ -3,6 +3,7 @@ use soroban_sdk::contracterror;
 /** Contract-level error codes returned by [`crate::KeyLeaseRegistry`].
  * Codes are stable and start at 1 (`0` is reserved by the host for success).
  * New codes must be appended; codes are part of the ABI.
+ * The full mapping is pinned by `ERROR_ABI` in `test.rs`; extend it on append.
  */
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]

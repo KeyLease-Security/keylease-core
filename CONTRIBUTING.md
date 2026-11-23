@@ -158,18 +158,24 @@ SDK pin:
 
 ## Text and documentation checks
 
-Three non-Rust checks run in CI, and each reads its configuration from this
-repository, so the local command below is the same check and fails the same way:
+Five checks run in CI outside the Rust build, and each reads its configuration
+from this repository, so the local command below is the same check and fails the
+same way:
 
 | Check | Command | Config | CI job |
 | --- | --- | --- | --- |
 | Spell check | `typos` | [`_typos.toml`](./_typos.toml) | `Spell Check` |
 | Markdown lint | `npx markdownlint-cli2@0.24.0` | [`.markdownlint-cli2.jsonc`](./.markdownlint-cli2.jsonc) | `Markdown Lint` |
+| Workflow lint | `actionlint` | none; it lints every file under `.github/workflows/` | `Action Lint` |
+| Crate documentation | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items` | the doc comments themselves | `Rustdoc` |
 | Nav, anchors, links | `mkdocs build --strict` | [`mkdocs.yml`](./mkdocs.yml) | `Docs → Build preview` (PR), `Build & deploy` (`main`) |
 
 ```bash
 cargo install typos-cli --locked            # one-time
 typos
+
+brew install actionlint shellcheck          # one-time; see the note below
+actionlint                                  # every file in .github/workflows
 
 pip install -r requirements-docs.txt        # one-time
 mkdocs build --strict
@@ -183,6 +189,15 @@ arguments lints exactly what CI lints. `mkdocs build --strict` promotes a broken
 nav entry or a missing in-page anchor to an error, which is why internal links
 must target real heading slugs.
 
+`actionlint` checks the workflow files themselves: expression syntax, `needs:`
+targets, and, through `shellcheck`, every inline `run:` script. That last part is
+delegated, so `actionlint` skips it silently when `shellcheck` is not on `PATH`;
+the CI job installs both, and so must you if the local run is to match.
+`cargo doc` with `RUSTDOCFLAGS=-D warnings` turns an intra-doc link that does not
+resolve, or a manifest field cargo calls redundant, into a build failure. It does
+not enable `missing_docs`: the Soroban macros generate items nobody can annotate,
+and silencing them would weaken the check instead of documenting the contract.
+
 The Docs workflow gates a pull request through its `Build preview` job, but only
 when the PR touches `docs/**`, `mkdocs.yml`, `requirements-docs.txt` or the
 workflow file itself. A documentation change therefore fails on the anchor
@@ -190,8 +205,8 @@ before it merges — which is why the local command above is still worth running
 since it is the same build and it answers in seconds. A change that touches none
 of those paths gets no Docs job on the PR at all, so if you edit `nav:` in a
 branch that only changes Rust, run it yourself. The checks that guard your branch
-are the CI jobs `Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`,
-`Spell Check`, `Markdown Lint`, `Dependency Policy` and the required
+are the CI jobs `Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Rustdoc`,
+`Spell Check`, `Markdown Lint`, `Action Lint`, `Dependency Policy` and the required
 `Malware Scan`.
 
 ## Repository layout

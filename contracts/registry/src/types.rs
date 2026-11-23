@@ -111,6 +111,34 @@ pub struct ProviderServicePage {
     pub done: bool,
 }
 
+/// One page of the service catalogue, as returned by
+/// [`crate::KeyLeaseRegistry::get_services`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServicePage {
+    /// The services read on this call, ascending by id.
+    pub services: Vec<Service>,
+    /// The lowest id this call did not read. Pass it back as `start`.
+    pub next_start: u64,
+    /// `true` once the id space has been read to the end. A page shorter than
+    /// the requested `limit` with `done == false` means ids were skipped, not
+    /// that the catalogue ended.
+    pub done: bool,
+}
+
+/// One page of the lease record, as returned by
+/// [`crate::KeyLeaseRegistry::get_leases`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeasePage {
+    /// The leases read on this call, ascending by id.
+    pub leases: Vec<Lease>,
+    /// The lowest id this call did not read. Pass it back as `start`.
+    pub next_start: u64,
+    /// `true` once the id space has been read to the end.
+    pub done: bool,
+}
+
 /// Derived lifecycle state of a [`Lease`]. Discriminants are stable on the wire.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,7 +162,7 @@ impl LeaseStatus {
     /// field of [`Lease`]: the lease struct's on-chain layout is frozen, so the
     /// distinction between "settled by the provider" and "reclaimed by the
     /// consumer" is stored beside the lease instead of inside it (see
-    /// [`crate::storage`]). A revoked lease is always also `settled`, which is
+    /// `storage`). A revoked lease is always also `settled`, which is
     /// what keeps its escrow from being released twice; therefore a settled lease
     /// must be classified by the marker before it can be reported as
     /// [`LeaseStatus::Settled`].

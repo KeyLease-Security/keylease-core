@@ -157,6 +157,25 @@ jobs:
           echo "Reproducible Wasm hash (keylease_registry.wasm): $first_registry"
           echo "Compare with the Wasm hash recorded in docs/deployments.md."
 
+  rustdoc:
+    # Stable check name: branch protection requires `Rustdoc`, so renaming this
+    # job orphans the requirement instead of moving it.
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Intra-doc links, undocumented public items and manifest metadata problems
+      # all become errors here, which is what `cargo doc` otherwise never reports.
+      # `--document-private-items` is part of the gate, not an accident: private
+      # modules are where the storage and event layout lives, and links into them
+      # have to keep resolving too.
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items
+
   spellcheck:
     name: Spell Check
     runs-on: ubuntu-latest
@@ -178,6 +197,41 @@ jobs:
       # and list style are checked here; `mkdocs build --strict` (docs.yml)
       # keeps checking navigation and anchors.
       - uses: DavidAnson/markdownlint-cli2-action@v25
+
+  actionlint:
+    name: Action Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # actionlint is a binary, not an action, so the release is fetched by an
+      # explicit version and its checksum verified against the release's own
+      # checksums file. That keeps the linter version a reviewable constant in
+      # this file instead of whatever `latest` happens to mean today.
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          base="https://github.com/rhysd/actionlint/releases/download/v${version}"
+          curl -sSfL -o "/tmp/${archive}" "${base}/${archive}"
+          curl -sSfL -o /tmp/actionlint-checksums.txt "${base}/actionlint_${version}_checksums.txt"
+          (
+            cd /tmp
+            grep -E "^[0-9a-f]{64}  ${archive}\$" actionlint-checksums.txt | sha256sum --check --status
+          )
+          tar -xzf "/tmp/${archive}" -C /tmp actionlint
+      # actionlint hands every inline `run:` script to shellcheck and skips that
+      # rule silently when the binary is missing, so it is installed here rather
+      # than trusted to be present on the runner image.
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+      # No paths filter: a workflow file can be broken by any PR that edits one,
+      # and this job is only useful if it also catches the ones nobody touched.
+      # With no arguments actionlint lints every file under .github/workflows.
+      - name: Lint every workflow file
+        run: /tmp/actionlint -no-color
 
   deny:
     name: Dependency Policy
