@@ -1741,6 +1741,41 @@ fn test_rate_bound_keeps_deposit_math_inside_i128() {
 }
 
 #[test]
+fn test_smallest_lease_round_trip() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_service_at(&env, &ctx, 1);
+
+    // One call for one second at a rate of one: the smallest legal lease.
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &1, &1);
+    assert_eq!(ctx.registry.get_lease(&lease_id).locked_deposit, 1);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 1);
+
+    env.ledger().set_timestamp(1_001);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &1);
+
+    // The single unit of deposit pays out in full; nothing is refunded.
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseSettled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            provider: ctx.provider.clone(),
+            verified_calls: 1,
+            payout: 1,
+            refund: 0,
+        },
+    );
+    assert_eq!(ctx.token.balance(&ctx.provider), 1);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - 1);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+}
+
+#[test]
 fn test_large_but_valid_deposit_is_accepted() {
     let env = Env::default();
     env.ledger().set_timestamp(1_000);
@@ -2204,6 +2239,48 @@ fn test_init_emits_event() {
 }
 
 #[test]
+fn test_registry_initialized_event_reports_the_stored_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let registry_id = env.register(KeyLeaseRegistry, ());
+    let registry = KeyLeaseRegistryClient::new(&env, &registry_id);
+
+    registry.init(&admin);
+
+    // Read the event before any further invocation: the host resets events
+    // per call.
+    assert_single_event(
+        &env,
+        &registry_id,
+        &RegistryInitialized {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: admin.clone(),
+        },
+    );
+    assert_eq!(registry.get_admin(), admin);
+}
+
+#[test]
+fn test_rejected_second_init_emits_no_event() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let usurper = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry.try_init(&usurper),
+        Err(Ok(Error::AlreadyInitialized))
+    );
+
+    // A rejected init must not publish an event nor replace the admin.
+    assert!(
+        env.events().all().events().is_empty(),
+        "rejected init must not emit an event"
+    );
+    assert_eq!(ctx.registry.get_admin(), ctx.admin);
+}
+
+#[test]
 fn test_set_token_emits_event() {
     let env = Env::default();
     let ctx = setup(&env);
@@ -2328,6 +2405,135 @@ fn test_revoke_emits_event() {
 }
 
 // ---------------------------------------------------------------------------
+// Event ordering across a lease lifecycle
+// ---------------------------------------------------------------------------
+
+/// Test-only driver that runs two registry entry points inside one invocation.
+///
+/// `env.events().all()` only reports the events of the last contract
+/// invocation, so `create_lease` then `settle_lease` cannot be observed as one
+/// ordered stream from the test client alone. The driver makes both calls in a
+/// single top-level invocation, which is the same event stream an indexer sees
+/// for a transaction that does both.
+#[contract]
+pub struct LifecycleDriver;
+
+#[contractimpl]
+impl LifecycleDriver {
+    pub fn create_then_settle(
+        env: Env,
+        registry: Address,
+        consumer: Address,
+        service_id: u64,
+        calls: u32,
+        duration_secs: u64,
+    ) -> u64 {
+        let client = KeyLeaseRegistryClient::new(&env, &registry);
+        // The driver is the root invocation, so it has to carry the auth the
+        // registry requires from the consumer and the provider.
+        consumer.require_auth();
+        let lease_id = client.create_lease(&consumer, &service_id, &calls, &duration_secs);
+        let provider = client.get_service(&service_id).provider;
+        provider.require_auth();
+        // Paying for every allocated call lets the provider settle before
+        // expiry, so the whole lifecycle fits in one invocation.
+        client.settle_lease(&provider, &lease_id, &calls);
+        lease_id
+    }
+}
+
+/// Assert the registry published exactly `first` then `second`, in that order,
+/// during the last invocation.
+fn assert_two_events<A: Event, B: Event>(env: &Env, contract: &Address, first: &A, second: &B) {
+    let expected = Vec::from_array(
+        env,
+        [
+            (contract.clone(), first.topics(env), first.data(env)),
+            (contract.clone(), second.topics(env), second.data(env)),
+        ],
+    );
+    assert_eq!(env.events().all().filter_by_contract(contract), expected);
+}
+
+#[test]
+fn test_create_then_settle_events_are_ordered() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (ctx, service_id) = setup_with_service(&env);
+    let driver_id = env.register(LifecycleDriver, ());
+    let driver = LifecycleDriverClient::new(&env, &driver_id);
+
+    let lease_id =
+        driver.create_then_settle(&ctx.registry_id(), &ctx.consumer, &service_id, &10, &3_600);
+
+    // Exactly two registry events, in lifecycle order: no third lease event.
+    assert_two_events(
+        &env,
+        &ctx.registry_id(),
+        &LeaseCreated {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            service_id,
+            consumer: ctx.consumer.clone(),
+            allocated_calls: 10,
+            expires_at: 4_600,
+            locked_deposit: RATE * 10,
+            rate_per_call: RATE,
+        },
+        &LeaseSettled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            provider: ctx.provider.clone(),
+            verified_calls: 10,
+            payout: RATE * 10,
+            refund: 0,
+        },
+    );
+}
+
+#[test]
+fn test_create_then_revoke_events_are_ordered() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (ctx, service_id) = setup_with_service(&env);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseCreated {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            service_id,
+            consumer: ctx.consumer.clone(),
+            allocated_calls: 10,
+            expires_at: 1_100,
+            locked_deposit: RATE * 10,
+            rate_per_call: RATE,
+        },
+    );
+
+    // The revoke only becomes legal once expiry plus grace has elapsed, which
+    // is a later invocation, so it is asserted as exactly one event too.
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseRevoked {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer: ctx.consumer.clone(),
+            refund: RATE * 10,
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Soroban lifecycle: metadata, upgrades, storage bounds
 // ---------------------------------------------------------------------------
 
@@ -2411,6 +2617,53 @@ fn test_execute_upgrade_after_delay_reports_hash_and_ledger() {
             execute_after: 1_000 + UPGRADE_DELAY_SECS,
         },
     );
+}
+
+#[test]
+fn test_contract_upgraded_event_reports_admin_and_hash() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (ctx, _service_id) = setup_with_service(&env);
+    // The test Wasm is fixed, so its 32-byte hash is fixed too.
+    let fixed_wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_TEST_WASM);
+    ctx.registry.propose_upgrade(&ctx.admin, &fixed_wasm_hash);
+
+    env.ledger().set_timestamp(1_000 + UPGRADE_DELAY_SECS);
+    ctx.registry.execute_upgrade(&ctx.admin);
+
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &ContractUpgraded {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: ctx.admin.clone(),
+            new_wasm_hash: fixed_wasm_hash,
+            execute_after: 1_000 + UPGRADE_DELAY_SECS,
+        },
+    );
+}
+
+#[test]
+fn test_non_admin_upgrade_emits_no_event() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (ctx, _service_id) = setup_with_service(&env);
+    let impostor = Address::generate(&env);
+    let fixed_wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_TEST_WASM);
+    ctx.registry.propose_upgrade(&ctx.admin, &fixed_wasm_hash);
+
+    env.ledger().set_timestamp(1_000 + UPGRADE_DELAY_SECS);
+    assert_eq!(
+        ctx.registry.try_execute_upgrade(&impostor),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // A rejected upgrade publishes nothing and leaves the proposal pending.
+    assert!(
+        env.events().all().events().is_empty(),
+        "rejected upgrade must not emit an event"
+    );
+    assert!(ctx.registry.get_pending_upgrade().is_some());
 }
 
 #[test]
