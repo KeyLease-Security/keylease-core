@@ -157,6 +157,98 @@ jobs:
           echo "Reproducible Wasm hash (keylease_registry.wasm): $first_registry"
           echo "Compare with the Wasm hash recorded in docs/deployments.md."
 
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Pin the generator so re-running a commit produces the same inventory.
+      # cargo-cyclonedx reads Cargo.lock for exact crate versions and hashes,
+      # and cargo metadata for the resolved dependency graph.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.10 --locked
+      # The registry is the contract deployed to Soroban; mock_token is
+      # test-only. Filtering to the Wasm target and excluding dev-dependencies
+      # keeps the inventory to crates that go into the release Wasm.
+      - name: Generate the CycloneDX SBOM from Cargo.lock
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --format json --spec-version 1.5 \
+            --target wasm32v1-none --no-build-deps --override-filename bom
+          test -s contracts/registry/bom.json
+      - name: Stamp workspace version and commit into SBOM metadata
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          WORKSPACE_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          export WORKSPACE_VERSION
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          bom = json.loads(Path("contracts/registry/bom.json").read_text())
+          if bom.get("bomFormat") != "CycloneDX":
+              raise SystemExit("generated document is not a CycloneDX SBOM")
+
+          metadata = bom.setdefault("metadata", {})
+          metadata.setdefault("component", {})["version"] = os.environ["WORKSPACE_VERSION"]
+
+          # Keep the generator's own properties and replace only our stamps,
+          # so re-stamping an SBOM cannot duplicate them.
+          properties = metadata.setdefault("properties", [])
+          properties[:] = [
+              prop for prop in properties
+              if prop.get("name") not in {"keylease:version", "keylease:commit"}
+          ]
+          properties.extend([
+              {"name": "keylease:version", "value": os.environ["WORKSPACE_VERSION"]},
+              {"name": "keylease:commit", "value": os.environ["COMMIT_SHA"]},
+          ])
+
+          component = metadata["component"]
+          references = component.setdefault("externalReferences", [])
+          references[:] = [ref for ref in references if ref.get("type") != "vcs"]
+          references.append({
+              "type": "vcs",
+              "url": "https://github.com/KeyLease-Security/keylease-core/commit/"
+                  + os.environ["COMMIT_SHA"],
+          })
+
+          out = Path("sbom")
+          out.mkdir(exist_ok=True)
+          (out / "keylease-core.cyclonedx.json").write_text(json.dumps(bom, indent=2) + "\n")
+          PY
+      - name: Verify SBOM metadata
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          bom = json.loads(Path("sbom/keylease-core.cyclonedx.json").read_text())
+          metadata = bom["metadata"]
+          props = {prop["name"]: prop["value"] for prop in metadata["properties"]}
+          if bom["bomFormat"] != "CycloneDX" or not bom["components"]:
+              raise SystemExit("SBOM is not a populated CycloneDX document")
+          if props.get("keylease:version") != metadata["component"]["version"]:
+              raise SystemExit("workspace version is missing from SBOM metadata")
+          if len(props.get("keylease:commit", "")) != 40:
+              raise SystemExit("full commit SHA is missing from SBOM metadata")
+          print(
+              f"SBOM: {len(bom['components'])} components, "
+              f"version {props['keylease:version']}, commit {props['keylease:commit']}"
+          )
+          PY
+      - name: Upload CycloneDX SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          # The release notes link to this artifact by name; keep it stable.
+          name: sbom-cyclonedx
+          path: sbom/keylease-core.cyclonedx.json
+          if-no-files-found: error
   rustdoc:
     # Stable check name: branch protection requires `Rustdoc`, so renaming this
     # job orphans the requirement instead of moving it.
