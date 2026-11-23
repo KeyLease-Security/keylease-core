@@ -10,7 +10,8 @@ use soroban_sdk::{
 use keylease_mock_token::{MockToken, MockTokenClient};
 
 use crate::events::{
-    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
+    ContractUpgraded, EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
+    LeaseCancellationWithdrawn, LeaseCancelled, LeaseCreated, LeaseRevoked, LeaseSettled,
     RegistryInitialized, ServiceRateUpdated, ServiceRegistered, ServiceStatusChanged,
     UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
 };
@@ -2603,3 +2604,351 @@ fn test_lease_ttl_ask_follows_a_lowered_network_max_entry_ttl() {
     );
     assert_eq!(ask, env.storage().max_ttl());
 }
+
+// ---------------------------------------------------------------------------
+// Early consumer cancellation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_early_cancel_with_provider_consent() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseCancellationRequested {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer: ctx.consumer.clone(),
+        },
+    );
+
+    // The request alone moves nothing.
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), RATE * 10);
+
+    // The provider consent reports 4 served calls; the other 6 are refunded.
+    env.ledger().set_timestamp(1_500);
+    ctx.registry
+        .approve_early_cancel(&ctx.provider, &lease_id, &4);
+
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 4);
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        FUNDING - RATE * 10 + RATE * 6
+    );
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+
+    let lease = ctx.registry.get_lease(&lease_id);
+    assert_eq!(lease.used_calls, 4);
+    assert!(lease.settled);
+    assert_eq!(ctx.registry.lease_status(&lease_id), LeaseStatus::Settled);
+    assert_eq!(ctx.registry.remaining_calls(&lease_id), 0);
+    assert_eq!(ctx.registry.locked_balance(&lease_id), 0);
+
+    // The lease is finished: it cannot be approved, settled or revoked again.
+    assert_eq!(
+        ctx.registry
+            .try_approve_early_cancel(&ctx.provider, &lease_id, &4),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &lease_id, &4),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+}
+
+#[test]
+fn test_early_cancel_conservation() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    // Zero calls served: the entire deposit comes back.
+    let unused_lease = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    ctx.registry
+        .request_early_cancel(&ctx.consumer, &unused_lease);
+    ctx.registry
+        .approve_early_cancel(&ctx.provider, &unused_lease, &0);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+
+    // Every call served: no refund, and the provider receives the full deposit.
+    let used_lease = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    ctx.registry
+        .request_early_cancel(&ctx.consumer, &used_lease);
+    ctx.registry
+        .approve_early_cancel(&ctx.provider, &used_lease, &10);
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 10);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - RATE * 10);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+}
+
+#[test]
+fn test_provider_can_refuse_early_cancel() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+    ctx.registry.reject_early_cancel(&ctx.provider, &lease_id);
+
+    // The request is gone, so consent can no longer release funds.
+    assert_eq!(
+        ctx.registry
+            .try_approve_early_cancel(&ctx.provider, &lease_id, &2),
+        Err(Ok(Error::CancellationNotRequested))
+    );
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), RATE * 10);
+
+    // The lease is untouched and still settles normally at expiry.
+    env.ledger().set_timestamp(4_601);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &3);
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 3);
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        FUNDING - RATE * 10 + RATE * 7
+    );
+}
+
+#[test]
+fn test_early_cancel_requires_consent_and_ownership() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let impostor = Address::generate(&env);
+
+    // Only the consumer may request cancellation.
+    assert_eq!(
+        ctx.registry.try_request_early_cancel(&impostor, &lease_id),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_request_early_cancel(&ctx.provider, &lease_id),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+
+    // One pending request at a time.
+    assert_eq!(
+        ctx.registry
+            .try_request_early_cancel(&ctx.consumer, &lease_id),
+        Err(Ok(Error::CancellationAlreadyRequested))
+    );
+
+    // Only the owning provider may approve or reject.
+    assert_eq!(
+        ctx.registry
+            .try_approve_early_cancel(&impostor, &lease_id, &1),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_approve_early_cancel(&ctx.consumer, &lease_id, &1),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry.try_reject_early_cancel(&impostor, &lease_id),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Approval without a request is rejected even for the real provider.
+    let other_lease = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    assert_eq!(
+        ctx.registry
+            .try_approve_early_cancel(&ctx.provider, &other_lease, &1),
+        Err(Ok(Error::CancellationNotRequested))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_reject_early_cancel(&ctx.provider, &other_lease),
+        Err(Ok(Error::CancellationNotRequested))
+    );
+}
+
+#[test]
+fn test_consumer_can_withdraw_early_cancel() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let impostor = Address::generate(&env);
+
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+
+    assert_eq!(
+        ctx.registry.try_withdraw_early_cancel(&impostor, &lease_id),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    ctx.registry.withdraw_early_cancel(&ctx.consumer, &lease_id);
+
+    assert_eq!(
+        ctx.registry
+            .try_withdraw_early_cancel(&ctx.consumer, &lease_id),
+        Err(Ok(Error::CancellationNotRequested))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_approve_early_cancel(&ctx.provider, &lease_id, &2),
+        Err(Ok(Error::CancellationNotRequested))
+    );
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), RATE * 10);
+}
+
+#[test]
+fn test_early_cancel_rejected_after_settlement() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    // The consumer asked early, then the provider settled partially instead.
+    env.ledger().set_timestamp(2_000);
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+    env.ledger().set_timestamp(4_601);
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &4);
+
+    assert_eq!(
+        ctx.registry
+            .try_request_early_cancel(&ctx.consumer, &lease_id),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_approve_early_cancel(&ctx.provider, &lease_id, &4),
+        Err(Ok(Error::LeaseAlreadySettled))
+    );
+
+    // Settlement cleared the pending request; nothing stale is left behind.
+    assert_eq!(
+        ctx.registry
+            .try_withdraw_early_cancel(&ctx.consumer, &lease_id),
+        Err(Ok(Error::CancellationNotRequested))
+    );
+}
+
+#[test]
+fn test_early_cancel_after_expiry_is_rejected() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    let expired_lease = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    env.ledger().set_timestamp(1_100);
+    assert_eq!(
+        ctx.registry
+            .try_request_early_cancel(&ctx.consumer, &expired_lease),
+        Err(Ok(Error::LeaseExpired))
+    );
+
+    // A request made before expiry can still be approved after the lease expires.
+    let active_lease = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    env.ledger().set_timestamp(1_199);
+    ctx.registry
+        .request_early_cancel(&ctx.consumer, &active_lease);
+    env.ledger().set_timestamp(1_200);
+    ctx.registry
+        .approve_early_cancel(&ctx.provider, &active_lease, &5);
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 5);
+}
+
+#[test]
+fn test_early_cancel_events() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseCancellationRequested {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer: ctx.consumer.clone(),
+        },
+    );
+
+    ctx.registry.reject_early_cancel(&ctx.provider, &lease_id);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseCancellationRejected {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            provider: ctx.provider.clone(),
+        },
+    );
+
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+    ctx.registry.withdraw_early_cancel(&ctx.consumer, &lease_id);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseCancellationWithdrawn {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer: ctx.consumer.clone(),
+        },
+    );
+
+    ctx.registry.request_early_cancel(&ctx.consumer, &lease_id);
+    ctx.registry
+        .approve_early_cancel(&ctx.provider, &lease_id, &6);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseCancelled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            provider: ctx.provider.clone(),
+            consumer: ctx.consumer.clone(),
+            verified_calls: 6,
+            payout: RATE * 6,
+            refund: RATE * 4,
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------

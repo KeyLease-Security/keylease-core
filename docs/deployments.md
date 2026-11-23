@@ -122,7 +122,8 @@ documented admin, and `escrow_token_set` / `service_registered` events must
 appear at the recorded deployment ledger.
 
 The deployed Wasm is reproducible from this tree — its hash matches
-`stellar contract info hash`:
+`stellar contract info hash`. CI also builds the release Wasm twice from clean
+targets and compares hashes, failing if they differ:
 
 ```bash
 cargo build --target wasm32v1-none --release --all

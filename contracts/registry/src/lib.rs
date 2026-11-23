@@ -24,6 +24,8 @@
 //!     |                            |    (escrow = rate * calls)     |
 //!     |                            |                                |
 //!     |-- settle_lease(used) ----->|  pay provider, refund rest --->|
+//!                                  |<-- request_early_cancel ------- |
+//!     |-- approve/reject --------->|  consent releases unused funds |
 //!     |                            |                                |
 //!                                  |  (if provider never settles)   |
 //!                                  |<-- revoke_expired_lease ------ |
@@ -74,9 +76,12 @@ mod test_wasm;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String};
 
+use crate::types::CancelRequest;
+
 pub use crate::errors::Error;
 pub use crate::events::{
-    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
+    ContractUpgraded, EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
+    LeaseCancellationWithdrawn, LeaseCancelled, LeaseCreated, LeaseRevoked, LeaseSettled,
     RegistryInitialized, ServiceAttestorSet, ServiceRateUpdated, ServiceRegistered,
     ServiceStatusChanged, UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
 };
@@ -652,6 +657,182 @@ impl KeyLeaseRegistry {
         Ok(lease_id)
     }
 
+    /// Request an early cancellation of an active lease. Requires consumer auth.
+    ///
+    /// The consumer is asking the provider to release the unused balance now
+    /// instead of waiting for expiry and the full grace window. The request
+    /// alone moves no funds and changes no balances; the provider decides by
+    /// calling [`Self::approve_early_cancel`] or [`Self::reject_early_cancel`].
+    ///
+    /// Only an unsettled, unexpired lease can be cancelled early, and a lease
+    /// can have at most one pending request. The consumer may withdraw the
+    /// request with [`Self::withdraw_early_cancel`].
+    pub fn request_early_cancel(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let lease = storage::get_lease(&env, lease_id)?;
+        if lease.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        if lease.settled {
+            return Err(Error::LeaseAlreadySettled);
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= lease.expires_at {
+            return Err(Error::LeaseExpired);
+        }
+        if storage::get_cancel_request(&env, lease_id).is_some() {
+            return Err(Error::CancellationAlreadyRequested);
+        }
+
+        storage::save_cancel_request(
+            &env,
+            &CancelRequest {
+                lease_id,
+                requested_at: now,
+            },
+        );
+
+        LeaseCancellationRequested {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Withdraw a pending early-cancellation request. Requires consumer auth.
+    pub fn withdraw_early_cancel(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let lease = storage::get_lease(&env, lease_id)?;
+        if lease.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        if storage::get_cancel_request(&env, lease_id).is_none() {
+            return Err(Error::CancellationNotRequested);
+        }
+
+        storage::remove_cancel_request(&env, lease.lease_id);
+
+        LeaseCancellationWithdrawn {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Decline a pending early-cancellation request. Requires the service
+    /// provider's auth; the lease stays active and unchanged.
+    pub fn reject_early_cancel(env: Env, provider: Address, lease_id: u64) -> Result<(), Error> {
+        provider.require_auth();
+
+        let lease = storage::get_lease(&env, lease_id)?;
+        require_lease_provider(&env, &lease, &provider)?;
+
+        if storage::get_cancel_request(&env, lease_id).is_none() {
+            return Err(Error::CancellationNotRequested);
+        }
+
+        storage::remove_cancel_request(&env, lease.lease_id);
+
+        LeaseCancellationRejected {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            provider,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Approve an early cancellation and release the refund immediately.
+    /// Requires the service provider's auth.
+    ///
+    /// The provider reports the `verified_calls` it actually served for the
+    /// lease. The payout is `verified_calls * rate_per_call` and the refund is
+    /// `locked_deposit - payout`, which is exactly the unused-call amount at the
+    /// stored rate. Both amounts are integers in the token's smallest unit, so
+    /// there is no rounding. The lease is settled in the same transaction, so it
+    /// cannot be settled or revoked again.
+    pub fn approve_early_cancel(
+        env: Env,
+        provider: Address,
+        lease_id: u64,
+        verified_calls: u32,
+    ) -> Result<(), Error> {
+        provider.require_auth();
+
+        let mut lease = storage::get_lease(&env, lease_id)?;
+        require_lease_provider(&env, &lease, &provider)?;
+        if lease.settled {
+            return Err(Error::LeaseAlreadySettled);
+        }
+        if storage::get_cancel_request(&env, lease_id).is_none() {
+            return Err(Error::CancellationNotRequested);
+        }
+        if verified_calls > lease.allocated_calls {
+            return Err(Error::InvalidCalls);
+        }
+
+        let service = storage::get_service(&env, lease.service_id)?;
+        let rate = service.rate_per_call;
+
+        // Refund is the unused-call value. `verified_calls <= allocated_calls`,
+        // so the subtraction cannot underflow, and the multiplication is
+        // checked like every other money path. Rate is a per-call integer, so
+        // no division or rounding is involved.
+        let unused_calls = lease
+            .allocated_calls
+            .checked_sub(verified_calls)
+            .ok_or(Error::Overflow)?;
+        let payout = rate
+            .checked_mul(verified_calls as i128)
+            .ok_or(Error::Overflow)?;
+        let refund = rate
+            .checked_mul(unused_calls as i128)
+            .ok_or(Error::Overflow)?;
+        if payout.checked_add(refund) != Some(lease.locked_deposit) {
+            return Err(Error::Overflow);
+        }
+
+        // checks-effects-interactions: settle the lease and clear the request
+        // before any token transfer.
+        lease.used_calls = verified_calls;
+        lease.settled = true;
+        storage::save_lease(&env, &lease);
+        storage::remove_cancel_request(&env, lease.lease_id);
+
+        let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
+        let client = token::Client::new(&env, &token_addr);
+        let contract = env.current_contract_address();
+        if payout > 0 {
+            client.transfer(&contract, &provider, &payout);
+        }
+        if refund > 0 {
+            client.transfer(&contract, &lease.consumer, &refund);
+        }
+
+        LeaseCancelled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            provider,
+            consumer: lease.consumer,
+            verified_calls,
+            payout,
+            refund,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     /// Settle a lease, paying the provider for `verified_calls` consumed calls
     /// and refunding the remainder to the consumer. Requires provider auth.
     ///
@@ -743,6 +924,8 @@ impl KeyLeaseRegistry {
         lease.used_calls = verified_calls;
         lease.settled = true;
         storage::save_lease(&env, &lease);
+        // A pending early-cancellation request is moot once the lease settles.
+        storage::remove_cancel_request(&env, lease.lease_id);
 
         let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
         let client = token::Client::new(&env, &token_addr);
@@ -804,6 +987,8 @@ impl KeyLeaseRegistry {
         // transfer so a re-entrant token cannot reclaim twice.
         lease.settled = true;
         storage::save_lease(&env, &lease);
+        // A pending early-cancellation request is moot once the lease is revoked.
+        storage::remove_cancel_request(&env, lease.lease_id);
 
         if refund > 0 {
             let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
@@ -1055,6 +1240,15 @@ impl KeyLeaseRegistry {
     pub fn is_paused(env: Env) -> bool {
         storage::is_paused(&env)
     }
+}
+
+/// Ensure `caller` is the provider that owns the lease's service.
+fn require_lease_provider(env: &Env, lease: &Lease, caller: &Address) -> Result<(), Error> {
+    let service = storage::get_service(env, lease.service_id)?;
+    if service.provider != *caller {
+        return Err(Error::Unauthorized);
+    }
+    Ok(())
 }
 
 /// Ensure `caller` matches the stored admin.

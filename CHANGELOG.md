@@ -19,6 +19,9 @@ version in [`Cargo.toml`](./Cargo.toml). Per-release notes live in
   maximum.
 - Shared `setup_with_service` test helper that returns a funded registry with
   one active service while leaving ledger time explicit in every test.
+- CI reproducibility check: the Wasm build job rebuilds the release Wasm twice
+  from clean targets, compares hashes, and prints the registry hash for
+  comparison with `docs/deployments.md`.
 
 ### Changed
 

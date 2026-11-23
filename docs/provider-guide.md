@@ -120,7 +120,36 @@ could not serve.
 | lease already settled | `LeaseAlreadySettled` |
 | you don't own the service | `Unauthorized` |
 
-## 5. Accounting
+## 5. Early cancellation requests
+
+A consumer who stops using the service early can ask you to release the unused
+balance without waiting for expiry + 24 hours. The request moves no funds:
+
+```bash
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  --send=yes -- approve_early_cancel \
+     --provider $PROVIDER --lease_id 1 --verified_calls 320
+```
+
+Approving reports the calls you actually served. You receive
+`verified_calls × rate_per_call`, the consumer is refunded
+`rate_per_call × (allocated_calls − verified_calls)`, and the lease ends in the
+same transaction. There is no rounding: the rate is a per-call integer, so the
+refund is the exact value of whole unused calls.
+
+Approval is valid even if the lease has passed `expires_at`, as long as the
+consumer requested it before expiry. If you decline, reject the request instead;
+the lease is untouched and settles normally later:
+
+```bash
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  --send=yes -- reject_early_cancel --provider $PROVIDER --lease_id 1
+```
+
+The consumer may withdraw the request at any time. A lease that is already
+settled cannot be cancelled early.
+
+## 6. Accounting
 
 `settle_lease` pays you from escrow. Nothing else does. The registry never holds
 funds on your behalf after settlement, and there is no yield or custody to
@@ -128,8 +157,12 @@ manage.
 
 - **Revenue recognised:** `verified_calls × rate_per_call` per settlement,
   published in the `lease_settled` event.
-- **Unused consumer balance:** refunded by you at settlement, or by the consumer
-  via `revoke_expired_lease` after the 24h grace window.
+- **Unused consumer balance:** refunded by you at settlement or on an approved
+  early cancellation, or by the consumer via `revoke_expired_lease` after the
+  24h grace window.
+- **Early cancellation:** `lease_cancelled` publishes `verified_calls`, `payout`
+  and `refund`. It is a consented early settlement; the same conservation rule
+  holds (`payout + refund == locked_deposit`).
 - **Disputes:** there is no dispute mechanism. The consumer's protection is the
   refund path; yours is the grace window. Report honestly.
 

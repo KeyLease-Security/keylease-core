@@ -462,6 +462,95 @@ The deposit is bounded twice, and the two rejections mean different things.
 bound is checked after the multiplication and before the lease id is allocated
 or the token is called, so a rejected lease moves nothing and consumes no id.
 
+### `request_early_cancel`
+
+```rust
+pub fn request_early_cancel(
+    env: Env,
+    consumer: Address,
+    lease_id: u64,
+) -> Result<(), Error>
+```
+
+Ask the provider to end an active lease early and release its unused balance.
+
+- **Caller / auth:** the lease's `consumer` must authorize.
+- **Trigger:** the consumer stops using a service and wants funds back before
+  expiry.
+- **Preconditions:** the lease exists, `lease.consumer == consumer`,
+  `!settled`, `now < expires_at`, and no request is pending.
+- **Effects:** stores a `CancelRequest(lease_id)` entry. No balances change.
+- **Events:** `lease_cancellation_requested { lease_id, consumer }`.
+- **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
+  `LeaseExpired`, `CancellationAlreadyRequested`.
+- **Notes:** the lease stays fully usable while the request is pending. The
+  provider approves or rejects it; the consumer may withdraw it.
+
+### `withdraw_early_cancel`
+
+```rust
+pub fn withdraw_early_cancel(
+    env: Env,
+    consumer: Address,
+    lease_id: u64,
+) -> Result<(), Error>
+```
+
+Withdraw a pending early-cancellation request.
+
+- **Caller / auth:** the lease's `consumer` must authorize.
+- **Preconditions:** a request is pending.
+- **Effects:** removes the request. The lease is untouched.
+- **Events:** `lease_cancellation_withdrawn { lease_id, consumer }`.
+- **Errors:** `LeaseNotFound`, `Unauthorized`, `CancellationNotRequested`.
+
+### `reject_early_cancel`
+
+```rust
+pub fn reject_early_cancel(
+    env: Env,
+    provider: Address,
+    lease_id: u64,
+) -> Result<(), Error>
+```
+
+Decline a pending early-cancellation request.
+
+- **Caller / auth:** `provider`, and it must own the lease's service.
+- **Preconditions:** a request is pending.
+- **Effects:** removes the request. The lease keeps running unchanged.
+- **Events:** `lease_cancellation_rejected { lease_id, provider }`.
+- **Errors:** `LeaseNotFound`, `Unauthorized`, `CancellationNotRequested`.
+
+### `approve_early_cancel`
+
+```rust
+pub fn approve_early_cancel(
+    env: Env,
+    provider: Address,
+    lease_id: u64,
+    verified_calls: u32,
+) -> Result<(), Error>
+```
+
+Consent to an early cancellation, pay for served calls and refund the unused
+balance immediately.
+
+- **Caller / auth:** `provider`, and it must own the lease's service.
+- **Preconditions:** a request is pending, the lease is not settled, and
+  `verified_calls ≤ allocated_calls`.
+- **Effects:** `payout = rate_per_call × verified_calls`, `refund = rate_per_call
+  × (allocated_calls − verified_calls)`, both checked; `payout + refund` must
+  equal `locked_deposit`. Persists `used_calls`, `settled = true`, removes the
+  request, then transfers the payout and refund.
+- **Events:** `lease_cancelled { lease_id, provider, consumer, verified_calls,
+  payout, refund }`.
+- **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
+  `CancellationNotRequested`, `InvalidCalls`, `TokenNotSet`, `Overflow`.
+- **Notes:** there is no rounding: the rate is a per-call integer and the refund
+  is the exact value of whole unused calls. Approval is allowed after expiry when
+  the request was filed before it. The lease cannot be settled or revoked again.
+
 ### `settle_lease`
 
 ```rust
@@ -680,6 +769,10 @@ because topics are positional and indexers filter on them.
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
 | `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_cancellation_requested` | `lease_id` | `schema_version`, `consumer` |
+| `lease_cancellation_rejected` | `lease_id` | `schema_version`, `provider` |
+| `lease_cancellation_withdrawn` | `lease_id` | `schema_version`, `consumer` |
+| `lease_cancelled` | `lease_id` | `schema_version`, `provider`, `consumer`, `verified_calls`, `payout`, `refund` |
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
@@ -734,6 +827,11 @@ pub struct ProviderServicePage {
     /// `true` once the index is exhausted.
     pub done: bool,
 }
+
+pub struct CancelRequest {
+    pub lease_id: u64,
+    pub requested_at: u64,
+}
 ```
 
 ## Storage layout
@@ -749,6 +847,7 @@ pub enum DataKey {
     ServiceAttestor(u64),      // persistent: optional attestor key per service
     PendingUpgrade,            // instance (appended)
     ProviderServices(Address), // persistent: service ids, oldest first
+    CancelRequest(u64),        // persistent: pending early-cancellation request
 }
 ```
 
@@ -891,6 +990,9 @@ never reused.
 | 22 | `NoPendingUpgrade` | `cancel_upgrade`/`execute_upgrade` with no proposal |
 | 23 | `UpgradeDelayNotElapsed` | `execute_upgrade` before `execute_after` |
 | 24 | `InvalidLimit` | page size outside `1..=MAX_PAGE_SIZE` |
+| 25 | `CancellationNotRequested` | no pending early-cancellation request |
+| 26 | `CancellationAlreadyRequested` | a request is already pending |
+| 27 | `LeaseExpired` | early cancellation requires `now < expires_at` |
 
 ## Invoking with the Stellar CLI
 
@@ -924,6 +1026,12 @@ stellar contract invoke --id $REGISTRY --source-account consumer --network testn
      --service_id 1 \
      --requested_calls 500 \
      --duration_secs 3600
+
+# early cancellation: consumer asks, provider consents
+stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
+  -- request_early_cancel --consumer $CONSUMER --lease_id 1
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  -- approve_early_cancel --provider $PROVIDER --lease_id 1 --verified_calls 320
 
 # settle
 stellar contract invoke --id $REGISTRY --source-account provider --network testnet \

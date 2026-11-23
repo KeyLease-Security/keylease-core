@@ -143,3 +143,17 @@ pub struct UsageAttestation {
     /// Ed25519 signature over [`crate::usage_attestation_message`].
     pub signature: BytesN<64>,
 }
+
+/// A consumer's request to end a lease early with the provider's consent.
+///
+/// The request carries no refund amount: the provider approves it by reporting
+/// the calls actually served, and the contract derives the refund from the
+/// remaining calls at the stored rate.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelRequest {
+    /// Lease the consumer wants to end early.
+    pub lease_id: u64,
+    /// Ledger timestamp at which the consumer requested cancellation.
+    pub requested_at: u64,
+}

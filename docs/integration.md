@@ -50,7 +50,10 @@ A provider should implement these steps, in order, and fail closed at every one:
 6. **Serve the request**, adding the remaining-calls header if you want the
    client to see its budget.
 7. **Settle** with `settle_lease` when the lease expires or when the allotment is
-   fully consumed.
+   fully consumed. If the consumer asks to end the lease early
+   (`request_early_cancel`), decide with `approve_early_cancel` (report served
+   calls and release the unused balance) or `reject_early_cancel` (leave the
+   lease running).
 
 Step 5's local counter is an optimisation, not the source of truth. On-chain
 `allocated_calls × rate_per_call` bounds what the provider can ever be paid, so a
@@ -209,6 +212,17 @@ marked `#[topic]` in `contracts/registry/src/events.rs` follow it, and every
 remaining field is carried in the payload map. Topics are what a subscriber
 filters on, so which side of that line a field falls on decides whether you can
 act on it without decoding.
+
+| Event | Use |
+| --- | --- |
+| `lease_created` | Build a work queue of leases to settle; alert on new demand. |
+| `lease_cancellation_requested` | A consumer wants to exit early; route the decision to the provider. |
+| `lease_cancellation_rejected` / `lease_cancellation_withdrawn` | No cancellation: the lease continues and must still be settled. |
+| `lease_cancelled` | Early exit paid out; reconcile `payout` and `refund` like `lease_settled`. |
+| `lease_settled` | Reconcile payouts and refunds; close the lease in your ledger. |
+| `lease_revoked` | A consumer reclaimed an expired lease; the provider earned nothing. |
+| `service_registered` / `service_status_changed` | Keep a service catalogue in sync. |
+| `contract_upgraded` | Detect a new Wasm version (`version()` also changes). |
 
 ### Topics, payloads and filters
 

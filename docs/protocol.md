@@ -112,6 +112,36 @@ The second clause is the "consumer got what it paid for" fast path: if every
 allocated call was consumed, the provider should not have to wait for expiry to
 be paid.
 
+### Early cancellation with provider consent
+
+A consumer that stops using a service does not have to wait for expiry plus the
+24-hour grace window. They can ask the provider to end the lease early:
+
+1. `request_early_cancel(consumer, lease_id)` — consumer auth; requires an
+   unsettled, unexpired lease and no pending request. Moves no funds.
+2. The provider either `reject_early_cancel(provider, lease_id)` (request
+   cleared, lease unchanged) or `approve_early_cancel(provider, lease_id,
+   verified_calls)` (report served calls and release funds immediately).
+3. The consumer may `withdraw_early_cancel(consumer, lease_id)` at any time.
+
+Approval is a consented early settlement. The refund is defined exactly:
+
+```text
+payout = rate_per_call × verified_calls
+unused_calls = allocated_calls − verified_calls
+refund = rate_per_call × unused_calls
+```
+
+Every step uses checked arithmetic and `payout + refund` must equal
+`locked_deposit`. The rate is an integer price per whole call, so there is no
+division and **no rounding**: the refund is the exact value of the unused calls.
+
+Approval settles the lease, emits `lease_cancelled { lease_id, provider,
+consumer, verified_calls, payout, refund }`, and removes the request. The lease
+can no longer be settled or revoked. A request cannot be filed after expiry — the
+post-expiry revoke path remains the fallback when a provider is unresponsive —
+but a request filed before expiry may be approved after it.
+
 ### The 24-hour grace window
 
 After expiry there is a 24-hour window (`SETTLE_GRACE_PERIOD_SECS = 86_400`)
@@ -206,6 +236,10 @@ spans a contract upgrade stays decodable (see
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
 | `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_cancellation_requested` | `lease_id` | `schema_version`, `consumer` |
+| `lease_cancellation_rejected` | `lease_id` | `schema_version`, `provider` |
+| `lease_cancellation_withdrawn` | `lease_id` | `schema_version`, `consumer` |
+| `lease_cancelled` | `lease_id` | `schema_version`, `provider`, `consumer`, `verified_calls`, `payout`, `refund` |
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
@@ -332,9 +366,12 @@ These must hold for every reachable state. They are asserted in tests.
 3. **Bounded claim.** A provider can never receive more than
    `allocated_calls × rate_per_call`, and only for a service it owns.
 4. **Guaranteed exit.** Every lease has a consumer path to a full refund.
-5. **Checked math.** Deposit, payout and timestamp arithmetic abort on overflow
-   rather than truncating.
-6. **Claimable storage.** A lease's persistent entry outlives its term plus the
+5. **Checked math.** Deposit, payout, refund and timestamp arithmetic abort on
+   overflow rather than truncating.
+6. **Consented early exit.** An early cancellation releases `rate × served_calls`
+   to the provider and `rate × unused_calls` to the consumer, with
+   `payout + refund == locked_deposit`, and only after the provider approves.
+7. **Claimable storage.** A lease's persistent entry outlives its term plus the
    grace window (`MAX_LEASE_DURATION_SECS = 30 days`).
 
 ## Storage and lifetime
@@ -346,6 +383,7 @@ These must hold for every reachable state. They are asserted in tests.
 | `Service(u64)` | persistent | TTL extended on save and by `bump_service` |
 | `Lease(u64)` | persistent | TTL extended on save and by `bump_lease`, never by a read |
 | `ProviderServices(Address)` | persistent | service-id index per provider; extended by `save_service`, never by a read |
+| `CancelRequest(u64)` | persistent | pending early-cancellation request; cleared on withdraw/reject/approve |
 
 `LEDGER_BUMP_THRESHOLD = 17_280` ledgers (~1 day at 5s ledgers) and
 `LEDGER_BUMP_EXTEND = 518_400` ledgers (~30 days). For leases, `save_lease` and

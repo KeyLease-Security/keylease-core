@@ -103,6 +103,27 @@ jobs:
       # Kept in this job so the required check name does not change.
       - name: Check Wasm is built without std
         run: ./scripts/check-no-std.sh --no-build
+      - name: Verify reproducible Wasm build
+        run: |
+          set -euo pipefail
+          first_registry="$(sha256sum target/wasm32v1-none/release/keylease_registry.wasm | awk '{print $1}')"
+          first_mock="$(sha256sum target/wasm32v1-none/release/keylease_mock_token.wasm | awk '{print $1}')"
+          echo "first build  keylease_registry.wasm:    $first_registry"
+          echo "first build  keylease_mock_token.wasm: $first_mock"
+          cargo clean --target wasm32v1-none --release
+          cargo build --target wasm32v1-none --release --all
+          second_registry="$(sha256sum target/wasm32v1-none/release/keylease_registry.wasm | awk '{print $1}')"
+          second_mock="$(sha256sum target/wasm32v1-none/release/keylease_mock_token.wasm | awk '{print $1}')"
+          echo "second build keylease_registry.wasm:    $second_registry"
+          echo "second build keylease_mock_token.wasm: $second_mock"
+          if [ "$first_registry" != "$second_registry" ] || [ "$first_mock" != "$second_mock" ]; then
+            echo "::error::Release Wasm build is not reproducible"
+            echo "keylease_registry.wasm:    first=$first_registry second=$second_registry"
+            echo "keylease_mock_token.wasm:  first=$first_mock second=$second_mock"
+            exit 1
+          fi
+          echo "Reproducible Wasm hash (keylease_registry.wasm): $first_registry"
+          echo "Compare with the Wasm hash recorded in docs/deployments.md."
 
   spellcheck:
     name: Spell Check
