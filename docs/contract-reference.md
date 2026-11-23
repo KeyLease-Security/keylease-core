@@ -303,6 +303,45 @@ decision, and it is two edits — the metadata entry is written as a literal
 `val = "1"`, and no test compares it to the constant, so bumping one without the
 other silently publishes a lie about the stream.
 
+## Rate units and stroop conversion
+
+`rate_per_call` is an `i128` counted in the escrow token's **smallest unit**
+(its base unit), never in whole tokens and never implicitly in XLM. The same
+holds for every other amount the contract stores or emits: `locked_deposit`,
+payouts, refunds, `MAX_RATE_PER_CALL` and `MAX_LEASE_DEPOSIT`.
+
+| Escrow token | Base unit | Decimals | `1` base unit equals |
+| --- | --- | --- | --- |
+| Native SAC (XLM) | stroop | 7 | `0.0000001 XLM` (`1 XLM = 10,000,000 stroops`) |
+| Custom SEP-41 token | that token's smallest unit | whatever the token's `decimals()` returns | `10^-decimals` of one token |
+
+The registry never calls `decimals()`; it moves integers. Converting to a
+human-readable price is the reader's job:
+
+```text
+human price = rate_per_call / 10^decimals
+```
+
+### Worked conversion: the demo rate `1000000`
+
+The Testnet demo service in [Deployments](deployments.md) charges
+`rate_per_call = 1000000` on the native SAC:
+
+| Quantity | Base units (stroops) | XLM |
+| --- | --- | --- |
+| One call | `1,000,000` | `1,000,000 / 10^7 = 0.1 XLM` |
+| A 500-call lease deposit | `1,000,000 × 500 = 500,000,000` | `50 XLM` |
+| Payout for 120 verified calls | `120,000,000` | `12 XLM` |
+| Refund of the other 380 calls | `380,000,000` | `38 XLM` |
+
+!!! warning "Decimals change the price, not the number"
+    The same integer means very different prices on different tokens. A
+    `rate_per_call` of `1000000` is `0.1` per call on a 7-decimal token (XLM,
+    most classic SACs), `1.0` per call on a 6-decimal token (USDC-style), and
+    `0.000000000001` per call on an 18-decimal token. Always read the configured
+    token with `get_token` and its `decimals()` before quoting or paying a rate,
+    and re-check after an admin `set_token`.
+
 ---
 
 ## Administration
@@ -419,7 +458,8 @@ Publish a new leasable service.
 - **Caller / auth:** `provider` must authorize.
 - **Trigger:** when a provider lists an API or RPC endpoint.
 - **Parameters:**
-  - `rate_per_call` — price per metered call in token stroops; must satisfy
+  - `rate_per_call` — price per metered call in escrow-token base units (stroops on the native SAC; see
+    [Rate units](#rate-units-and-stroop-conversion)); must satisfy
     `0 < rate_per_call ≤ MAX_RATE_PER_CALL`.
   - `endpoint_hash` — 32-byte commitment to the off-chain descriptor.
 - **Returns:** the new `service_id` (monotonic, starts at `1`).

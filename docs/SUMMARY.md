@@ -24,6 +24,7 @@
 - [Deployment](deployment.md)
 - [Troubleshooting](troubleshooting.md)
 - [Protocol FAQ](faq.md)
+- [Glossary](glossary.md)
 
 ## Project
 

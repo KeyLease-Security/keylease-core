@@ -70,6 +70,15 @@ emits `lease_created { lease_id, service_id, consumer, allocated_calls,
 expires_at, locked_deposit, rate_per_call }`; keep the transaction hash as
 proof of purchase.
 
+**Read amounts in base units.** `rate_per_call` and `locked_deposit` are
+integers in the escrow token's smallest unit, not whole tokens. On the native
+SAC that unit is the stroop (`1 XLM = 10,000,000 stroops`), so the demo rate
+`1000000` is `0.1 XLM` per call and the 500-call lease above escrows
+`500,000,000` stroops = `50 XLM`. On a custom SEP-41 token divide by
+`10^decimals` of *that* token instead: the same `1000000` is `1.0` per call on a
+6-decimal token. Check `get_token` and the token's `decimals()` before you pay.
+See [Rate units and stroop conversion](contract-reference.md#rate-units-and-stroop-conversion).
+
 **Choose your numbers deliberately.** If your lease expires while you still have
 unused calls, those calls are not usable — `remaining_calls` drops to `0` at
 `expires_at`. The maximum duration is 30 days (`MAX_LEASE_DURATION_SECS`).

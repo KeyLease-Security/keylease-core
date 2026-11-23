@@ -27,6 +27,7 @@ the Stellar ledger holds the truth about every lease.
 | deploy with the Stellar CLI | [Deployment](deployment.md) |
 | fix a call that failed | [Troubleshooting](troubleshooting.md) |
 | understand the trust assumptions | [Security model](security.md) |
+| look up a term such as lease, grace window or stroop | [Glossary](glossary.md) |
 
 ## The Stellar loop
 

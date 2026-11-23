@@ -3799,3 +3799,139 @@ fn test_error_codes_are_contiguous_with_no_gap_or_insertion() {
         "code {next} decodes: append the new variant to ERROR_ABI and the docs table"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Failure atomicity & value conservation (#43, #44)
+// ---------------------------------------------------------------------------
+
+/// `create_lease` resolves the escrow token before `next_lease_id`, so a
+/// missing token must fail without allocating an id or leaving a readable
+/// draft lease behind.
+#[test]
+fn test_missing_token_leaves_no_draft_lease() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let consumer = Address::generate(&env);
+
+    let registry_id = env.register(KeyLeaseRegistry, ());
+    let registry = KeyLeaseRegistryClient::new(&env, &registry_id);
+    registry.init(&admin);
+    // Note: no set_token call.
+    let service_id = registry.register_service(&provider, &RATE, &endpoint_hash(&env));
+
+    let count_before = registry.lease_count();
+    assert_eq!(
+        registry.try_create_lease(&consumer, &service_id, &10, &3_600),
+        Err(Ok(Error::TokenNotSet))
+    );
+
+    // No id was consumed and nothing is readable under the id it would have had.
+    assert_eq!(registry.lease_count(), count_before);
+    assert_eq!(
+        registry.try_get_lease(&(count_before + 1)),
+        Err(Ok(Error::LeaseNotFound))
+    );
+    assert_eq!(
+        registry.try_lease_status(&(count_before + 1)),
+        Err(Ok(Error::LeaseNotFound))
+    );
+
+    // Once the token is configured, the first real lease takes that same id.
+    let token_id = env.register(MockToken, ());
+    let token = MockTokenClient::new(&env, &token_id);
+    token.init(&admin);
+    token.mint(&consumer, &FUNDING);
+    registry.set_token(&admin, &token_id);
+
+    let lease_id = registry.create_lease(&consumer, &service_id, &10, &3_600);
+    assert_eq!(lease_id, count_before + 1);
+    assert_eq!(registry.lease_count(), count_before + 1);
+}
+
+/// Across a mixed batch (one settled, one revoked, one still active) every
+/// stroop deposited is accounted for exactly once: released deposits equal
+/// payouts plus refunds, and the contract holds precisely the live escrow.
+#[test]
+fn test_value_is_conserved_across_a_mixed_batch() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+
+    // Three services at different rates, three leases with different call counts.
+    let rate_a: i128 = 100;
+    let rate_b: i128 = 250;
+    let rate_c: i128 = 7;
+    let svc_a = ctx
+        .registry
+        .register_service(&ctx.provider, &rate_a, &endpoint_hash(&env));
+    let svc_b = ctx
+        .registry
+        .register_service(&ctx.provider, &rate_b, &endpoint_hash(&env));
+    let svc_c = ctx
+        .registry
+        .register_service(&ctx.provider, &rate_c, &endpoint_hash(&env));
+
+    let calls_a: u32 = 10;
+    let calls_b: u32 = 20;
+    let calls_c: u32 = 30;
+    let lease_a = ctx
+        .registry
+        .create_lease(&ctx.consumer, &svc_a, &calls_a, &100);
+    let lease_b = ctx
+        .registry
+        .create_lease(&ctx.consumer, &svc_b, &calls_b, &100);
+    let lease_c = ctx
+        .registry
+        .create_lease(&ctx.consumer, &svc_c, &calls_c, &1_000_000);
+
+    let deposit_a = rate_a * i128::from(calls_a);
+    let deposit_b = rate_b * i128::from(calls_b);
+    let deposit_c = rate_c * i128::from(calls_c);
+    let total_deposits = deposit_a + deposit_b + deposit_c;
+
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), total_deposits);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING - total_deposits);
+
+    // Lease A: partially used, settled after expiry inside the grace window.
+    env.ledger().set_timestamp(1_100 + 10);
+    let used_a: u32 = 4;
+    ctx.registry.settle_lease(&ctx.provider, &lease_a, &used_a);
+    let payout_a = rate_a * i128::from(used_a);
+    let refund_a = deposit_a - payout_a;
+
+    // Lease B: never settled, revoked once the grace window has elapsed.
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_b);
+    let refund_b = deposit_b;
+
+    // Lease C stays active.
+    assert_eq!(ctx.registry.lease_status(&lease_a), LeaseStatus::Settled);
+    assert_eq!(ctx.registry.lease_status(&lease_b), LeaseStatus::Revoked);
+    assert_eq!(ctx.registry.lease_status(&lease_c), LeaseStatus::Active);
+
+    let payouts = ctx.token.balance(&ctx.provider);
+    let refunds = ctx.token.balance(&ctx.consumer) - (FUNDING - total_deposits);
+    assert_eq!(payouts, payout_a);
+    assert_eq!(refunds, refund_a + refund_b);
+
+    // Released deposits are paid out or refunded, never both, never lost.
+    assert_eq!(payouts + refunds, deposit_a + deposit_b);
+
+    // The contract holds exactly the escrow still locked by the active lease.
+    assert_eq!(ctx.registry.locked_balance(&lease_a), 0);
+    assert_eq!(ctx.registry.locked_balance(&lease_b), 0);
+    assert_eq!(ctx.registry.locked_balance(&lease_c), deposit_c);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), deposit_c);
+
+    // Global conservation: nothing minted or burned along the way.
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer)
+            + ctx.token.balance(&ctx.provider)
+            + ctx.token.balance(&ctx.registry_id()),
+        FUNDING
+    );
+}
