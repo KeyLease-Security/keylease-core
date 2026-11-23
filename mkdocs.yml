@@ -60,6 +60,7 @@ nav:
   - Overview:
       - Introduction: introduction.md
       - Architecture: architecture.md
+      - Glossary: glossary.md
   - Protocol:
       - How the protocol works: protocol.md
       - Contract reference: contract-reference.md

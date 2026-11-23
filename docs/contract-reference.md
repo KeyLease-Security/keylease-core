@@ -21,6 +21,67 @@ token (checks-effects-interactions).
 
 ---
 
+## Rate units and stroops
+
+`rate_per_call`, `locked_deposit`, `payout` and `refund` are `i128` amounts in
+the escrow token's **smallest unit** — base units, never whole tokens and never
+XLM. The contract does not convert, scale or round: it multiplies and adds
+integers. A lease therefore locks `rate_per_call × allocated_calls` base units,
+and reading that integer as XLM is the most common integration mistake.
+
+### Native SAC (XLM)
+
+The native Stellar Asset Contract fixes the asset at 7 decimals, so one base
+unit is one stroop:
+
+```text
+1 XLM    = 10,000,000 stroops
+1 stroop = 0.0000001 XLM
+```
+
+The demo service on Testnet is registered at `rate_per_call = 1_000_000`. The
+worked conversion is:
+
+```text
+rate_per_call = 1,000,000 stroops
+             = 1,000,000 / 10,000,000 XLM
+             = 0.1 XLM per call
+
+500 calls -> locked_deposit = 1,000,000 × 500
+                            = 500,000,000 stroops
+                            = 50 XLM
+```
+
+Those are the numbers in
+[How the protocol works — Worked economics](protocol.md#worked-economics);
+[Deployments](deployments.md) records the same `1000000` rate on the live
+Testnet service.
+
+### Custom SEP-41 tokens
+
+Any SEP-41 token can be configured with `set_token`. Its `decimals()` sets the
+scale, and the registry never reads it: the same integer `rate_per_call` means a
+different human price per token.
+
+| Token decimals | `rate_per_call = 1,000,000` means |
+| --- | --- |
+| 7 — native XLM, classic wrapped assets | 0.1 token per call |
+| 6 — USDC-style tokens | 1.0 token per call |
+| 18 — EVM-style tokens | 0.000000000001 token per call |
+
+Convert with `human_amount = base_units / 10^decimals`. Read `decimals()` from
+the token contract, or the issuer's documentation, before pricing a lease: a
+deployment that assumes 7 decimals for a 6-decimal token overcharges by 10x, and
+one that assumes 7 for an 18-decimal token undercharges by 10^11. The demo rate
+`1000000` is 0.1 XLM only because the native asset has 7 decimals.
+
+The two amount caps, [`MAX_RATE_PER_CALL`](#constants) and
+[`MAX_LEASE_DEPOSIT`](#constants), are also denominated in base units, so a
+token with more decimals has a lower real-world ceiling. The escrow token is
+therefore part of the deployment's pricing decision, not just its plumbing.
+
+---
+
 ## Constants
 
 Nine values decide how much money a lease may lock, how much a service may
@@ -419,8 +480,10 @@ Publish a new leasable service.
 - **Caller / auth:** `provider` must authorize.
 - **Trigger:** when a provider lists an API or RPC endpoint.
 - **Parameters:**
-  - `rate_per_call` — price per metered call in token stroops; must satisfy
-    `0 < rate_per_call ≤ MAX_RATE_PER_CALL`.
+  - `rate_per_call` — price per metered call in the escrow token's smallest
+    unit (stroops for the native SAC); must satisfy
+    `0 < rate_per_call ≤ MAX_RATE_PER_CALL`. See
+    [Rate units and stroops](#rate-units-and-stroops).
   - `endpoint_hash` — 32-byte commitment to the off-chain descriptor.
 - **Returns:** the new `service_id` (monotonic, starts at `1`).
 - **State:** writes `Service(service_id)` and appends it to
@@ -483,7 +546,9 @@ Lock a deposit and mint a time-bound lease.
   MAX_LEASE_DURATION_SECS`, `rate_per_call × requested_calls ≤
   MAX_LEASE_DEPOSIT`, the service exists and `is_active`, and `Token` is
   set.
-- **Effects:** `transfer(consumer → contract, rate_per_call × requested_calls)`.
+- **Effects:** `transfer(consumer → contract, rate_per_call × requested_calls)`,
+  all in the escrow token's smallest unit (see
+  [Rate units and stroops](#rate-units-and-stroops)).
 - **Returns:** the new `lease_id` (monotonic, starts at `1`).
 - **State:** writes `Lease(lease_id)` with `expires_at = ledger.timestamp() +
   duration_secs` and a TTL covering the term plus grace; increments `LeaseCount`.

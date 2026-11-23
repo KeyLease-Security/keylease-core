@@ -26,6 +26,27 @@ Returns the `provider`, `rate_per_call`, `is_active` and `endpoint_hash`. Confir
 the `endpoint_hash` matches the endpoint descriptor the provider published
 off-chain before you escrow anything.
 
+### Rate units: base units, not XLM
+
+`rate_per_call` is an integer in the escrow token's **smallest unit**. It is not
+a whole-token amount and not necessarily XLM. The registry never converts it, so
+the human-readable price depends entirely on the token's decimals.
+
+For the native SAC, XLM has 7 decimals: `1 XLM = 10,000,000 stroops`. The demo
+service's `rate_per_call = 1_000_000` therefore means:
+
+```text
+1,000,000 stroops / 10,000,000 stroops per XLM = 0.1 XLM per call
+500 calls -> 1,000,000 × 500 = 500,000,000 stroops = 50 XLM
+```
+
+For a custom SEP-41 token, use its `decimals()`: the same `1,000,000` is 1.0
+token at 6 decimals and 0.000000000001 token at 18 decimals. Check the token's
+decimals before you create the lease — assuming 7 when the token has 6 makes
+this lease ten times more expensive than you expect. See
+[Rate units and stroops](contract-reference.md#rate-units-and-stroops) for the
+conversion table.
+
 ## 2. Fund your account
 
 Any SEP-41 token the registry is configured with can be escrowed. On Testnet the
