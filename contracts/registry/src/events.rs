@@ -172,6 +172,27 @@ pub struct LeaseCreated {
     pub rate_per_call: i128,
 }
 
+/// Emitted in addition to `lease_created` when a delegate minted the lease for
+/// a consumer.
+///
+/// `lease_created` keeps its existing shape so indexers still see one event for
+/// every lease; this one records only who submitted it. The delegate never
+/// holds a claim on the lease: the consumer's balance funded the deposit and the
+/// consumer owns every later refund.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseDelegated {
+    /// Lease created on behalf of `consumer`.
+    #[topic]
+    pub lease_id: u64,
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Address that co-signed the creation and paid the transaction fee.
+    pub delegate: Address,
+    /// Address whose balance was debited and that owns the refund path.
+    pub consumer: Address,
+}
+
 /// Emitted when a consumer asks to end a lease early.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

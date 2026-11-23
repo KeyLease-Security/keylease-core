@@ -36,10 +36,11 @@ cargo build --target wasm32v1-none --release --all
 ```
 
 CI also runs a cargo-deny dependency policy check (`deny.toml`), a shellcheck
-pass over every tracked shell script, and a ClamAV malware scan over the
-checkout and the built Wasm artifacts. CI job names are `Format`, `Shellcheck`,
-`Clippy`, `Test`, `Build (wasm32v1-none)`, `Dependency Policy` and
-`Malware Scan` — these are the required status checks in branch protection.
+pass over every tracked shell script, a bats suite over the same scripts, and a
+ClamAV malware scan over the checkout and the built Wasm artifacts. CI job names
+are `Format`, `Shellcheck`, `Shell Tests`, `Clippy`, `Test`,
+`Build (wasm32v1-none)`, `Dependency Policy` and `Malware Scan` — these are the
+required status checks in branch protection.
 
 The shell pass is not one of the four cargo commands, so run it separately:
 
@@ -50,21 +51,36 @@ git ls-files -z '*.sh' | xargs -0 shellcheck
 It uses shellcheck's default severity, which includes style notes, and fails
 outright when no tracked script matches.
 
+The script behaviour itself is covered by bats in `tests/`. The suite stubs
+`gh`, `stellar`, `cargo` and `rustup` on `PATH` (from `tests/stubs`), so it
+needs no network, credentials or Stellar toolchain:
+
+```bash
+bats tests
+```
+
+It covers argument parsing, the mainnet guard, `--dry-run` plans and the
+"CLI not found" branches of `scripts/deploy-testnet.sh`,
+`scripts/create-issues.sh`, `scripts/setup-repo.sh` and
+`scripts/sandbox-local.sh`.
+
 ## Project layout
 
 | Path | Purpose |
 | --- | --- |
 | `contracts/registry/src/lib.rs` | Entry points, `contractmeta!`, upgrade, protocol lifecycle. |
 | `contracts/registry/src/events.rs` | Typed `#[contractevent]` payloads. |
-| `contracts/registry/src/types.rs` | `Service`, `Lease`, `LeaseStatus`. |
+| `contracts/registry/src/types.rs` | `Service`, `Lease`, `ServiceStats`, `LeaseStatus`. |
 | `contracts/registry/src/storage.rs` | `DataKey` layout, TTL policy, accessors. |
 | `contracts/registry/src/errors.rs` | Stable `Error` codes (never reuse a number). |
 | `contracts/registry/src/test.rs` | Lifecycle, SAC, events, upgrade and re-entrancy tests. |
 | `contracts/mock_token/` | Test/sandbox SEP-41 token. |
 | `scripts/deploy-testnet.sh` | Sequential testnet deploy and upgrade. |
+| `scripts/sandbox-local.sh` | Local-network sandbox: deploy, write `.env.sandbox`, tear down. |
 | `scripts/check-no-std.sh` | Checks the release Wasm is built without `std` and crates forbid `unsafe`. |
 | `scripts/create-issues.sh` | Batch Wave backlog creation. |
 | `scripts/setup-repo.sh` | Topics, labels, branch protection. |
+| `tests/` | bats coverage for the shell scripts, with CLI stubs in `tests/stubs`. |
 
 ## Environment variables
 
@@ -360,9 +376,30 @@ The unit suite proves the contract logic inside a simulated ledger. This runs th
 same lifecycle against a real local network using the Wasm you just built, so you
 can watch one lease move value end to end.
 
-There is no `scripts/deploy-local.sh` — the sequence is below, and
-[`scripts/deploy-testnet.sh`](https://github.com/KeyLease-Security/keylease-core/blob/main/scripts/deploy-testnet.sh)
-is the Testnet reference for the identical steps. Everything here is
+[`scripts/sandbox-local.sh`](https://github.com/KeyLease-Security/keylease-core/blob/main/scripts/sandbox-local.sh)
+automates the walkthrough below: it connects to (or starts) the local network,
+funds three identities, deploys the registry and the mock token, registers one
+demo service and writes `.env.sandbox`. The manual sequence remains the
+reference for what the script runs and for stepping through a lifecycle by hand.
+
+### Quick start with the sandbox script
+
+```bash
+./scripts/sandbox-local.sh              # connect or start, deploy, write .env.sandbox
+./scripts/sandbox-local.sh --dry-run    # print every command; send nothing
+./scripts/sandbox-local.sh --connect    # require an already running network
+./scripts/sandbox-local.sh --force      # replace an existing .env.sandbox
+./scripts/sandbox-local.sh --teardown   # stop the container, remove identities and .env.sandbox
+```
+
+The script has no `NETWORK` variable: every command passes `--network local`
+literally, so it cannot reach Testnet or Mainnet, and `--teardown` stops only
+the local container and removes the three `kl-sandbox-*` identities and
+`.env.sandbox` that it created. `.env.sandbox` holds public addresses and ids
+only — the identity seeds stay in the stellar CLI keystore — and it is
+gitignored.
+
+Everything in the manual sequence below is
 [`stellar 28.1.0`](https://developers.stellar.org/docs/tools/cli/stellar-cli)
 syntax; if your CLI is a different version, re-read the flag with
 `stellar <command> --help` rather than assuming.
@@ -602,7 +639,7 @@ Only the network is different; the contract, its ABI and the step order are not.
 | Friendbot | `https://friendbot.stellar.org?addr=…` | `http://localhost:8000/friendbot?addr=…` |
 | Funding an identity | `stellar keys generate x --network testnet --fund` | `stellar keys generate x --network local --fund` — same flag |
 | Native SAC address | derived from `Test SDF Network ; September 2015` | derived from `Standalone Network ; February 2017`; different address |
-| Deploy script | `./scripts/deploy-testnet.sh` | no script; the sequence above |
+| Deploy script | `./scripts/deploy-testnet.sh` | `./scripts/sandbox-local.sh`, or the sequence above |
 | Contract id lifetime | until the next Testnet reset | until you stop the container |
 | Wiping the ledger | 2–4× a year, on SDF's schedule | whenever you like: `stellar container stop local` |
 | Value at risk | fake XLM | none |

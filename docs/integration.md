@@ -207,6 +207,15 @@ events instead of polling every lease:
 stellar events --id $REGISTRY --network testnet --start-ledger <ledger>
 ```
 
+| Event | Use |
+| --- | --- |
+| `lease_created` | Build a work queue of leases to settle; alert on new demand. |
+| `lease_delegated` | Attribute a sponsored lease to the account that paid its fee; the lease itself is unchanged. |
+| `lease_settled` | Reconcile payouts and refunds; close the lease in your ledger. |
+| `lease_revoked` | A consumer reclaimed an expired lease; the provider earned nothing. |
+| `service_registered` / `service_status_changed` | Keep a service catalogue in sync. |
+| `contract_upgraded` | Detect a new Wasm version (`version()` also changes). |
+
 An event's **first topic is always the event name** as a symbol; the fields
 marked `#[topic]` in `contracts/registry/src/events.rs` follow it, and every
 remaining field is carried in the payload map. Topics are what a subscriber

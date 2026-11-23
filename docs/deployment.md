@@ -17,6 +17,39 @@ KEYLEASE_GENERATE_KEY=1 SOURCE_ACCOUNT=keylease-admin ./scripts/deploy-testnet.s
 The script never deploys `mock_token`. That token has an unlimited mint and is
 for tests and local sandboxes only.
 
+## Dry run
+
+`--dry-run` resolves every default, validates every input and prints each
+command with the values it would send, then exits. It builds nothing, signs
+nothing and makes no network call:
+
+```bash
+./scripts/deploy-testnet.sh --dry-run
+ADMIN=G... PROVIDER=G... TOKEN=C... ./scripts/deploy-testnet.sh --dry-run
+```
+
+Values that only exist after a real deployment — the contract id, the service id,
+the Wasm hash — are printed as `<placeholders>`. Input that a real run would
+reject fails here first: a malformed `ENDPOINT_HASH`, a non-numeric
+`RATE_PER_CALL`, or a missing or malformed `REGISTRY` in an upgrade mode.
+The same flag works for every mode, so `--upgrade --dry-run` shows the upload
+and proposal without queueing anything.
+
+## Mainnet guard
+
+`NETWORK` is user-controlled, so a typo or an exported variable can point the
+script at mainnet. Mainnet deployment is deferred until the contract is audited
+(see [Mainnet](#mainnet)), so the script refuses `NETWORK=mainnet` unless
+`KEYLEASE_ALLOW_MAINNET=1` is exported for that invocation:
+
+```bash
+KEYLEASE_ALLOW_MAINNET=1 NETWORK=mainnet ./scripts/deploy-testnet.sh --dry-run
+```
+
+In every mode the script prints a banner with the resolved network, mode and
+signing identity before the first send, adds a `MAINNET — real XLM is at risk`
+line when the opt-in is set, and repeats the network in the final summary.
+
 ## What the script does
 
 ```text
@@ -136,6 +169,7 @@ consumed by your own client and indexer rather than by the CLI.
 | `RATE_PER_CALL` | `1000000` | 0.1 XLM at 7 decimals |
 | `ENDPOINT_HASH` | `sha256("<PROVIDER>:keylease-demo")` | 32-byte commitment |
 | `KEYLEASE_GENERATE_KEY` | unset | `1` to generate + Friendbot-fund the identity |
+| `KEYLEASE_ALLOW_MAINNET` | unset | `1` to permit `NETWORK=mainnet` for this invocation |
 
 ## Doing it manually
 
@@ -291,9 +325,9 @@ rails above exist; the full layout is in
 | `DataKey` variant names and arities: `Admin`, `Token`, `ServiceCount`, `LeaseCount`, `Service(u64)`, `Lease(u64)` | A `#[contracttype]` enum key encodes as `Vec[Symbol("<variant>"), …]`, so renaming `Lease` to `Leases` orphans every existing entry. The registry then reads `LeaseNotFound` on leases that still hold escrow. |
 | Stored value shapes for `Service` and `Lease` | Entries decode by field name and type. Renaming `used_calls`, retyping `locked_deposit`, or removing `settled` reinterprets or loses live records. |
 | Field presence, not field order, for structs | Old entries are read by key, so adding a field is safe **only** if the accessor tolerates its absence in entries written before the upgrade. |
-| `Error` codes, append-only (1–16 today) | Callers and indexers branch on the number; a reused code changes what a past transaction meant. |
+| `Error` codes, append-only (1–18 today) | Callers and indexers branch on the number; a reused code changes what a past transaction meant. |
 | Event names, topics and payload fields, append-only | They are the indexing ABI. Dropping a `#[topic]` field shifts every subscriber's filter, including the base64 segments in [Topics, payloads and filters](integration.md#topics-payloads-and-filters). |
-| `LeaseStatus` discriminants (`0`/`1`/`2`) | Returned by `lease_status` and cached by clients. |
+| `LeaseStatus` discriminants (`0`/`1`/`2`/`3`) | Returned by `lease_status` and cached by clients. `Revoked = 3` was appended; reusing `2` for a reclaimed lease would rewrite what every cached `Settled` meant. |
 | The `settled`-before-token-call ordering in `settle_lease` and `revoke_expired_lease` | It is the double-payout guard; reordering it behind a transfer reintroduces the re-entrancy bug the suite proves closed. |
 | The lease TTL policy covers term + 24 h grace + read buffer | If a shorter policy evicts a lease entry while escrow is still locked, the consumer's revoke path disappears. |
 | `MAX_LEASE_DURATION_SECS` never lowered below an in-flight lease's term | Existing leases stay settleable; lowering the cap for *new* leases is additive, lowering it retroactively is not. |
@@ -442,7 +476,10 @@ passphrase; the full table, SAC addresses and reset schedule are in
 ## Mainnet
 
 Not yet. Mainnet deployment is deferred until the contract is audited — see
-[Security](security.md) and the known limitations listed there.
+[Security](security.md) and the known limitations listed there. The deploy
+script enforces this: `NETWORK=mainnet` is refused unless
+`KEYLEASE_ALLOW_MAINNET=1` is set explicitly, and a `--dry-run` never sends
+anything even then.
 
 ## Read next
 

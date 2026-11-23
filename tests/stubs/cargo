@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Test stub for cargo: records argv and succeeds without building anything.
+set -euo pipefail
+
+printf 'cargo %s\n' "$*" >>"${STUB_LOG:-/dev/null}"
+
+exit 0

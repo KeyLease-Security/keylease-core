@@ -31,14 +31,19 @@ stellar contract invoke \
 ```
 
 `rate_per_call` is in the escrow token's smallest unit (**7 decimals** for the
-native asset, so `1000000` = `0.1 XLM` per call). The command prints the new
-`service_id` — record it.
+native asset, so `1000000` = `0.1 XLM` per call). It must be positive and no
+more than `MAX_RATE_PER_CALL`, which is `MAX_LEASE_DEPOSIT` — 1,000,000,000,000
+base units, 100,000 XLM per call. A higher rate reverts with `RateTooHigh` and
+registers nothing. The two bounds are the same number on purpose: the cheapest
+lease is a single call, so a price above the deposit cap would advertise a
+service no consumer could ever rent.
 
-`register_service` accepts any positive rate, but `MAX_LEASE_DEPOSIT` caps the
-product: at your rate, the largest lease a consumer can open is
-`MAX_LEASE_DEPOSIT ÷ rate_per_call` calls. A rate of `1000000` leaves room for
-1,000,000 calls; a rate of `100000000` caps them at 10,000. Price the whole
-allotment your typical customer wants before you pick one.
+Your rate still decides how large a lease can be, because `MAX_LEASE_DEPOSIT`
+caps the `rate_per_call × requested_calls` product: at your rate, the largest
+lease a consumer can open is `MAX_LEASE_DEPOSIT ÷ rate_per_call` calls. A rate
+of `1000000` leaves room for 1,000,000 calls; a rate of `100000000` caps them at
+10,000. Price the whole allotment your typical customer wants before you pick
+one. The command prints the new `service_id` — record it.
 
 The registration emits `service_registered { service_id, provider, rate_per_call,
 endpoint_hash }`, so your own indexer can pick it up without a separate query.
@@ -157,6 +162,15 @@ manage.
 
 - **Revenue recognised:** `verified_calls × rate_per_call` per settlement,
   published in the `lease_settled` event.
+- **Lifetime totals:** `service_stats --service_id <id>` returns
+  `settled_leases`, `settled_calls` and `total_payout` for one service without
+  replaying history. It counts every path that pays the provider — plain
+  settlement and an approved early cancellation — and nothing else: a lease the
+  consumer revoked contributed nothing, so a reclaimed lease never inflates
+  reported revenue.
+  Treat it as a convenience view and `lease_settled` as the book of record: the
+  aggregate is stored with a TTL, so an entry nothing has settled or read for a
+  long stretch can age out and read back as zero.
 - **Unused consumer balance:** refunded by you at settlement or on an approved
   early cancellation, or by the consumer via `revoke_expired_lease` after the
   24h grace window.

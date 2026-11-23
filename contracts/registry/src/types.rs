@@ -42,6 +42,35 @@ pub struct Lease {
     pub settled: bool,
 }
 
+/// Lifetime settlement totals for one service, keyed by `service_id`.
+///
+/// This is a convenience aggregate over the `lease_settled` event stream, so a
+/// provider or indexer can report revenue without replaying history. Only
+/// provider settlements are counted: a revoked lease paid the provider nothing
+/// and contributes nothing to these totals.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceStats {
+    /// Leases of this service the provider has settled.
+    pub settled_leases: u64,
+    /// Sum of `verified_calls` across those settlements.
+    pub settled_calls: u64,
+    /// Sum of tokens paid to the provider across those settlements, in the
+    /// escrow token's smallest unit.
+    pub total_payout: i128,
+}
+
+impl ServiceStats {
+    /// The totals of a service that has never been settled.
+    pub const fn zero() -> Self {
+        ServiceStats {
+            settled_leases: 0,
+            settled_calls: 0,
+            total_payout: 0,
+        }
+    }
+}
+
 /// A proposed Wasm upgrade waiting out its mandatory delay.
 ///
 /// Stored in instance storage so it survives as long as the registry's
@@ -92,13 +121,30 @@ pub enum LeaseStatus {
     Expired = 1,
     /// Funds have been released; no further state transitions are possible.
     Settled = 2,
+    /// Funds were reclaimed by the consumer after the provider failed to
+    /// settle. Final, like [`LeaseStatus::Settled`], but economically the
+    /// opposite: the provider earned nothing.
+    Revoked = 3,
 }
 
 impl LeaseStatus {
     /// Derive the current status of `lease` at ledger time `now`.
-    pub fn of(lease: &Lease, now: u64) -> Self {
+    ///
+    /// `revoked` is the registry's revocation marker for this lease, not a
+    /// field of [`Lease`]: the lease struct's on-chain layout is frozen, so the
+    /// distinction between "settled by the provider" and "reclaimed by the
+    /// consumer" is stored beside the lease instead of inside it (see
+    /// [`crate::storage`]). A revoked lease is always also `settled`, which is
+    /// what keeps its escrow from being released twice; therefore a settled lease
+    /// must be classified by the marker before it can be reported as
+    /// [`LeaseStatus::Settled`].
+    pub fn of(lease: &Lease, now: u64, revoked: bool) -> Self {
         if lease.settled {
-            LeaseStatus::Settled
+            if revoked {
+                LeaseStatus::Revoked
+            } else {
+                LeaseStatus::Settled
+            }
         } else if now >= lease.expires_at {
             LeaseStatus::Expired
         } else {

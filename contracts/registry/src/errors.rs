@@ -69,4 +69,8 @@ pub enum Error {
     CancellationAlreadyRequested = 26,
     /// Early cancellation is only available before the lease expires.
     LeaseExpired = 27,
+    /// Published `rate_per_call` exceeds `MAX_RATE_PER_CALL`. Appended after the
+    /// early-cancellation codes, so every number already published keeps its
+    /// meaning.
+    RateTooHigh = 28,
 }

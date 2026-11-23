@@ -85,6 +85,22 @@ would cover it.
 > **Order of arguments matters.** `consumer` is the first argument. This is the
 > exact ABI; older documentation that shows `service` first is wrong.
 
+**Someone else can arrange it for you.** `create_lease_for` mints the identical
+lease with a sponsor as the courier: the sponsor signs and pays the Soroban
+transaction fee, you sign and your balance is escrowed, and you keep the refund
+and revoke rights.
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account sponsor --network testnet --send=yes \
+  --sign $CONSUMER_SECRET_KEY \
+  -- create_lease_for \
+     --delegate $SPONSOR --consumer $CONSUMER \
+     --service_id 1 --requested_calls 500 --duration_secs 3600
+```
+
+Your signature is mandatory: a sponsor cannot lock your deposit on its own.
+
 ## 4. Use the access
 
 Tell the provider which lease backs your requests. Because the lease records your
@@ -116,7 +132,9 @@ stellar contract invoke --id $REGISTRY --source-account consumer \
   --network testnet -- lease_status --lease_id 1
 ```
 
-`lease_status` is `0` (Active), `1` (Expired) or `2` (Settled).
+`lease_status` is `0` (Active), `1` (Expired), `2` (Settled — the provider was
+paid) or `3` (Revoked — you reclaimed the deposit, so the provider earned
+nothing and `used_calls` stays `0`).
 
 ### End the lease early
 

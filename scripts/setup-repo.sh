@@ -96,6 +96,7 @@ PROTECTION='{
     "contexts": [
       "Format",
       "Shellcheck",
+      "Shell Tests",
       "Clippy",
       "Test",
       "Build (wasm32v1-none)",
