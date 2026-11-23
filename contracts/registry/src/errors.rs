@@ -1,8 +1,9 @@
 use soroban_sdk::contracterror;
 
-/// Contract-level error codes returned by [`crate::KeyLeaseRegistry`].
-///
-/// Codes are stable and start at 1 (`0` is reserved by the host for success).
+/** Contract-level error codes returned by [`crate::KeyLeaseRegistry`].
+ * Codes are stable and start at 1 (`0` is reserved by the host for success).
+ * New codes must be appended; codes are part of the ABI.
+ */
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
