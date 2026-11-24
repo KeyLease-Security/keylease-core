@@ -1,13 +1,7 @@
-﻿title = "KeyLease gitleaks config"
+title = "KeyLease gitleaks config"
 
 [extend]
-# Use the built-in gitleaks rules and add repo-specific allowlists below.
-
-[allowlist]
-description = "Documented false positives for KeyLease"
-# Add entries only with a comment explaining why the match is not a secret.
-# Example:
-# regexTarget = "match"
-# regexes = ['''EXAMPLE_NOT_A_SECRET''']
-paths = []
-regexes = []
+# Use the built-in gitleaks rules. Add repo-specific false positives as a
+# [[allowlists]] entry with a description and at least one matching rule
+# (commits, paths, regexes or stopwords); gitleaks rejects an empty allowlist.
+useDefault = true

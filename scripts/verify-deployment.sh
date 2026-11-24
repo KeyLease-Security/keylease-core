@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # verify-deployment.sh — verify a deployed KeyLeaseRegistry against .env.
 #

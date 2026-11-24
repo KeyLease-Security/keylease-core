@@ -4,7 +4,7 @@ use soroban_sdk::{
         storage::{Instance as _, Persistent as _},
         Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke,
     },
-    token, xdr, Address, BytesN, Env, Event, IntoVal, Map, Symbol, TryFromVal, Val, Vec,
+    token, xdr, Address, BytesN, Env, Event, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 use keylease_mock_token::{MockToken, MockTokenClient};
@@ -3156,6 +3156,256 @@ fn test_escrow_runs_on_the_stellar_asset_contract() {
         FUNDING - RATE * 10 + RATE * 6
     );
     assert_eq!(sac_client.balance(&registry_id), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Custom SEP-41 token lifecycle
+// ---------------------------------------------------------------------------
+
+/// Storage keys for [`CustomSep41Token`], kept separate from `MockToken` on
+/// purpose: the two tokens must not be able to share an implementation by
+/// accident.
+#[contracttype]
+#[derive(Clone)]
+enum CustomTokenKey {
+    Admin,
+    Balance(Address),
+    Allowance(Address, Address),
+    AllowanceExpiry(Address, Address),
+}
+
+/// A custom SEP-41 token that exists only for this test.
+///
+/// The registry is deliberately token-agnostic: every deposit and payout is a
+/// `token::Client` call, so a deployment can escrow in the native SAC or in any
+/// contract that implements SEP-41. `MockToken` already implements that surface,
+/// but it is the token every other registry test is built on, so a compatibility
+/// regression in that one token would mask the same regression in the registry.
+/// This contract is an independent implementation with its own storage layout
+/// and a different number of decimals; the lifecycle test below is its only
+/// user.
+#[contract]
+pub struct CustomSep41Token;
+
+#[contractimpl]
+impl CustomSep41Token {
+    /// Initialize the token and appoint the sole minter. Requires admin auth.
+    pub fn init(env: Env, admin: Address) {
+        admin.require_auth();
+        env.storage().instance().set(&CustomTokenKey::Admin, &admin);
+    }
+
+    /// Mint `amount` to `to`. Admin only.
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&CustomTokenKey::Admin)
+            .expect("token not initialized");
+        admin.require_auth();
+
+        let key = CustomTokenKey::Balance(to.clone());
+        let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(
+            &key,
+            &balance.checked_add(amount).expect("balance overflow"),
+        );
+    }
+
+    /// Transfer `amount` from `from` to `to`. Requires `from` auth.
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        move_balance(&env, &from, &to, amount);
+    }
+
+    /// Transfer `amount` from `from` to `to` using `spender`'s allowance.
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        spender.require_auth();
+
+        let allowance = read_allowance(&env, &from, &spender);
+        assert!(allowance >= amount, "insufficient allowance");
+
+        move_balance(&env, &from, &to, amount);
+
+        env.storage().persistent().set(
+            &CustomTokenKey::Allowance(from, spender),
+            &(allowance - amount),
+        );
+    }
+
+    /// Approve `spender` for `amount` of `from`'s tokens until `live_until_ledger`.
+    ///
+    /// `live_until_ledger` of `0` means the allowance never expires.
+    pub fn approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        live_until_ledger: u32,
+    ) {
+        from.require_auth();
+
+        env.storage().persistent().set(
+            &CustomTokenKey::Allowance(from.clone(), spender.clone()),
+            &amount,
+        );
+        env.storage().persistent().set(
+            &CustomTokenKey::AllowanceExpiry(from, spender),
+            &live_until_ledger,
+        );
+    }
+
+    /// Remaining allowance `spender` may draw from `from`.
+    pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        read_allowance(&env, &from, &spender)
+    }
+
+    /// Balance of `id`.
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&CustomTokenKey::Balance(id))
+            .unwrap_or(0)
+    }
+
+    /// This custom token uses six decimals, unlike `MockToken`'s seven, so the
+    /// test also shows the registry treats rates as opaque base units.
+    pub fn decimals(_env: Env) -> u32 {
+        6
+    }
+
+    /// Human-readable token name.
+    pub fn name(env: Env) -> String {
+        String::from_str(&env, "Custom SEP-41 Test Token")
+    }
+
+    /// Token ticker symbol.
+    pub fn symbol(env: Env) -> String {
+        String::from_str(&env, "CST41")
+    }
+}
+
+fn move_balance(env: &Env, from: &Address, to: &Address, amount: i128) {
+    let from_key = CustomTokenKey::Balance(from.clone());
+    let to_key = CustomTokenKey::Balance(to.clone());
+
+    let from_balance: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+    assert!(from_balance >= amount, "insufficient balance");
+
+    let to_balance: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+
+    env.storage()
+        .persistent()
+        .set(&from_key, &(from_balance - amount));
+    env.storage().persistent().set(
+        &to_key,
+        &to_balance.checked_add(amount).expect("balance overflow"),
+    );
+}
+
+fn read_allowance(env: &Env, from: &Address, spender: &Address) -> i128 {
+    let live_until: u32 = env
+        .storage()
+        .persistent()
+        .get(&CustomTokenKey::AllowanceExpiry(
+            from.clone(),
+            spender.clone(),
+        ))
+        .unwrap_or(0);
+    if live_until != 0 && env.ledger().sequence() > live_until {
+        return 0;
+    }
+    env.storage()
+        .persistent()
+        .get(&CustomTokenKey::Allowance(from.clone(), spender.clone()))
+        .unwrap_or(0)
+}
+
+/// Drive the whole registry lifecycle with a deployed custom SEP-41 token.
+///
+/// Unlike the mock token every other test is seeded with, this asset is a
+/// separate contract implementation, so the test proves the registry's
+/// `token::Client` calls compose with an arbitrary conforming token: register a
+/// service, create a lease, partially settle it after expiry, then create a
+/// second lease and revoke it after the grace window. Token balances are
+/// asserted after every step, so escrow conservation is checked at the boundary
+/// the contract does not control.
+#[test]
+fn test_custom_sep41_token_full_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let consumer = Address::generate(&env);
+
+    // Deploy a token the registry has never seen: not `MockToken`, not the SAC.
+    let token_id = env.register(CustomSep41Token, ());
+    let token = CustomSep41TokenClient::new(&env, &token_id);
+    token.init(&admin);
+    token.mint(&consumer, &FUNDING);
+    assert_eq!(token.decimals(), 6);
+    assert_eq!(token.balance(&consumer), FUNDING);
+
+    let registry_id = env.register(KeyLeaseRegistry, ());
+    let registry = KeyLeaseRegistryClient::new(&env, &registry_id);
+    registry.init(&admin);
+    registry.set_token(&admin, &token_id);
+    assert_eq!(registry.get_token(), token_id);
+
+    // Register: the listing price is denominated in this token's base units.
+    let service_id = registry.register_service(&provider, &RATE, &endpoint_hash(&env));
+
+    // Create: the full deposit leaves the consumer and is held by the registry.
+    let lease_id = registry.create_lease(&consumer, &service_id, &10, &3_600);
+    assert_eq!(token.balance(&consumer), FUNDING - RATE * 10);
+    assert_eq!(token.balance(&registry_id), RATE * 10);
+    assert_eq!(token.balance(&provider), 0);
+    assert_eq!(registry.get_lease(&lease_id).locked_deposit, RATE * 10);
+    assert_eq!(registry.lease_status(&lease_id), LeaseStatus::Active);
+
+    // Partial settlement after expiry: the provider is paid for 4 of 10 calls
+    // and the consumer gets the 6 unused calls back. Escrow ends at zero.
+    env.ledger().set_timestamp(1_000 + 3_600 + 1);
+    registry.settle_lease(&provider, &lease_id, &4);
+
+    assert_eq!(token.balance(&provider), RATE * 4);
+    assert_eq!(token.balance(&consumer), FUNDING - RATE * 10 + RATE * 6);
+    assert_eq!(token.balance(&registry_id), 0);
+    assert_eq!(registry.lease_status(&lease_id), LeaseStatus::Settled);
+    assert_eq!(
+        registry.service_stats(&service_id),
+        ServiceStats {
+            settled_leases: 1,
+            settled_calls: 4,
+            total_payout: RATE * 4,
+        }
+    );
+
+    // Revoke: a second lease the provider never settles comes back in full once
+    // the lease has expired and the 24h grace window has elapsed.
+    let revoked_id = registry.create_lease(&consumer, &service_id, &10, &3_600);
+    assert_eq!(token.balance(&consumer), FUNDING - RATE * 14);
+    assert_eq!(token.balance(&registry_id), RATE * 10);
+
+    let revoked_expiry = 1_000 + 3_600 + 1 + 3_600;
+    env.ledger().set_timestamp(revoked_expiry + GRACE);
+    registry.revoke_expired_lease(&consumer, &revoked_id);
+
+    assert_eq!(token.balance(&consumer), FUNDING - RATE * 4);
+    assert_eq!(token.balance(&registry_id), 0);
+    assert_eq!(token.balance(&provider), RATE * 4);
+    assert_eq!(registry.lease_status(&revoked_id), LeaseStatus::Revoked);
+    // Revocation pays the provider nothing, so revenue totals are untouched.
+    assert_eq!(
+        registry.service_stats(&service_id),
+        ServiceStats {
+            settled_leases: 1,
+            settled_calls: 4,
+            total_payout: RATE * 4,
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------

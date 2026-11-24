@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # smoke-test-deployment.sh — opt-in post-deploy smoke test for KeyLease.
 #
