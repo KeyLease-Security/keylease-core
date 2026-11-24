@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 use crate::errors::Error;
 use crate::types::{Lease, Service};
@@ -29,6 +29,12 @@ pub enum DataKey {
     Service(u64),
     /// `Lease` by id (persistent storage).
     Lease(u64),
+    /// Optional ed25519 public key that must sign usage receipts for a service
+    /// (persistent storage). Absent means settlements stay unsigned.
+    ServiceReceiptKey(u64),
+    /// Pull-payment balance claimable by an address, in token stroops
+    /// (persistent storage).
+    Claimable(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -165,4 +171,79 @@ pub fn get_lease(env: &Env, lease_id: u64) -> Result<Lease, Error> {
         lease_ttl_extend(env, &lease),
     );
     Ok(lease)
+}
+
+// ---------------------------------------------------------------------------
+// Optional signed usage receipts
+// ---------------------------------------------------------------------------
+
+/// Return the ed25519 public key a service requires on usage receipts, if any.
+pub fn get_service_receipt_key(env: &Env, service_id: u64) -> Option<BytesN<32>> {
+    let key = DataKey::ServiceReceiptKey(service_id);
+    let receipt_key = env.storage().persistent().get(&key);
+    if receipt_key.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+    }
+    receipt_key
+}
+
+pub fn set_service_receipt_key(env: &Env, service_id: u64, receipt_key: &BytesN<32>) {
+    let key = DataKey::ServiceReceiptKey(service_id);
+    env.storage().persistent().set(&key, receipt_key);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+}
+
+pub fn remove_service_receipt_key(env: &Env, service_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::ServiceReceiptKey(service_id));
+}
+
+// ---------------------------------------------------------------------------
+// Pull-payment claimable balances
+// ---------------------------------------------------------------------------
+
+/// Credit `amount` to `beneficiary`'s claimable balance. Zero amounts are a
+/// no-op so settlement paths do not pay rent for empty entries.
+pub fn add_claimable(env: &Env, beneficiary: &Address, amount: i128) -> Result<(), Error> {
+    if amount <= 0 {
+        return Ok(());
+    }
+    let key = DataKey::Claimable(beneficiary.clone());
+    let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    let updated = current.checked_add(amount).ok_or(Error::Overflow)?;
+    env.storage().persistent().set(&key, &updated);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+    Ok(())
+}
+
+/// Read (without mutating) the balance `beneficiary` can currently claim.
+pub fn get_claimable(env: &Env, beneficiary: &Address) -> i128 {
+    let key = DataKey::Claimable(beneficiary.clone());
+    let amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    if amount > 0 {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
+    }
+    amount
+}
+
+/// Remove and return `beneficiary`'s claimable balance.
+///
+/// The entry is deleted before the caller transfers tokens, so a re-entrant
+/// token that calls `claim` again sees an empty balance.
+pub fn take_claimable(env: &Env, beneficiary: &Address) -> i128 {
+    let key = DataKey::Claimable(beneficiary.clone());
+    let amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    if amount > 0 {
+        env.storage().persistent().remove(&key);
+    }
+    amount
 }

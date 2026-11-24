@@ -110,6 +110,49 @@ pub struct LeaseRevoked {
     pub refund: i128,
 }
 
+/// Emitted when a consumer tops up a lease's calls and/or duration.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseToppedUp {
+    /// Lease that was extended.
+    #[topic]
+    pub lease_id: u64,
+    /// Consumer that funded the top-up.
+    pub consumer: Address,
+    /// Calls added by this top-up.
+    pub additional_calls: u32,
+    /// Seconds added to the lease term by this top-up.
+    pub additional_duration_secs: u64,
+    /// New expiry timestamp after the top-up.
+    pub new_expires_at: u64,
+    /// Additional deposit escrowed by this top-up.
+    pub added_deposit: i128,
+}
+
+/// Emitted when a provider enables, replaces or clears a service's receipt key.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceReceiptKeySet {
+    /// Service whose receipt policy changed.
+    #[topic]
+    pub service_id: u64,
+    /// Provider that owns the service.
+    pub provider: Address,
+    /// Required ed25519 receipt key, or `None` to restore unsigned settlement.
+    pub receipt_key: Option<BytesN<32>>,
+}
+
+/// Emitted when a beneficiary withdraws its pull-payment balance.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Claimed {
+    /// Address that received the tokens.
+    #[topic]
+    pub beneficiary: Address,
+    /// Amount transferred out of the registry.
+    pub amount: i128,
+}
+
 /// Emitted when the admin upgrades the registry's Wasm.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

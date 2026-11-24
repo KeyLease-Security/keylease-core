@@ -108,11 +108,16 @@ keylease-core/
 | `upgrade(admin, new_wasm_hash)` | `admin` | Install a new Wasm through the Soroban deployer. Emits `contract_upgraded`. |
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
+| `set_service_receipt_key(provider, service_id, receipt_key)` | `provider` | Opt a service into required provider-signed usage receipts, rotate or clear the ed25519 key. Emits `service_receipt_key_set`. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
-| `settle_lease(provider, lease_id, verified_calls)` | `provider` | Pay the provider, refund the remainder. Emits `lease_settled`. |
-| `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
+| `top_up_lease(consumer, lease_id, additional_calls, additional_duration_secs)` | `consumer` | Extend an active lease at its original rate. Emits `lease_topped_up`. |
+| `settle_lease(provider, lease_id, verified_calls)` | `provider` | Credit the provider and refund the remainder (unsigned mode). Emits `lease_settled`. |
+| `settle_lease_with_receipt(provider, lease_id, verified_calls, receipt)` | `provider` | Settle with a provider-signed usage receipt (receipt mode). Emits `lease_settled`. |
+| `settle_leases(provider, settlements)` | `provider` | Settle up to 20 leases in one all-or-nothing call. Emits one `lease_settled` per lease. |
+| `claim(beneficiary)` | `beneficiary` | Withdraw the pull-payment balance credited by settlements or revocations. Emits `claimed`. |
+| `revoke_expired_lease(consumer, lease_id)` | `consumer` | Credit the full deposit 24h after expiry. Emits `lease_revoked`. |
 | `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. |
-| `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)` | — | Derived lifecycle queries. |
+| `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)`, `claimable_balance(address)` | — | Derived lifecycle queries. |
 | `service_count()`, `lease_count()` | — | Monotonic counters. |
 
 ### Events
@@ -127,8 +132,11 @@ extra. Event names are the first topic; ids follow.
 | `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `provider`, `is_active` |
 | `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_topped_up` | `lease_id` | `consumer`, `additional_calls`, `additional_duration_secs`, `new_expires_at`, `added_deposit` |
 | `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `claimed` | `beneficiary` | `amount` |
+| `service_receipt_key_set` | `service_id` | `provider`, `receipt_key` |
 | `contract_upgraded` | — | `admin`, `new_wasm_hash` |
 
 ```bash
@@ -148,6 +156,11 @@ A lease is **settleable** when it has expired **or** `verified_calls ==
 allocated_calls`. It is **revocable** only when expired **and** the 24-hour
 provider grace window has elapsed. Either path ends in `Settled`; a settled
 lease can never be settled or revoked again.
+
+Settlement and revocation never transfer tokens inline. They credit **pull
+payments**: the provider and consumer each accumulate a claimable balance and
+withdraw it with `claim`, which keeps every money-out path small,
+checks-effects-interactions safe and independent of who settles first.
 
 ---
 
@@ -239,14 +252,14 @@ protocol, its Stellar dependencies and how to integrate with it:
 KeyLease escrows funds, so the contract is written to a small, auditable set of
 invariants:
 
-1. **Checked arithmetic everywhere.** Deposit (`rate × calls`) and payout math
-   use `checked_mul`/`checked_add`; overflow aborts the transaction instead of
-   minting a cheap lease or a truncated refund.
-2. **Checks-effects-interactions.** Every money path persists the settlement
-   (`settled = true`) *before* calling the token, so a re-entrant SEP-41 token
-   cannot be paid twice. `test_reentrant_token_cannot_settle_a_lease_twice`
-   installs a hostile token that calls back into `settle_lease` and asserts the
-   second attempt is rejected.
+1. **Checked arithmetic everywhere.** Deposit (`rate × calls`), top-up and
+   payout math use `checked_mul`/`checked_add`; overflow aborts the transaction
+   instead of minting a cheap lease or a truncated refund.
+2. **Checks-effects-interactions.** Settlement and revocation persist state and
+   record claimable balances before any token is called, and `claim` removes the
+   balance before transferring, so a re-entrant SEP-41 token cannot be paid
+   twice. `test_reentrant_token_cannot_claim_a_balance_twice` installs a hostile
+   token that calls back into `claim` and asserts the second attempt is rejected.
 3. **Bounded provider claims.** A provider can never withdraw more than
    `allocated_calls × rate_per_call`, and only for leases it owns
    (`InvalidCalls`, `Unauthorized`).
@@ -282,18 +295,22 @@ re-entrant token.
 cargo test --all
 ```
 
-The 40 tests in `contracts/registry/src/test.rs` cover:
+The 72 tests in `contracts/registry/src/test.rs` cover:
 
 - service registration and ID monotonicity,
 - the happy path (lock → full-usage settle before expiry),
 - partial settlement after expiry with correct refund,
 - expired, unsettled leases being fully reclaimed by the consumer,
 - the 24-hour grace window (boundary, early-settle, and post-settle cases),
-- unauthorized settle/revoke/upgrade attempts,
+- unauthorized settle/revoke/upgrade/top-up/claim attempts,
 - rate-math, timestamp and duration overflow/rejection,
 - every emitted event, including its topics and payload,
 - the full lifecycle escrowed with the **native Stellar Asset Contract**,
-- a **re-entrant token** attempting a second settlement,
+- a **re-entrant token** attempting a second claim,
+- lease top-ups (calls, duration, rate preservation, partial settlement),
+- bounded batch settlement (limit, duplicates, mixed ownership, all-or-nothing),
+- pull-payment claims (accumulation, single use, conservation),
+- optional signed usage receipts (valid, invalid, mismatched and replayed),
 - status transitions and derived views.
 
 ---

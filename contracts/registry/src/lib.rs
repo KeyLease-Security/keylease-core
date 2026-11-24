@@ -57,12 +57,13 @@ mod types;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec};
 
 pub use crate::errors::Error;
 pub use crate::events::{
-    ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
-    RegistryInitialized, ServiceRegistered, ServiceStatusChanged,
+    Claimed, ContractUpgraded, EscrowTokenSet, LeaseCreated, LeaseRevoked, LeaseSettled,
+    LeaseToppedUp, RegistryInitialized, ServiceReceiptKeySet, ServiceRegistered,
+    ServiceStatusChanged,
 };
 pub use crate::types::{Lease, LeaseStatus, Service};
 
@@ -89,6 +90,19 @@ pub const SETTLE_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60;
 /// never outlive its storage entry. At thirty days the resulting TTL (~32 days)
 /// is well under the network's maximum entry TTL (180 days on Testnet).
 pub const MAX_LEASE_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Hard cap on the number of leases a single `settle_leases` call may settle.
+///
+/// The bound keeps the entry point's CPU and ledger-entry footprint predictable
+/// and prevents unbounded loops over caller-supplied collections.
+pub const MAX_BATCH_SETTLE: u32 = 20;
+
+/// Domain separator prepended to every provider-signed usage receipt.
+///
+/// The signed message is documented in [`usage_receipt_payload`] and in the
+/// contract reference; the domain keeps a signature from being valid in any
+/// other KeyLease signing context.
+pub const USAGE_RECEIPT_DOMAIN: &[u8] = b"KeyLease/usage-receipt/v1";
 
 #[contract]
 pub struct KeyLeaseRegistry;
@@ -222,6 +236,41 @@ impl KeyLeaseRegistry {
         Ok(())
     }
 
+    /// Opt a service into, out of, or onto a new ed25519 usage-receipt key.
+    /// Requires provider auth and ownership of the service.
+    ///
+    /// `Some(key)` requires every settlement of the service's leases to carry a
+    /// signature from `key` over the documented receipt payload. `None` restores
+    /// the default unsigned settlement mode. The key is stored separately from
+    /// the `Service` struct so existing service entries keep their layout.
+    pub fn set_service_receipt_key(
+        env: Env,
+        provider: Address,
+        service_id: u64,
+        receipt_key: Option<BytesN<32>>,
+    ) -> Result<(), Error> {
+        provider.require_auth();
+
+        let service = storage::get_service(&env, service_id)?;
+        if service.provider != provider {
+            return Err(Error::Unauthorized);
+        }
+
+        match &receipt_key {
+            Some(key) => storage::set_service_receipt_key(&env, service_id, key),
+            None => storage::remove_service_receipt_key(&env, service_id),
+        }
+
+        ServiceReceiptKeySet {
+            service_id,
+            provider,
+            receipt_key,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Leases
     // -----------------------------------------------------------------------
@@ -317,75 +366,198 @@ impl KeyLeaseRegistry {
         Ok(lease_id)
     }
 
-    /// Settle a lease, paying the provider for `verified_calls` consumed calls
-    /// and refunding the remainder to the consumer. Requires provider auth.
+    /// Extend an active lease with more calls and/or more time. Requires
+    /// consumer auth.
+    ///
+    /// At least one of `additional_calls` and `additional_duration_secs` must be
+    /// non-zero. Additional calls are priced from the lease's own original rate
+    /// (`locked_deposit / allocated_calls`), never from any other value, so an
+    /// in-flight lease can never be repriced. The new deposit is
+    /// `locked_deposit + additional_calls * rate`, transferred from the consumer
+    /// into escrow in the same transaction. `used_calls` is preserved, so a
+    /// partially consumed lease keeps its remaining allotment and its original
+    /// settlement terms. The new expiry may not exceed
+    /// `now + MAX_LEASE_DURATION_SECS`, keeping the storage TTL guarantee.
+    pub fn top_up_lease(
+        env: Env,
+        consumer: Address,
+        lease_id: u64,
+        additional_calls: u32,
+        additional_duration_secs: u64,
+    ) -> Result<(), Error> {
+        consumer.require_auth();
+
+        if additional_calls == 0 && additional_duration_secs == 0 {
+            return Err(Error::InvalidTopUp);
+        }
+
+        let mut lease = storage::get_lease(&env, lease_id)?;
+        if lease.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        if lease.settled {
+            return Err(Error::LeaseAlreadySettled);
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= lease.expires_at {
+            return Err(Error::LeaseExpired);
+        }
+
+        let new_expires_at = lease
+            .expires_at
+            .checked_add(additional_duration_secs)
+            .ok_or(Error::Overflow)?;
+        let max_expires_at = now
+            .checked_add(MAX_LEASE_DURATION_SECS)
+            .ok_or(Error::Overflow)?;
+        if new_expires_at > max_expires_at {
+            return Err(Error::DurationTooLong);
+        }
+
+        // `locked_deposit` is always `rate_per_call * allocated_calls`, so the
+        // lease carries its own immutable rate snapshot.
+        let rate = lease
+            .locked_deposit
+            .checked_div(lease.allocated_calls as i128)
+            .ok_or(Error::Overflow)?;
+        let added_deposit = rate
+            .checked_mul(additional_calls as i128)
+            .ok_or(Error::Overflow)?;
+        let new_deposit = lease
+            .locked_deposit
+            .checked_add(added_deposit)
+            .ok_or(Error::Overflow)?;
+        let new_allocated_calls = lease
+            .allocated_calls
+            .checked_add(additional_calls)
+            .ok_or(Error::Overflow)?;
+
+        let token_addr = if added_deposit > 0 {
+            Some(storage::get_token(&env).ok_or(Error::TokenNotSet)?)
+        } else {
+            None
+        };
+
+        // checks-effects-interactions: persist the extended lease before the
+        // deposit transfer.
+        lease.allocated_calls = new_allocated_calls;
+        lease.expires_at = new_expires_at;
+        lease.locked_deposit = new_deposit;
+        storage::save_lease(&env, &lease);
+        storage::extend_instance_ttl(&env);
+
+        if let Some(token_addr) = token_addr {
+            token::Client::new(&env, &token_addr).transfer(
+                &consumer,
+                env.current_contract_address(),
+                &added_deposit,
+            );
+        }
+
+        LeaseToppedUp {
+            lease_id,
+            consumer,
+            additional_calls,
+            additional_duration_secs,
+            new_expires_at,
+            added_deposit,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Settle a lease, crediting the provider for `verified_calls` consumed
+    /// calls and crediting the remainder to the consumer. Requires provider auth.
     ///
     /// A lease may only be settled when it has **expired** or when
     /// `verified_calls == allocated_calls` (the consumer got everything it
-    /// paid for, so there is no reason to wait). Settling pays out
-    /// `verified_calls * rate_per_call` and returns
-    /// `locked_deposit - payout` to the consumer. A lease can be settled once.
+    /// paid for, so there is no reason to wait). Settlement credits
+    /// `verified_calls * rate_per_call` to the provider and
+    /// `locked_deposit - payout` to the consumer as pull-payment balances; each
+    /// beneficiary withdraws with [`Self::claim`]. A lease can be settled once.
+    ///
+    /// If the lease's service has a receipt key configured, this unsigned path
+    /// is rejected with `ReceiptRequired`; use [`Self::settle_lease_with_receipt`].
     pub fn settle_lease(
         env: Env,
         provider: Address,
         lease_id: u64,
         verified_calls: u32,
     ) -> Result<(), Error> {
+        settle_one(&env, &provider, lease_id, verified_calls, None)
+    }
+
+    /// Settle a lease with a provider-signed usage receipt. Requires provider
+    /// auth.
+    ///
+    /// This is the settlement path for services that opted into receipts via
+    /// [`Self::set_service_receipt_key`]. The receipt is an ed25519 signature
+    /// over the byte string documented in [`usage_receipt_payload`]: the
+    /// KeyLease receipt domain, this contract's address, the lease id, the
+    /// service id and `verified_calls`. An invalid signature aborts the
+    /// transaction. Because a lease can only be settled once, replaying a
+    /// receipt against an already-settled lease fails with
+    /// `LeaseAlreadySettled`, and a receipt bound to another lease or service
+    /// fails signature verification.
+    pub fn settle_lease_with_receipt(
+        env: Env,
+        provider: Address,
+        lease_id: u64,
+        verified_calls: u32,
+        receipt: BytesN<64>,
+    ) -> Result<(), Error> {
+        settle_one(&env, &provider, lease_id, verified_calls, Some(receipt))
+    }
+
+    /// Settle up to [`MAX_BATCH_SETTLE`] leases in one all-or-nothing call.
+    /// Requires provider auth and only settles leases the provider owns.
+    ///
+    /// Every `(lease_id, verified_calls)` pair is validated before any lease is
+    /// mutated. The call is all-or-nothing: if any lease is unknown, already
+    /// settled, not owned by `provider`, not settleable, duplicated in the list,
+    /// or belongs to a receipt-protected service, nothing is settled. Emission
+    /// is one `lease_settled` event per lease.
+    pub fn settle_leases(
+        env: Env,
+        provider: Address,
+        settlements: Vec<(u64, u32)>,
+    ) -> Result<(), Error> {
         provider.require_auth();
 
-        let mut lease = storage::get_lease(&env, lease_id)?;
-        if lease.settled {
-            return Err(Error::LeaseAlreadySettled);
+        let count = settlements.len();
+        if count == 0 {
+            return Err(Error::EmptyBatch);
         }
-        if verified_calls > lease.allocated_calls {
-            return Err(Error::InvalidCalls);
-        }
-
-        let service = storage::get_service(&env, lease.service_id)?;
-        if service.provider != provider {
-            return Err(Error::Unauthorized);
+        if count > MAX_BATCH_SETTLE {
+            return Err(Error::BatchTooLarge);
         }
 
-        let now = env.ledger().timestamp();
-        let fully_consumed = verified_calls == lease.allocated_calls;
-        if now < lease.expires_at && !fully_consumed {
-            return Err(Error::LeaseNotSettleable);
+        // Reject duplicates up front: settling the same lease twice in one
+        // call would otherwise emit two events for one release.
+        for i in 0..count {
+            let (lease_id, _) = settlements.get(i).ok_or(Error::LeaseNotFound)?;
+            for j in 0..i {
+                let (other_id, _) = settlements.get(j).ok_or(Error::LeaseNotFound)?;
+                if lease_id == other_id {
+                    return Err(Error::DuplicateLease);
+                }
+            }
         }
 
-        let payout = service
-            .rate_per_call
-            .checked_mul(verified_calls as i128)
-            .ok_or(Error::Overflow)?;
-        let refund = lease
-            .locked_deposit
-            .checked_sub(payout)
-            .ok_or(Error::Overflow)?;
-
-        // checks-effects-interactions: persist the settlement before any token
-        // transfer, so a re-entrant token sees a settled lease and reverts.
-        lease.used_calls = verified_calls;
-        lease.settled = true;
-        storage::save_lease(&env, &lease);
-
-        let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
-        let client = token::Client::new(&env, &token_addr);
-        let contract = env.current_contract_address();
-
-        if payout > 0 {
-            client.transfer(&contract, &service.provider, &payout);
+        // Pass 1 validates the whole batch without mutating state. Pass 2 only
+        // runs once every lease is known to be settleable.
+        for (lease_id, verified_calls) in settlements.iter() {
+            validate_settlement(&env, &provider, lease_id, verified_calls, None)?;
         }
-        if refund > 0 {
-            client.transfer(&contract, &lease.consumer, &refund);
+        // Pass 2 applies the validated settlements. Provider auth was required
+        // once above; re-requiring it per lease would trip the host's
+        // "frame is already authorized" guard.
+        for (lease_id, verified_calls) in settlements.iter() {
+            let settlement = validate_settlement(&env, &provider, lease_id, verified_calls, None)?;
+            apply_settlement(&env, &settlement)?;
         }
-
-        LeaseSettled {
-            lease_id,
-            provider,
-            verified_calls,
-            payout,
-            refund,
-        }
-        .publish(&env);
 
         Ok(())
     }
@@ -422,24 +594,46 @@ impl KeyLeaseRegistry {
 
         let refund = lease.locked_deposit;
 
-        // checks-effects-interactions: mark the lease settled before the refund
-        // transfer so a re-entrant token cannot reclaim twice.
+        // checks-effects-interactions: mark the lease settled and credit the
+        // pull-payment balance before any token can be called.
         lease.settled = true;
         storage::save_lease(&env, &lease);
-
-        if refund > 0 {
-            let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
-            token::Client::new(&env, &token_addr).transfer(
-                &env.current_contract_address(),
-                &consumer,
-                &refund,
-            );
-        }
+        storage::add_claimable(&env, &consumer, refund)?;
 
         LeaseRevoked {
             lease_id,
             consumer,
             refund,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Withdraw everything credited to `beneficiary` by settlements or
+    /// revocations. Requires `beneficiary` auth.
+    ///
+    /// The balance is removed before the SEP-41 transfer, so a re-entrant token
+    /// that calls `claim` again finds nothing to withdraw. Claiming when the
+    /// balance is zero returns `NothingToClaim`.
+    pub fn claim(env: Env, beneficiary: Address) -> Result<(), Error> {
+        beneficiary.require_auth();
+
+        let amount = storage::take_claimable(&env, &beneficiary);
+        if amount <= 0 {
+            return Err(Error::NothingToClaim);
+        }
+
+        let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
+        token::Client::new(&env, &token_addr).transfer(
+            &env.current_contract_address(),
+            &beneficiary,
+            &amount,
+        );
+
+        Claimed {
+            beneficiary,
+            amount,
         }
         .publish(&env);
 
@@ -509,6 +703,143 @@ impl KeyLeaseRegistry {
         }
         Ok(lease.locked_deposit)
     }
+
+    /// Pull-payment balance `beneficiary` can withdraw with [`Self::claim`].
+    pub fn claimable_balance(env: Env, beneficiary: Address) -> i128 {
+        storage::get_claimable(&env, &beneficiary)
+    }
+}
+
+/// A fully validated settlement, not yet persisted.
+struct Settlement {
+    lease: Lease,
+    provider: Address,
+    verified_calls: u32,
+    payout: i128,
+    refund: i128,
+}
+
+/// The exact byte string a provider signs for a usage receipt.
+///
+/// ```text
+/// "KeyLease/usage-receipt/v1"          domain separator, 25 bytes
+/// || contract address StrKey          56 bytes, binds the receipt to this deployment
+/// || lease_id                          u64, big-endian, 8 bytes
+/// || service_id                        u64, big-endian, 8 bytes
+/// || verified_calls                    u32, big-endian, 4 bytes
+/// ```
+///
+/// The provider signs these raw bytes with an ed25519 key whose public half was
+/// published with [`KeyLeaseRegistry::set_service_receipt_key`].
+fn usage_receipt_payload(env: &Env, lease_id: u64, service_id: u64, verified_calls: u32) -> Bytes {
+    let mut payload = Bytes::from_slice(env, USAGE_RECEIPT_DOMAIN);
+    payload.append(&env.current_contract_address().to_string().to_bytes());
+    payload.extend_from_array(&lease_id.to_be_bytes());
+    payload.extend_from_array(&service_id.to_be_bytes());
+    payload.extend_from_array(&verified_calls.to_be_bytes());
+    payload
+}
+
+/// Validate one settlement without mutating state.
+///
+/// All checks, including receipt-mode selection and signature verification,
+/// happen before the caller persists anything.
+fn validate_settlement(
+    env: &Env,
+    provider: &Address,
+    lease_id: u64,
+    verified_calls: u32,
+    receipt: Option<BytesN<64>>,
+) -> Result<Settlement, Error> {
+    let lease = storage::get_lease(env, lease_id)?;
+    if lease.settled {
+        return Err(Error::LeaseAlreadySettled);
+    }
+    if verified_calls > lease.allocated_calls {
+        return Err(Error::InvalidCalls);
+    }
+
+    let service = storage::get_service(env, lease.service_id)?;
+    if service.provider != *provider {
+        return Err(Error::Unauthorized);
+    }
+
+    match (
+        storage::get_service_receipt_key(env, service.service_id),
+        receipt,
+    ) {
+        (Some(public_key), Some(signature)) => {
+            let payload =
+                usage_receipt_payload(env, lease.lease_id, lease.service_id, verified_calls);
+            env.crypto()
+                .ed25519_verify(&public_key, &payload, &signature);
+        }
+        (Some(_), None) => return Err(Error::ReceiptRequired),
+        (None, Some(_)) => return Err(Error::ReceiptNotConfigured),
+        (None, None) => {}
+    }
+
+    let now = env.ledger().timestamp();
+    let fully_consumed = verified_calls == lease.allocated_calls;
+    if now < lease.expires_at && !fully_consumed {
+        return Err(Error::LeaseNotSettleable);
+    }
+
+    let payout = service
+        .rate_per_call
+        .checked_mul(verified_calls as i128)
+        .ok_or(Error::Overflow)?;
+    let refund = lease
+        .locked_deposit
+        .checked_sub(payout)
+        .ok_or(Error::Overflow)?;
+
+    Ok(Settlement {
+        lease,
+        provider: service.provider,
+        verified_calls,
+        payout,
+        refund,
+    })
+}
+
+/// Persist a validated settlement and credit both beneficiaries' pull-payment
+/// balances.
+///
+/// No token is called here, so there is no re-entrancy surface on the
+/// settlement path at all.
+fn apply_settlement(env: &Env, settlement: &Settlement) -> Result<(), Error> {
+    let mut lease = settlement.lease.clone();
+    lease.used_calls = settlement.verified_calls;
+    lease.settled = true;
+    storage::save_lease(env, &lease);
+
+    storage::add_claimable(env, &settlement.provider, settlement.payout)?;
+    storage::add_claimable(env, &lease.consumer, settlement.refund)?;
+
+    LeaseSettled {
+        lease_id: lease.lease_id,
+        provider: settlement.provider.clone(),
+        verified_calls: settlement.verified_calls,
+        payout: settlement.payout,
+        refund: settlement.refund,
+    }
+    .publish(env);
+
+    Ok(())
+}
+
+/// Authenticate the provider, validate the settlement and apply it.
+fn settle_one(
+    env: &Env,
+    provider: &Address,
+    lease_id: u64,
+    verified_calls: u32,
+    receipt: Option<BytesN<64>>,
+) -> Result<(), Error> {
+    provider.require_auth();
+    let settlement = validate_settlement(env, provider, lease_id, verified_calls, receipt)?;
+    apply_settlement(env, &settlement)
 }
 
 /// Ensure `caller` matches the stored admin.
