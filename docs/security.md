@@ -158,7 +158,7 @@ what the authors intended, not as an independent finding.
 | Documented guarantees | 10 | [Guarantees](#guarantees) |
 | Invariants asserted in tests | 5 | [Invariants](#invariants) |
 | Threats modelled | 14 | [Threats considered](#threats-considered) |
-| CI gates | 8 | `Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Spell Check`, `Markdown Lint`, `Dependency Policy` (cargo-deny) and `Malware Scan` (ClamAV) in [`.github/workflows/ci.yml`](https://github.com/KeyLease-Security/keylease-core/blob/main/.github/workflows/ci.yml) |
+| CI gates | 9 | `Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Secret Scan` (gitleaks), `Spell Check`, `Markdown Lint`, `Dependency Policy` (cargo-deny) and `Malware Scan` (ClamAV) in [`.github/workflows/ci.yml`](https://github.com/KeyLease-Security/keylease-core/blob/main/.github/workflows/ci.yml) |
 
 The counts are as of the revision this page is written against; each one is
 mechanically checkable from the file it names.
@@ -262,6 +262,20 @@ These are real and tracked as Drips Wave issues rather than hidden.
   non-delivery.
 - **Not audited, and nothing on this page substitutes for it.** See
   [Audit status](#audit-status).
+
+## Secret scanning
+
+Pull requests are scanned for committed secrets with
+[gitleaks](https://github.com/gitleaks/gitleaks) in CI (`Secret Scan` job). The
+scan uses a pinned gitleaks version, fails on findings, and reads allowlist
+entries only from `.gitleaks.toml`. Add allowlist entries only for documented
+false positives and include a comment explaining why the match is not a secret.
+
+Run locally before opening a PR:
+
+```bash
+gitleaks detect --source . --redact --verbose --config .gitleaks.toml
+```
 
 ## Deployment hygiene
 

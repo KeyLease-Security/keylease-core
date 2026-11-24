@@ -78,6 +78,9 @@ mod types;
 mod test;
 
 #[cfg(test)]
+mod test_abi;
+
+#[cfg(test)]
 mod test_wasm;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String};

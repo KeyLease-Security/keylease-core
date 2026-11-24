@@ -1,0 +1,1351 @@
+[
+  {
+    "function_v0": {
+      "doc": "Initialize the registry and appoint `admin`.\\n\\nCan only be called once. The admin is the only account allowed to\\nconfigure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via\\n[`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and\\n[`KeyLeaseRegistry::cancel_upgrade`].",
+      "name": "init",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Configure the SEP-41 token used to escrow deposits. Admin only.\\n\\nKept as a separate, admin-gated entry point so that deployments can point\\nthe registry at the native Stellar asset contract (SAC) or a custom SEP-41\\ntoken without redeploying the registry logic.\\n\\nRepeating the call with the token that is already configured is a **no-op**:\\nnothing is written, the instance TTL is not extended and no\\n`escrow_token_set` event is published, so an idempotent retry can never be\\nmistaken for a token migration. The no-op is decided *after*\\n`require_auth()` and the stored-admin check, so it cannot be used to probe\\nor bypass either of them.",
+      "name": "set_token",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "token",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Queue a Wasm upgrade behind the mandatory [`UPGRADE_DELAY_SECS`] delay.\\n\\nAdmin only. `new_wasm_hash` is the hash produced by\\n`stellar contract upload`. A new proposal replaces a pending one and\\nrestarts the delay, so the exit window can never be shortened. The hash\\nand the execution ledger timestamp are stored and reported by\\n[`UpgradeProposed`]; clients can read them with\\n[`KeyLeaseRegistry::get_pending_upgrade`].",
+      "name": "propose_upgrade",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "new_wasm_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Drop a pending upgrade so it can never be executed. Admin only.\\n\\nEmits [`UpgradeCancelled`] with the abandoned hash. Cancelling when no\\nproposal is pending fails with [`Error::NoPendingUpgrade`].",
+      "name": "cancel_upgrade",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Install the pending Wasm, but only once the delay has elapsed. Admin only.\\n\\nBefore execution, `ledger.timestamp()` must have reached the\\n`execute_after` recorded at proposal time; an early call fails with\\n[`Error::UpgradeDelayNotElapsed`]. The proposal is consumed atomically\\nwith the install and [`ContractUpgraded`] reports both the installed hash\\nand the ledger timestamp that had to be reached.\\n\\nThe contract id stays the same; storage, balances and in-flight leases\\nare preserved, which is why upgrades must never change the storage layout.",
+      "name": "execute_upgrade",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Publish a new leasable service and return its `service_id`.\\n\\n`rate_per_call` is denominated in the escrow token's smallest unit and\\nmust be in `1..=MAX_RATE_PER_CALL`. `endpoint_hash` commits to the\\noff-chain endpoint descriptor.",
+      "name": "register_service",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "provider",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "rate_per_call",
+          "type_": "i128"
+        },
+        {
+          "doc": "",
+          "name": "endpoint_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u64",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Activate or deactivate a service. Only the owning provider may call this.\\n\\nExisting leases remain valid; deactivation only blocks *new* leases.",
+      "name": "set_service_active",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "provider",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "service_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "is_active",
+          "type_": "bool"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Update the rate_per_call and/or endpoint_hash for a service.\\nOnly the owning provider may call this.\\n\\nExisting leases keep their original rate \\xe2\\x80\\x94 `locked_deposit` is escrowed\\nat the old rate and is not altered. Only *new* leases will use the\\nupdated rate.\\n\\nNon-positive `rate_per_call` values are rejected with `Error::InvalidRate`.\\nValues above [`MAX_RATE_PER_CALL`] are rejected with `Error::RateTooHigh`,\\nso an update cannot publish a price the listing path would have refused.",
+      "name": "update_service",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "provider",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "service_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "rate_per_call",
+          "type_": "i128"
+        },
+        {
+          "doc": "",
+          "name": "endpoint_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Opt a service into, out of, or onto a different settlement attestor.\\nOnly the owning provider may call this.\\n\\n`attestor` is an ed25519 public key. Once set, this service's leases can\\nonly be settled through [`KeyLeaseRegistry::settle_lease_attested`] with a payload\\nsigned by that key; [`KeyLeaseRegistry::settle_lease`] fails with\\n`AttestationRequired`. Passing `None` removes the requirement and restores\\nthe default trust model, so the no-attestor mode is one call away at all\\ntimes.\\n\\nOpting in or out takes effect for **every** unsettled lease of the\\nservice, not only for leases created afterwards: the requirement lives on\\nthe service, so a provider that mints leases and then opts in must have\\nthose leases attested too (or let the consumer reclaim them after the\\ngrace window). Opting out is the reverse and is always permitted, which\\nmeans a provider cannot strand a lease behind an attestor that stops\\nanswering: it can, and eventually must, choose between attesting and\\ndropping the requirement.\\n\\nThe attestor is ",
+      "name": "set_service_attestor",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "provider",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "service_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "attestor",
+          "type_": {
+            "option": {
+              "value_type": {
+                "bytes_n": {
+                  "n": 32
+                }
+              }
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Lock a deposit and mint a time-bound lease.\\n\\nTransfers `rate_per_call * requested_calls` of the escrow token from\\n`consumer` into the registry, and records a lease that expires at\\n`ledger.timestamp() + duration_secs`. Requires `consumer` auth.\\n\\n`duration_secs` must be in `1..=MAX_LEASE_DURATION_SECS`. The upper bound\\nis a Soroban storage constraint: the lease's persistent entry is extended\\nfor the whole term plus the grace window, so a longer lease could be\\nevicted while escrow is still locked.\\n\\nThe resulting `rate_per_call * requested_calls` deposit must not exceed\\n`MAX_LEASE_DEPOSIT`; the bound is checked before the escrow token is\\ncalled, so an over-large lease moves nothing.\\n\\nReturns the new `lease_id`.",
+      "name": "create_lease",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "consumer",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "service_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "requested_calls",
+          "type_": "u32"
+        },
+        {
+          "doc": "",
+          "name": "duration_secs",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u64",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Settle a lease, paying the provider for `verified_calls` consumed calls\\nand refunding the remainder to the consumer. Requires provider auth.\\n\\nA lease may only be settled when it has **expired** or when\\n`verified_calls == allocated_calls` (the consumer got everything it\\npaid for, so there is no reason to wait). Settling pays out\\n`verified_calls * rate_per_call` and returns\\n`locked_deposit - payout` to the consumer. A lease can be settled once.\\nThe settlement is added to the service's cumulative totals, which\\n[`KeyLeaseRegistry::service_stats`] reports.",
+      "name": "settle_lease",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "provider",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "verified_calls",
+          "type_": "u32"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Settle a lease using a signed usage attestation. Requires provider auth.\\n\\nThe attestation must be signed by the service's registered attestor over\\n[`usage_attestation_message`], and it must name this lease, this service\\nand this exact `verified_calls` (`AttestationMismatch`, `AttestationStale`\\notherwise). Verification happens before any state changes or token\\ntransfers, so a rejected attestation costs the caller nothing but the fee.\\n\\nEvery non-attestation rule of [`KeyLeaseRegistry::settle_lease`] still applies: the\\nlease must be settleable, the caller must own the service, and the lease\\ncan only be settled once. A service with no attestor configured is\\nrejected with `AttestorNotConfigured` rather than treated as\\nattested \\xe2\\x80\\x94 there would be no key to check the signature against.",
+      "name": "settle_lease_attested",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "provider",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "verified_calls",
+          "type_": "u32"
+        },
+        {
+          "doc": "",
+          "name": "attestation",
+          "type_": {
+            "udt": {
+              "name": "UsageAttestation"
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Reclaim the full deposit for a lease the provider never settled.\\n\\nThe lease must be expired and at least [`SETTLE_GRACE_PERIOD_SECS`]\\n(24 hours) must have elapsed since expiry. Requires `consumer` auth.\\nThis is the consumer's escape hatch: a provider that goes offline cannot\\nstrand escrowed funds.\\n\\nThe lease ends as [`LeaseStatus::Revoked`], distinct from a provider\\nsettlement, and `used_calls` stays `0` because the provider earned\\nnothing. Revocation leaves the service's revenue totals untouched.",
+      "name": "revoke_expired_lease",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "consumer",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Extend the storage entry of a registered service to its standard\\nhorizon. Permissionless.\\n\\nReads stopped extending TTLs (a view that writes the ledger charges the\\ncaller rent and cannot run read-only), so a service that is neither\\ncreated nor updated for 30 days would otherwise be evicted and start\\nanswering `ServiceNotFound` while its leases are still live. This is the\\nexplicit way to prevent that. `create_lease` bumps the service it leases\\nfrom, so an actively-used service never needs this call.\\n\\nThere is no authorisation: the caller pays for the extension out of\\ntheir own transaction fee, the horizon is fixed by the storage policy\\nrather than by the caller, and no lease or balance changes. Bumping a\\nservice you do not own is a donation of rent, not an attack.",
+      "name": "bump_service",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "service_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Extend the storage entry of a live lease using the existing lease TTL\\npolicy. Permissionless.\\n\\nA lease survives `expires_at` plus the settlement grace window plus a\\nbuffer day, and once that horizon is in the past the policy stops\\nshrinking: it keeps asking for the grace window plus the buffer, about\\ntwo days per bump, so nobody has to keep a long-lived lease alive by hand\\nfor the whole term. This call exists for the tail: a consumer who cannot\\nget a revoke in before the horizon, or an indexer that wants the record to\\nstay readable. It never settles, refunds, or moves a lease.\\n\\n# Abuse bound\\n\\n* The extension comes from `lease_ttl_extend` alone \\xe2\\x80\\x94 the caller supplies\\nonly a `lease_id`, so the horizon cannot be pushed past what the\\nlease's own `expires_at` justifies, and `extend_ttl` only ever raises\\n`liveUntilLedgerSeq`, never lowers it.\\n* The rent is charged to the caller's transaction, not to the lease.\\n* A settled lease is rejected with `LeaseAlreadySettled`: its funds have\\nmoved, so keeping the entry aliv",
+      "name": "bump_lease",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Return the configured admin, or `NotInitialized` before `init`.",
+      "name": "get_admin",
+      "inputs": [],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "address",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Return the configured escrow token, or `TokenNotSet`.",
+      "name": "get_token",
+      "inputs": [],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "address",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Pending upgrade waiting out its delay, if one has been proposed.\\n\\nThe returned `execute_after` is a ledger timestamp; clients can compare\\nit with `ledger.timestamp()` to know when execution becomes possible.",
+      "name": "get_pending_upgrade",
+      "inputs": [],
+      "outputs": [
+        {
+          "option": {
+            "value_type": {
+              "udt": {
+                "name": "PendingUpgrade"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Version string embedded in the Wasm by `contractmeta!`.",
+      "name": "version",
+      "inputs": [],
+      "outputs": [
+        "string"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Total number of services registered.",
+      "name": "service_count",
+      "inputs": [],
+      "outputs": [
+        "u64"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Total number of leases ever created.",
+      "name": "lease_count",
+      "inputs": [],
+      "outputs": [
+        "u64"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Fetch a registered service. Pure read: never extends a TTL.",
+      "name": "get_service",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "service_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": {
+              "udt": {
+                "name": "Service"
+              }
+            },
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "List the services `provider` owns, oldest first, one bounded page at a time.\\n\\nReads `limit` entries from the provider's index starting at `after` and\\nreturns them with the cursor to pass back for the next page. Keep paging\\nwhile `done` is `false`; `next` counts index entries consumed, not ids\\nreturned, so a page can be legitimately short when an entry no longer\\nbelongs to the provider.\\n\\nOwnership is re-checked against each `Service` record, which is the\\nauthority: the index is derived state that is appended to on write but\\npruned only on read. A provider with no index yet returns an empty page\\nrather than an error, so a new account can page before it registers.\\n\\nPure read: like every other view, it extends no TTL, its own index entry\\nincluded. Use [`KeyLeaseRegistry::register_service`] or [`KeyLeaseRegistry::set_service_active`]\\nto keep a catalogue's index alive.",
+      "name": "services_for_provider",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "provider",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "after",
+          "type_": "u32"
+        },
+        {
+          "doc": "",
+          "name": "limit",
+          "type_": "u32"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": {
+              "udt": {
+                "name": "ProviderServicePage"
+              }
+            },
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Fetch a lease. Pure read: never extends a TTL.\\n\\nUse [`KeyLeaseRegistry::bump_lease`] to keep an entry alive.",
+      "name": "get_lease",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": {
+              "udt": {
+                "name": "Lease"
+              }
+            },
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Predict what [`KeyLeaseRegistry::create_lease`] would lock, without auth or a transfer.\\n\\nConsumers and SDKs used to re-derive the deposit and the expiry off-chain,\\nwhere any change to contract semantics turns into silent drift. This view\\nruns the same validation, in the same order, as `create_lease`, so every\\nerror it returns is the error `create_lease` would return for the same\\narguments \\xe2\\x80\\x94 with the single exception of a balance the registry never\\nreads: a quote says nothing about whether `consumer` can actually pay.\\n\\n`expires_at` is derived from the current ledger time, so a quote goes\\nstale as soon as the ledger advances.",
+      "name": "quote_lease",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "service_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "requested_calls",
+          "type_": "u32"
+        },
+        {
+          "doc": "",
+          "name": "duration_secs",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": {
+              "udt": {
+                "name": "LeaseQuote"
+              }
+            },
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Derive the lifecycle status of a lease at the current ledger time.\\nDerive the lifecycle status of a lease at the current ledger time.\\nPure read.\\n\\nA lease whose escrow was reclaimed by the consumer reports\\n[`LeaseStatus::Revoked`]; one the provider was paid for reports\\n[`LeaseStatus::Settled`]. Both are final.",
+      "name": "lease_status",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": {
+              "udt": {
+                "name": "LeaseStatus"
+              }
+            },
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Number of calls still available on a lease (zero once settled/expired).\\nNumber of calls still available on a lease (zero once settled/expired).\\nPure read.\\n\\nA revoked lease reports `0` like any other final lease: its allotment\\nexpired unused and the deposit is gone, so there is nothing left to\\nauthorize. The provider's earned count for a revoked lease is the\\n`used_calls` field itself, which revocation leaves at `0`.",
+      "name": "remaining_calls",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u32",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Escrow balance owed to a lease, in token stroops, at the current ledger\\ntime. Pure read.",
+      "name": "locked_balance",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "i128",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted once, when the registry is initialized.",
+      "lib": "",
+      "name": "RegistryInitialized",
+      "prefix_topics": [
+        "registry_initialized"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Address that will administer the registry.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin points the registry at the SEP-41 escrow token.",
+      "lib": "",
+      "name": "EscrowTokenSet",
+      "prefix_topics": [
+        "escrow_token_set"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that authorized the change.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "SEP-41 token contract (SAC or custom) used for deposits and payouts.",
+          "name": "token",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a provider publishes a leasable service.",
+      "lib": "",
+      "name": "ServiceRegistered",
+      "prefix_topics": [
+        "service_registered"
+      ],
+      "params": [
+        {
+          "doc": "Monotonic service identifier.",
+          "name": "service_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Provider that owns the service.",
+          "name": "provider",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Price per metered call, in the escrow token's smallest unit.",
+          "name": "rate_per_call",
+          "type_": "i128",
+          "location": "data"
+        },
+        {
+          "doc": "Commitment to the off-chain endpoint descriptor.",
+          "name": "endpoint_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          },
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a provider pauses or resumes new leases for a service.",
+      "lib": "",
+      "name": "ServiceStatusChanged",
+      "prefix_topics": [
+        "service_status_changed"
+      ],
+      "params": [
+        {
+          "doc": "Service whose status changed.",
+          "name": "service_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Provider that owns the service.",
+          "name": "provider",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "New status: `true` accepts new leases, `false` only lets existing ones settle.",
+          "name": "is_active",
+          "type_": "bool",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a provider updates the rate_per_call and/or endpoint_hash of a service.",
+      "lib": "",
+      "name": "ServiceRateUpdated",
+      "prefix_topics": [
+        "service_rate_updated"
+      ],
+      "params": [
+        {
+          "doc": "Service whose rate/endpoint was updated.",
+          "name": "service_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Provider that owns the service.",
+          "name": "provider",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "New per-call rate in the escrow token's smallest unit.",
+          "name": "rate_per_call",
+          "type_": "i128",
+          "location": "data"
+        },
+        {
+          "doc": "New commitment to the off-chain endpoint descriptor.",
+          "name": "endpoint_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          },
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a provider opts a service into or out of settlement\\nattestation.\\n\\n`attestor` is the ed25519 key a settlement of this service's leases must be\\nsigned with, or `None` when the service opted back out. A new event shape\\ndoes not bump `EVENT_SCHEMA_VERSION`: the version tracks fields of an\\nexisting payload, and no existing payload changed here.",
+      "lib": "",
+      "name": "ServiceAttestorSet",
+      "prefix_topics": [
+        "service_attestor_set"
+      ],
+      "params": [
+        {
+          "doc": "Service whose attestation policy changed.",
+          "name": "service_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Provider that owns the service.",
+          "name": "provider",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "The attestor key now required for settlement, or `None` when disabled.",
+          "name": "attestor",
+          "type_": {
+            "option": {
+              "value_type": {
+                "bytes_n": {
+                  "n": 32
+                }
+              }
+            }
+          },
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a consumer escrows a deposit and a lease is minted.",
+      "lib": "",
+      "name": "LeaseCreated",
+      "prefix_topics": [
+        "lease_created"
+      ],
+      "params": [
+        {
+          "doc": "Monotonic lease identifier.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Service the lease authorizes access to.",
+          "name": "service_id",
+          "type_": "u64",
+          "location": "data"
+        },
+        {
+          "doc": "Address that owns the refund path.",
+          "name": "consumer",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Calls purchased up front.",
+          "name": "allocated_calls",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Ledger timestamp after which the lease no longer authorizes calls.",
+          "name": "expires_at",
+          "type_": "u64",
+          "location": "data"
+        },
+        {
+          "doc": "Deposit held in escrow: `rate_per_call * allocated_calls`.",
+          "name": "locked_deposit",
+          "type_": "i128",
+          "location": "data"
+        },
+        {
+          "doc": "Service rate per metered call, in the escrow token's smallest unit.\\n\\nThis is a snapshot taken when the lease is created, so an indexer can\\ninterpret `locked_deposit` without reading the service at the event's\\nledger. Later changes to the service rate do not affect this value or\\nthe lease's settlement math.",
+          "name": "rate_per_call",
+          "type_": "i128",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a provider settles a lease from escrow.",
+      "lib": "",
+      "name": "LeaseSettled",
+      "prefix_topics": [
+        "lease_settled"
+      ],
+      "params": [
+        {
+          "doc": "Lease that was settled.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Provider that received the payout.",
+          "name": "provider",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Calls the provider reported as consumed.",
+          "name": "verified_calls",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Amount paid to the provider.",
+          "name": "payout",
+          "type_": "i128",
+          "location": "data"
+        },
+        {
+          "doc": "Amount refunded to the consumer.",
+          "name": "refund",
+          "type_": "i128",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a consumer reclaims an expired, unsettled lease.",
+      "lib": "",
+      "name": "LeaseRevoked",
+      "prefix_topics": [
+        "lease_revoked"
+      ],
+      "params": [
+        {
+          "doc": "Lease that was revoked.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Consumer that received the refund.",
+          "name": "consumer",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Full deposit returned to the consumer.",
+          "name": "refund",
+          "type_": "i128",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin proposes a Wasm upgrade.\\n\\n`execute_after` is the ledger timestamp at which `execute_upgrade` becomes\\nlegal, giving consumers a window to exit before the rules change.",
+      "lib": "",
+      "name": "UpgradeProposed",
+      "prefix_topics": [
+        "upgrade_proposed"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that proposed the upgrade.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Hash of the Wasm that will be installed.",
+          "name": "new_wasm_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          },
+          "location": "data"
+        },
+        {
+          "doc": "Ledger timestamp before which execution is rejected.",
+          "name": "execute_after",
+          "type_": "u64",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin cancels a pending Wasm upgrade.",
+      "lib": "",
+      "name": "UpgradeCancelled",
+      "prefix_topics": [
+        "upgrade_cancelled"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that cancelled the upgrade.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Hash of the Wasm that will no longer be installed.",
+          "name": "new_wasm_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          },
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin executes a proposed upgrade after the delay.",
+      "lib": "",
+      "name": "ContractUpgraded",
+      "prefix_topics": [
+        "contract_upgraded"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that authorized the change.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Hash of the new Wasm installed by the Soroban deployer.",
+          "name": "new_wasm_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          },
+          "location": "data"
+        },
+        {
+          "doc": "Ledger timestamp that had to be reached before execution was allowed.",
+          "name": "execute_after",
+          "type_": "u64",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "udt_error_enum_v0": {
+      "doc": "Contract-level error codes returned by [`crate::KeyLeaseRegistry`].\\n * Codes are stable and start at 1 (`0` is reserved by the host for success).\\n * New codes must be appended; codes are part of the ABI.\\n * The full mapping is pinned by `ERROR_ABI` in `test.rs`; extend it on append.",
+      "lib": "",
+      "name": "Error",
+      "cases": [
+        {
+          "doc": "`init` was called on an already-initialized registry.",
+          "name": "AlreadyInitialized",
+          "value": 1
+        },
+        {
+          "doc": "The registry has not been initialized.",
+          "name": "NotInitialized",
+          "value": 2
+        },
+        {
+          "doc": "The caller is not authorized for this operation.",
+          "name": "Unauthorized",
+          "value": 3
+        },
+        {
+          "doc": "No service exists for the given `service_id`.",
+          "name": "ServiceNotFound",
+          "value": 4
+        },
+        {
+          "doc": "The service is deactivated and cannot be leased.",
+          "name": "ServiceInactive",
+          "value": 5
+        },
+        {
+          "doc": "No lease exists for the given `lease_id`.",
+          "name": "LeaseNotFound",
+          "value": 6
+        },
+        {
+          "doc": "The lease has already been settled or revoked.",
+          "name": "LeaseAlreadySettled",
+          "value": 7
+        },
+        {
+          "doc": "The lease cannot be settled yet: it has not expired and is not fully used.",
+          "name": "LeaseNotSettleable",
+          "value": 8
+        },
+        {
+          "doc": "The lease has not reached its expiry timestamp.",
+          "name": "LeaseNotExpired",
+          "value": 9
+        },
+        {
+          "doc": "The 24-hour post-expiry grace window for provider settlement has not elapsed.",
+          "name": "RevokeWindowNotElapsed",
+          "value": 10
+        },
+        {
+          "doc": "Invalid call count (zero, or greater than the allocated allotment).",
+          "name": "InvalidCalls",
+          "value": 11
+        },
+        {
+          "doc": "Invalid lease duration (must be greater than zero).",
+          "name": "InvalidDuration",
+          "value": 12
+        },
+        {
+          "doc": "Invalid per-call rate (must be greater than zero).",
+          "name": "InvalidRate",
+          "value": 13
+        },
+        {
+          "doc": "The escrow token address has not been configured.",
+          "name": "TokenNotSet",
+          "value": 14
+        },
+        {
+          "doc": "Arithmetic overflow during rate or deposit math.",
+          "name": "Overflow",
+          "value": 15
+        },
+        {
+          "doc": "Lease duration exceeds `MAX_LEASE_DURATION_SECS`, so its storage entry\\ncould not be kept alive for the whole term.",
+          "name": "DurationTooLong",
+          "value": 16
+        },
+        {
+          "doc": "Deposit exceeds `MAX_LEASE_DEPOSIT`. Distinct from `Overflow`: the\\nmultiplication fit in `i128`, the amount is simply too large to escrow\\nin a single lease.",
+          "name": "DepositTooLarge",
+          "value": 17
+        },
+        {
+          "doc": "The service has no attestor configured, so `settle_lease_attested` is the\\nwrong entry point for it. Plain `settle_lease` is.",
+          "name": "AttestorNotConfigured",
+          "value": 18
+        },
+        {
+          "doc": "The service requires an attestation, and plain `settle_lease` cannot\\nsupply one.",
+          "name": "AttestationRequired",
+          "value": 19
+        },
+        {
+          "doc": "The attestation is for a different lease, service or call count than the\\nsettlement it is presented with.",
+          "name": "AttestationMismatch",
+          "value": 20
+        },
+        {
+          "doc": "The attestation's `valid_until` has already passed.",
+          "name": "AttestationStale",
+          "value": 21
+        },
+        {
+          "doc": "There is no pending upgrade to execute or cancel.",
+          "name": "NoPendingUpgrade",
+          "value": 22
+        },
+        {
+          "doc": "The proposed upgrade is still inside its mandatory delay window.",
+          "name": "UpgradeDelayNotElapsed",
+          "value": 23
+        },
+        {
+          "doc": "A page size outside `1..=MAX_PAGE_SIZE`, so serving it would read an\\nunbounded number of ledger entries in one transaction.",
+          "name": "InvalidLimit",
+          "value": 24
+        },
+        {
+          "doc": "No early-cancellation request exists for the lease.",
+          "name": "CancellationNotRequested",
+          "value": 25
+        },
+        {
+          "doc": "The lease already has a pending early-cancellation request.",
+          "name": "CancellationAlreadyRequested",
+          "value": 26
+        },
+        {
+          "doc": "Early cancellation is only available before the lease expires.",
+          "name": "LeaseExpired",
+          "value": 27
+        },
+        {
+          "doc": "Published `rate_per_call` exceeds `MAX_RATE_PER_CALL`. Appended after the\\nearly-cancellation codes, so every number already published keeps its\\nmeaning.",
+          "name": "RateTooHigh",
+          "value": 28
+        }
+      ]
+    }
+  }
+]

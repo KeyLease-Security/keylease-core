@@ -2316,6 +2316,40 @@ fn test_remaining_calls_and_locked_balance_are_zero_after_revoke_expired_lease()
     assert_eq!(ctx.registry.lease_status(&lease_id), LeaseStatus::Revoked);
 }
 
+/// Issue #37: a consumer revocation closes the lease without crediting the
+/// provider. The legacy settled flag remains true, but the distinct Revoked
+/// status must be preserved so clients do not mistake a refund for revenue.
+#[test]
+fn test_revoked_expired_lease_exposes_finalized_zero_balance_views() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    let deposit = RATE * 10;
+
+    assert_eq!(ctx.registry.lease_status(&lease_id), LeaseStatus::Active);
+    assert_eq!(ctx.registry.remaining_calls(&lease_id), 10);
+    assert_eq!(ctx.registry.locked_balance(&lease_id), deposit);
+
+    env.ledger().set_timestamp(1_100 + GRACE);
+    assert_eq!(ctx.registry.lease_status(&lease_id), LeaseStatus::Expired);
+    assert_eq!(ctx.registry.remaining_calls(&lease_id), 0);
+    assert_eq!(ctx.registry.locked_balance(&lease_id), deposit);
+
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    assert!(ctx.registry.get_lease(&lease_id).settled);
+    assert_eq!(ctx.registry.lease_status(&lease_id), LeaseStatus::Revoked);
+    assert_eq!(ctx.registry.remaining_calls(&lease_id), 0);
+    assert_eq!(ctx.registry.locked_balance(&lease_id), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+}
+
 #[test]
 fn test_derived_lease_views_report_unknown_lease() {
     let env = Env::default();

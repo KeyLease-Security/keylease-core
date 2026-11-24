@@ -36,11 +36,17 @@ cargo build --target wasm32v1-none --release --all
 ```
 
 CI also runs a cargo-deny dependency policy check (`deny.toml`), a shellcheck
-pass over every tracked shell script, a bats suite over the same scripts, and a
-ClamAV malware scan over the checkout and the built Wasm artifacts. CI job names
-are `Format`, `Shellcheck`, `Shell Tests`, `Clippy`, `Test`,
-`Build (wasm32v1-none)`, `Dependency Policy` and `Malware Scan` — these are the
-required status checks in branch protection.
+pass over every tracked shell script, a gitleaks secret scan, and a ClamAV
+malware scan over the checkout and the built Wasm artifacts. CI job names are
+`Format`, `Shellcheck`, `Clippy`, `Test`, `Build (wasm32v1-none)`,
+`SBOM (CycloneDX)`, `Secret Scan`, `Dependency Policy` and `Malware Scan` — these
+are the required status checks in branch protection.
+
+`SBOM (CycloneDX)` generates a machine-readable inventory of the crates in the
+registry Wasm from `Cargo.lock`, stamps the workspace version and full commit SHA
+into its metadata, and uploads it as the `sbom-cyclonedx` workflow artifact.
+Consumers can download that artifact from the CI run for any commit to answer
+"which crates were compiled into this Wasm?" without rebuilding it.
 
 The shell pass is not one of the four cargo commands, so run it separately:
 
@@ -111,6 +117,8 @@ Never commit secret seeds. `.env` is gitignored.
    emitted event.
 6. Update the interface and event tables in `README.md` and
    [`docs/contract-reference.md`](contract-reference.md).
+7. If the change adds or modifies exported functions, events, or error
+   discriminants, update the ABI snapshot (see [ABI snapshot](#abi-snapshot)).
 
 ## Code standards
 
@@ -157,6 +165,23 @@ both patterns when adding money paths.
 
 Every security-sensitive change needs an adversarial test — an attempt to steal,
 strand, or double-spend.
+
+## ABI snapshot
+
+`contracts/registry/abi_snapshot.json` is a checked-in snapshot of the public
+contract ABI: exported functions, event specs, and error discriminants. The
+`abi_snapshot` test in `contracts/registry/src/test_abi.rs` compares the
+current contract surface against this file and fails on any drift.
+
+To update the snapshot after a legitimate additive change:
+
+```bash
+UPDATE_ABI_SNAPSHOT=1 cargo test -p keylease-registry abi_snapshot -- --nocapture
+```
+
+Review the diff carefully — renames, removals, reordering, or discriminant
+changes are breaking ABI changes and should not be accepted without an explicit
+versioning decision.
 
 ## Releasing a version
 
@@ -229,6 +254,20 @@ A notes page needs these sections, in this order:
 6. **Upgrading from vX.Y.Z** — required whenever a deployed network is running an
    older build; say whether `upgrade` is safe in place.
 7. **Known limitations**, **Verification** (the four commands), **License**.
+8. **Artifacts** — link the `sbom-cyclonedx` workflow artifact so consumers can
+   see the crates compiled into the Wasm. It is generated from `Cargo.lock` by
+   the CI run for the release's commit, with the workspace version and full
+   commit in its CycloneDX metadata. Use this snippet, replacing the version
+   and pointing at the CI run for the tag:
+
+   ```markdown
+   ## Artifacts
+
+   - [CycloneDX SBOM (`sbom-cyclonedx`)](https://github.com/KeyLease-Security/keylease-core/actions/workflows/ci.yml)
+     — crates compiled into this release's Wasm, generated from `Cargo.lock`
+     by the CI run for its commit and stamped with the workspace version and
+     commit.
+   ```
 
 Never put a secret, seed or raw credential in a notes page — including a
 deployer's secret key. Addresses and ledger numbers are fine and useful.
@@ -290,6 +329,7 @@ feeds.
 | Pre/post counters | `service_count`, `lease_count`, `get_service`, `get_lease` | release notes "Verified on-chain" bullet |
 | Signer addresses | admin, provider, demo consumer, escrow token | Testnet table |
 | Source revision | the tag cut in step 4 | Testnet table, "Deployed from" |
+| CycloneDX SBOM | `sbom-cyclonedx` artifact of the tagged CI run | release notes "Artifacts" link |
 
 The built digest and the on-chain hash are the same value only if the build is
 reproducible: check out the tag, run

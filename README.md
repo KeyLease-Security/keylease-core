@@ -256,6 +256,17 @@ Full options, upgrades and network settings are in
 
 ---
 
+## Local secret scanning
+
+Pull requests are scanned by gitleaks in CI. Run it locally before opening a PR:
+
+```bash
+gitleaks detect --source . --redact --verbose --config .gitleaks.toml
+```
+
+`.gitleaks.toml` is the only allowlist; add entries only for documented false
+positives.
+
 ## Documentation
 
 📖 **Read the docs: <https://keylease-security.github.io/keylease-core/>**
@@ -350,7 +361,7 @@ What stands in place of an audit:
 | Security properties this README states | 8, in [Security model](#security-model) |
 | Invariants asserted outright in tests | 5, in [Security model → Invariants](./docs/security.md#invariants) |
 | Threats modelled | 14, in [Security model → Threats considered](./docs/security.md#threats-considered) |
-| CI gates on every PR | 8 (`Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Spell Check`, `Markdown Lint`, `Dependency Policy`, `Malware Scan`) |
+| CI gates on every PR | 9 (`Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Secret Scan`, `Spell Check`, `Markdown Lint`, `Dependency Policy`, `Malware Scan`) |
 
 The eight above are the security properties this README claims; the five are the
 ones `contracts/registry/src/test.rs` asserts outright. They overlap and are not
