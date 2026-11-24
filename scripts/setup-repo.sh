@@ -100,6 +100,7 @@ PROTECTION='{
       "Clippy",
       "Test",
       "Build (wasm32v1-none)",
+      "Secret Scan",
       "Spell Check",
       "Markdown Lint",
       "Dependency Policy",

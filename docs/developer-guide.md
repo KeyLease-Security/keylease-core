@@ -36,10 +36,11 @@ cargo build --target wasm32v1-none --release --all
 ```
 
 CI also runs a cargo-deny dependency policy check (`deny.toml`), a shellcheck
-pass over every tracked shell script, and a ClamAV malware scan over the
-checkout and the built Wasm artifacts. CI job names are `Format`, `Shellcheck`,
-`Clippy`, `Test`, `Build (wasm32v1-none)`, `SBOM (CycloneDX)`, `Dependency Policy`
-and `Malware Scan` — these are the required status checks in branch protection.
+pass over every tracked shell script, a gitleaks secret scan, and a ClamAV
+malware scan over the checkout and the built Wasm artifacts. CI job names are
+`Format`, `Shellcheck`, `Clippy`, `Test`, `Build (wasm32v1-none)`,
+`SBOM (CycloneDX)`, `Secret Scan`, `Dependency Policy` and `Malware Scan` — these
+are the required status checks in branch protection.
 
 `SBOM (CycloneDX)` generates a machine-readable inventory of the crates in the
 registry Wasm from `Cargo.lock`, stamps the workspace version and full commit SHA
@@ -116,6 +117,8 @@ Never commit secret seeds. `.env` is gitignored.
    emitted event.
 6. Update the interface and event tables in `README.md` and
    [`docs/contract-reference.md`](contract-reference.md).
+7. If the change adds or modifies exported functions, events, or error
+   discriminants, update the ABI snapshot (see [ABI snapshot](#abi-snapshot)).
 
 ## Code standards
 
@@ -162,6 +165,23 @@ both patterns when adding money paths.
 
 Every security-sensitive change needs an adversarial test — an attempt to steal,
 strand, or double-spend.
+
+## ABI snapshot
+
+`contracts/registry/abi_snapshot.json` is a checked-in snapshot of the public
+contract ABI: exported functions, event specs, and error discriminants. The
+`abi_snapshot` test in `contracts/registry/src/test_abi.rs` compares the
+current contract surface against this file and fails on any drift.
+
+To update the snapshot after a legitimate additive change:
+
+```bash
+UPDATE_ABI_SNAPSHOT=1 cargo test -p keylease-registry abi_snapshot -- --nocapture
+```
+
+Review the diff carefully — renames, removals, reordering, or discriminant
+changes are breaking ABI changes and should not be accepted without an explicit
+versioning decision.
 
 ## Releasing a version
 

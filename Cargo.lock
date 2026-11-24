@@ -1077,7 +1077,9 @@ name = "keylease-registry"
 version = "0.3.0"
 dependencies = [
  "keylease-mock-token",
+ "serde_json",
  "soroban-sdk",
+ "stellar-xdr",
 ]
 
 [[package]]

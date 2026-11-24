@@ -17,6 +17,8 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+stellar-xdr = { version = "=26.0.1", default-features = false, features = ["curr", "std", "serde"] }
+serde_json = "1"
 keylease-mock-token = { path = "../mock_token", version = "0.3.0" }
 
 [features]

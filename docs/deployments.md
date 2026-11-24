@@ -117,6 +117,16 @@ stellar contract invoke --id <ID> --source-account <funded-account> --network te
 stellar events --id <ID> --network testnet --start-ledger <ledger>
 ```
 
+For the same checks with clear pass/fail output, point the verification script
+at your `.env` (or export `KEYLEASE_CONTRACT_ID` and related values):
+
+```bash
+./scripts/verify-deployment.sh --env-file .env
+```
+
+The script checks `version`, `get_admin`, `get_token` and the configured demo
+service, exits non-zero on any mismatch, and supports `--dry-run`.
+
 `version()` must match the release this page claims, `get_admin()` must be the
 documented admin, and `escrow_token_set` / `service_registered` events must
 appear at the recorded deployment ledger.

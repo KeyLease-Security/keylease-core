@@ -221,6 +221,17 @@ stellar contract invoke --id $REGISTRY --source-account keylease-admin --network
 stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- service_count
 ```
 
+For a repeatable, pass/fail check, use the verification script. It reads the
+contract id from `.env` (or the environment), checks `version`, `get_admin`,
+`get_token` and a demo service, prints PASS/FAIL per check, and exits non-zero
+on mismatch:
+
+```bash
+./scripts/verify-deployment.sh --env-file .env
+# Preview without network calls:
+./scripts/verify-deployment.sh --env-file .env --dry-run
+```
+
 `version` is embedded by `contractmeta!`, so it proves which release is live.
 The contract id itself is in the registry: see
 [Deployments](deployments.md), and the explorer link for that network in
@@ -466,6 +477,25 @@ Upgrades with a multisig admin are coordinated through transaction envelopes:
    `KEYLEASE_CONTRACT_ID`, `KEYLEASE_RPC_URL` and `KEYLEASE_NETWORK`.
 3. **Subscribe to events**, or read `get_lease` on demand — see
    [Integration](integration.md).
+4. **Optionally run the smoke test** after deployment to confirm the contract can
+   escrow and settle a one-call lease on the selected network. It is opt-in and
+   guarded to avoid accidental production runs:
+
+```bash
+KEYLEASE_SMOKE_TEST=1 \
+CONSUMER_IDENTITY=keylease-consumer \
+PROVIDER_IDENTITY=keylease-admin \
+KEYLEASE_CONTRACT_ID=C... \
+KEYLEASE_SERVICE_ID=1 \
+KEYLEASE_TOKEN_ADDRESS=C... \
+./scripts/smoke-test-deployment.sh --env-file .env
+```
+
+Use `--dry-run` to print the planned commands without sending transactions.
+Set `KEYLEASE_SMOKE_VERIFIED_CALLS=0` or `1` to control settlement; `1` is the
+default. The script prints create/settle transaction output and exits non-zero
+on failure. Mainnet requires both `KEYLEASE_NETWORK=mainnet` and
+`KEYLEASE_ALLOW_MAINNET=1`.
 
 ## Networks
 

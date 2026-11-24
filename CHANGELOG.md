@@ -19,6 +19,9 @@ version in [`Cargo.toml`](./Cargo.toml). Per-release notes live in
   maximum.
 - Shared `setup_with_service` test helper that returns a funded registry with
   one active service while leaving ledger time explicit in every test.
+- Checked-in ABI snapshot (`contracts/registry/abi_snapshot.json`) covering
+  exported functions, event specs, and error discriminants, with a test that
+  fails on drift and developer-guide instructions for legitimate updates.
 - CycloneDX SBOM of the registry Wasm's crates, generated from `Cargo.lock` in
   CI and published as the `sbom-cyclonedx` workflow artifact with the workspace
   version and commit in its metadata; linked from the release notes template.
