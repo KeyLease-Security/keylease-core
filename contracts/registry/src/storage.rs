@@ -114,6 +114,8 @@ pub enum DataKey {
     /// new field would change the encoding of every existing service entry. A
     /// new key is invisible until the provider opts the service in.
     ServiceAttestor(u64),
+    /// Owner-managed settlement operators for a service (persistent storage).
+    ServiceOperators(u64),
     /// Pending, time-locked Wasm upgrade (instance storage). Append-only:
     /// existing keys keep their wire encoding.
     PendingUpgrade,
@@ -282,6 +284,22 @@ pub fn get_service_attestor(env: &Env, service_id: u64) -> Option<BytesN<32>> {
     env.storage()
         .persistent()
         .get(&DataKey::ServiceAttestor(service_id))
+}
+
+pub fn get_service_operators(env: &Env, service_id: u64) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ServiceOperators(service_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn save_service_operators(env: &Env, service_id: u64, operators: &Vec<Address>) {
+    let key = DataKey::ServiceOperators(service_id);
+    env.storage().persistent().set(&key, operators);
+    let extend_to = LEDGER_BUMP_EXTEND.min(ttl_ceiling(env));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LEDGER_BUMP_THRESHOLD, extend_to);
 }
 
 /// Pure lookup: reads a service and touches no storage metadata.

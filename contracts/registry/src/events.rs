@@ -144,6 +144,26 @@ pub struct ServiceAttestorSet {
     pub attestor: Option<BytesN<32>>,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceOperatorGranted {
+    #[topic]
+    pub service_id: u64,
+    pub schema_version: u32,
+    pub provider: Address,
+    pub operator: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceOperatorRevoked {
+    #[topic]
+    pub service_id: u64,
+    pub schema_version: u32,
+    pub provider: Address,
+    pub operator: Address,
+}
+
 /// Emitted when a consumer escrows a deposit and a lease is minted.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

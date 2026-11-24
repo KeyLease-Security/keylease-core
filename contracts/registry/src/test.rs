@@ -1120,6 +1120,40 @@ fn test_lease_cannot_be_settled_twice() {
 }
 
 #[test]
+fn test_service_operator_grant_settle_revoke_and_owner_only_controls() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let operator = Address::generate(&env);
+
+    ctx.registry
+        .grant_service_operator(&ctx.provider, &service_id, &operator);
+    assert!(ctx.registry.is_service_operator(&service_id, &operator));
+    ctx.registry.settle_lease(&operator, &lease_id, &10);
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 10);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    ctx.registry
+        .revoke_service_operator(&ctx.provider, &service_id, &operator);
+    assert!(!ctx.registry.is_service_operator(&service_id, &operator));
+    assert_eq!(
+        ctx.registry.try_settle_lease(&operator, &lease_id, &10),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_update_service(&operator, &service_id, &200, &endpoint_hash(&env)),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+#[test]
 fn test_only_owning_provider_can_settle() {
     let env = Env::default();
     env.ledger().set_timestamp(1_000);
@@ -3988,7 +4022,7 @@ fn test_fresh_counters_start_at_zero_and_move_only_on_success() {
 /// Every published error code with the variant it names, in order. This is the
 /// table in `docs/contract-reference.md`; the two must change together, and only
 /// by appending.
-const ERROR_ABI: [(u32, Error); 28] = [
+const ERROR_ABI: [(u32, Error); 29] = [
     (1, Error::AlreadyInitialized),
     (2, Error::NotInitialized),
     (3, Error::Unauthorized),
@@ -4017,6 +4051,7 @@ const ERROR_ABI: [(u32, Error); 28] = [
     (26, Error::CancellationAlreadyRequested),
     (27, Error::LeaseExpired),
     (28, Error::RateTooHigh),
+    (29, Error::TooManyOperators),
 ];
 
 #[test]

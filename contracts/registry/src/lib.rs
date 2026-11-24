@@ -80,7 +80,7 @@ mod test;
 #[cfg(test)]
 mod test_wasm;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec};
 
 use crate::types::CancelRequest;
 
@@ -181,6 +181,9 @@ pub const MAX_RATE_PER_CALL: i128 = MAX_LEASE_DEPOSIT;
 /// a single call read a provider's whole index and blow the transaction budget.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
+/// Maximum settlement operators that may be granted per service.
+pub const MAX_SERVICE_OPERATORS: u32 = 10;
+
 /// Domain separator prefixed to every usage-attestation message.
 ///
 /// It keeps a signature produced for this protocol from being valid for some
@@ -255,6 +258,78 @@ impl KeyLeaseRegistry {
         }
         .publish(&env);
         Ok(())
+    }
+
+    /// Grant settlement authority to an operator for one service.
+    /// Only the owning provider may grant or revoke operators.
+    pub fn grant_service_operator(
+        env: Env,
+        provider: Address,
+        service_id: u64,
+        operator: Address,
+    ) -> Result<(), Error> {
+        provider.require_auth();
+        let service = storage::get_service(&env, service_id)?;
+        if service.provider != provider {
+            return Err(Error::Unauthorized);
+        }
+        let mut operators = storage::get_service_operators(&env, service_id);
+        if operators.contains(operator.clone()) {
+            return Ok(());
+        }
+        if operators.len() >= MAX_SERVICE_OPERATORS {
+            return Err(Error::TooManyOperators);
+        }
+        operators.push_back(operator.clone());
+        storage::save_service_operators(&env, service_id, &operators);
+        crate::events::ServiceOperatorGranted {
+            service_id,
+            schema_version: EVENT_SCHEMA_VERSION,
+            provider,
+            operator,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Revoke settlement authority from an operator immediately.
+    pub fn revoke_service_operator(
+        env: Env,
+        provider: Address,
+        service_id: u64,
+        operator: Address,
+    ) -> Result<(), Error> {
+        provider.require_auth();
+        let service = storage::get_service(&env, service_id)?;
+        if service.provider != provider {
+            return Err(Error::Unauthorized);
+        }
+        let operators = storage::get_service_operators(&env, service_id);
+        let mut retained = Vec::new(&env);
+        for current in operators.iter() {
+            if current != operator {
+                retained.push_back(current);
+            }
+        }
+        storage::save_service_operators(&env, service_id, &retained);
+        crate::events::ServiceOperatorRevoked {
+            service_id,
+            schema_version: EVENT_SCHEMA_VERSION,
+            provider,
+            operator,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Return whether an address may settle this service.
+    pub fn is_service_operator(
+        env: Env,
+        service_id: u64,
+        operator: Address,
+    ) -> Result<bool, Error> {
+        storage::get_service(&env, service_id)?;
+        Ok(storage::get_service_operators(&env, service_id).contains(operator))
     }
 
     /// Configure the SEP-41 token used to escrow deposits. Admin only.
@@ -883,7 +958,9 @@ impl KeyLeaseRegistry {
         }
 
         let service = storage::get_service(&env, lease.service_id)?;
-        if service.provider != provider {
+        if service.provider != provider
+            && !storage::get_service_operators(&env, lease.service_id).contains(provider.clone())
+        {
             return Err(Error::Unauthorized);
         }
 
@@ -929,7 +1006,7 @@ impl KeyLeaseRegistry {
         LeaseSettled {
             lease_id: lease.lease_id,
             schema_version: EVENT_SCHEMA_VERSION,
-            provider,
+            provider: service.provider,
             verified_calls,
             payout,
             refund,
