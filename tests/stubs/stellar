@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Test stub for the Stellar CLI.
+#
+# Records argv in $STUB_LOG and returns fixed, well-formed values so the
+# scripts can be followed end to end without a network, a keystore or the real
+# toolchain. Set $STUB_ADDRESS to change the address `keys address` reports.
+set -euo pipefail
+
+printf 'stellar %s\n' "$*" >>"${STUB_LOG:-/dev/null}"
+
+case "${1:-} ${2:-}" in
+  'keys address')
+    printf '%s\n' "${STUB_ADDRESS:-GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF}"
+    ;;
+  'contract id')
+    printf '%s\n' 'CDMLFMKMMD7MWZP3FKUBZPVHTUEDLSX4BYGYKH4GCESXYHS3IHQ4EIG4'
+    ;;
+  'contract deploy')
+    printf '%s\n' 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4'
+    ;;
+  'contract upload')
+    printf '%064d\n' 0
+    ;;
+  'contract invoke')
+    printf '%s\n' '1'
+    ;;
+esac
+
+exit 0

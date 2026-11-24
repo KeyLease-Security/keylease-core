@@ -17,11 +17,15 @@ Key facts you must not guess:
 - Grace period: `SETTLE_GRACE_PERIOD_SECS = 24 * 60 * 60`.
 - Maximum lease: `MAX_LEASE_DURATION_SECS = 30 * 24 * 60 * 60`
   (`DurationTooLong` = 16).
+- Maximum deposit: `MAX_LEASE_DEPOSIT = 1_000_000_000_000` base units
+  (`DepositTooLarge` = 17), checked on the `rate_per_call × requested_calls`
+  product after the multiplication and before the token call.
 - `create_lease(consumer, service_id: u64, requested_calls: u32, duration_secs: u64) -> u64`.
   **`consumer` is the first argument.**
 - `settle_lease(provider, lease_id, verified_calls)` — allowed only when the
   lease has expired **or** `verified_calls == allocated_calls`.
-- Error codes 1–16 in `errors.rs` are part of the ABI. **Append, never renumber.**
+- Error codes 1–17 in `errors.rs` are part of the ABI. **Append, never
+  renumber.**
 - Events in `events.rs` are part of the ABI too: `lease_created`,
   `lease_settled`, `lease_revoked`, etc. Their names, topics and payload fields
   are what indexers rely on.

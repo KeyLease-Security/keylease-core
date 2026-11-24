@@ -1,0 +1,38 @@
+// Markdown lint configuration for the `Markdown Lint` job in
+// .github/workflows/ci.yml. markdownlint-cli2 discovers this file, so running
+// `markdownlint-cli2` in the repository root lints exactly what CI lints.
+//
+// Install and run locally (CI pins v25 of the action, which is
+// markdownlint-cli2 0.24.0):
+//
+//   npx markdownlint-cli2@0.24.0
+{
+  // Every tracked Markdown file, plus the generated directories a local run
+  // would otherwise walk (a CI checkout has neither `site/` nor `target/`).
+  // They hold no Markdown today; the exclusions keep a future `mkdocs` copy
+  // step or a vendored `README.md` under `target/` from changing what CI sees.
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules/**", "site/**", "target/**"],
+  "config": {
+    "MD013": {
+      // Prose is hand-wrapped near 80 columns. The exceptions are shell
+      // commands and long link targets, which read worse split across lines,
+      // plus code blocks and tables, where re-wrapping would change the
+      // rendered diagram or break a row.
+      "line_length": 120,
+      "code_blocks": false,
+      "tables": false
+    },
+    "MD024": {
+      // The contract reference repeats labels such as "Errors" under every
+      // entry point. Those headings sit under different parents, so they are
+      // sections rather than duplicates.
+      "siblings_only": true
+    },
+    // The docs use run-in bold labels ("**In scope**", "**2c. Consumer burns
+    // all 500 calls**") inside long reference pages. Promoting them to headings
+    // would give those labels more TOC entries than the sections they belong to,
+    // so the rule is off repo-wide instead of being silenced line by line.
+    "MD036": false
+  }
+}

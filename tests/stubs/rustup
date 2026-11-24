@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Test stub for rustup: the wasm32v1-none target is always reported installed.
+set -euo pipefail
+
+printf 'rustup %s\n' "$*" >>"${STUB_LOG:-/dev/null}"
+
+if [ "${1:-}" = "target" ] && [ "${2:-}" = "list" ]; then
+  printf '%s\n' 'wasm32v1-none'
+fi
+
+exit 0

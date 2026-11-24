@@ -18,6 +18,7 @@ the Stellar ledger holds the truth about every lease.
 | understand what KeyLease is and why it is on Stellar | [Introduction](introduction.md) |
 | see how the contract, storage and events fit together | [Architecture](architecture.md) |
 | understand the state machine, events and the economics | [How the protocol works](protocol.md) |
+| look up a protocol term | [Glossary](glossary.md) |
 | look up an entry point, event or error code | [Contract reference](contract-reference.md) |
 | verify leases from my own service | [Integration](integration.md) |
 | find RPC endpoints, passphrases and SAC addresses | [Networks](networks.md) |
@@ -25,6 +26,7 @@ the Stellar ledger holds the truth about every lease.
 | buy metered access to an API | [Consumer guide](consumer-guide.md) |
 | build on, test or upgrade the contract | [Developer guide](developer-guide.md) |
 | deploy with the Stellar CLI | [Deployment](deployment.md) |
+| fix a call that failed | [Troubleshooting](troubleshooting.md) |
 | understand the trust assumptions | [Security model](security.md) |
 
 ## The Stellar loop

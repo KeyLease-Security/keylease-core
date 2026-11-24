@@ -22,30 +22,79 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+      - name: Check every tracked shell script
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          # The file list comes from the index, not a working-tree glob: a script
+          # that is tracked but moved out of scripts/ still has to be linted.
+          scripts=()
+          while IFS= read -r -d '' file; do
+            scripts+=("$file")
+          done < <(git ls-files -z '*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::No tracked *.sh files matched; this check would pass without covering anything"
+            exit 1
+          fi
+          printf 'checking %d script(s):\n' "${#scripts[@]}"
+          printf '  %s\n' "${scripts[@]}"
+          shellcheck "${scripts[@]}"
+
+  shell-tests:
+    name: Shell Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bats
+      # The suite lives in tests/ and stubs gh, stellar, cargo and rustup on
+      # PATH (tests/stubs), so it needs no network, credentials or toolchain.
+      - name: Run the shell script tests
+        run: bats --tap tests
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+      # The host run above lints tests and the std/testutils build. This one
+      # lints the artifact that is actually deployed: the contracts compiled
+      # no_std for the Soroban target in release, against the SDK's guest
+      # environment instead of the host one. It stays in this job so the
+      # "Clippy" required check name in branch protection does not change.
+      - name: cargo clippy (wasm32v1-none)
+        run: cargo clippy --target wasm32v1-none --release --all -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
@@ -55,19 +104,259 @@ jobs:
     name: Build (wasm32v1-none)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
       - name: Build Soroban contracts
         run: cargo build --target wasm32v1-none --release --all
+      # Fails if a contract crate drops #![no_std] or its unsafe_code lints,
+      # if the target ever ships a std to link, or if a built .wasm imports
+      # anything but Soroban host functions or carries std source paths.
+      # Kept in this job so the required check name does not change.
+      - name: Check Wasm is built without std
+        run: ./scripts/check-no-std.sh --no-build
+      - name: Generate Wasm checksums
+        run: |
+          set -euo pipefail
+          (
+            cd target/wasm32v1-none/release
+            sha256sum keylease_registry.wasm keylease_mock_token.wasm > SHA256SUMS
+            cat SHA256SUMS
+          )
+      - name: Upload Wasm and checksums
+        uses: actions/upload-artifact@v7
+        with:
+          # The commit in the name makes it easy to match an artifact to a PR.
+          name: wasm-${{ github.sha }}
+          path: |
+            target/wasm32v1-none/release/keylease_registry.wasm
+            target/wasm32v1-none/release/keylease_mock_token.wasm
+            target/wasm32v1-none/release/SHA256SUMS
+          if-no-files-found: error
+      - name: Verify reproducible Wasm build
+        run: |
+          set -euo pipefail
+          first_registry="$(sha256sum target/wasm32v1-none/release/keylease_registry.wasm | awk '{print $1}')"
+          first_mock="$(sha256sum target/wasm32v1-none/release/keylease_mock_token.wasm | awk '{print $1}')"
+          echo "first build  keylease_registry.wasm:    $first_registry"
+          echo "first build  keylease_mock_token.wasm: $first_mock"
+          cargo clean --target wasm32v1-none --release
+          cargo build --target wasm32v1-none --release --all
+          second_registry="$(sha256sum target/wasm32v1-none/release/keylease_registry.wasm | awk '{print $1}')"
+          second_mock="$(sha256sum target/wasm32v1-none/release/keylease_mock_token.wasm | awk '{print $1}')"
+          echo "second build keylease_registry.wasm:    $second_registry"
+          echo "second build keylease_mock_token.wasm: $second_mock"
+          if [ "$first_registry" != "$second_registry" ] || [ "$first_mock" != "$second_mock" ]; then
+            echo "::error::Release Wasm build is not reproducible"
+            echo "keylease_registry.wasm:    first=$first_registry second=$second_registry"
+            echo "keylease_mock_token.wasm:  first=$first_mock second=$second_mock"
+            exit 1
+          fi
+          echo "Reproducible Wasm hash (keylease_registry.wasm): $first_registry"
+          echo "Compare with the Wasm hash recorded in docs/deployments.md."
+
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Pin the generator so re-running a commit produces the same inventory.
+      # cargo-cyclonedx reads Cargo.lock for exact crate versions and hashes,
+      # and cargo metadata for the resolved dependency graph.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.10 --locked
+      # The registry is the contract deployed to Soroban; mock_token is
+      # test-only. Filtering to the Wasm target and excluding dev-dependencies
+      # keeps the inventory to crates that go into the release Wasm.
+      - name: Generate the CycloneDX SBOM from Cargo.lock
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --format json --spec-version 1.5 \
+            --target wasm32v1-none --no-build-deps --override-filename bom
+          test -s contracts/registry/bom.json
+      - name: Stamp workspace version and commit into SBOM metadata
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          WORKSPACE_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          export WORKSPACE_VERSION
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          bom = json.loads(Path("contracts/registry/bom.json").read_text())
+          if bom.get("bomFormat") != "CycloneDX":
+              raise SystemExit("generated document is not a CycloneDX SBOM")
+
+          metadata = bom.setdefault("metadata", {})
+          metadata.setdefault("component", {})["version"] = os.environ["WORKSPACE_VERSION"]
+
+          # Keep the generator's own properties and replace only our stamps,
+          # so re-stamping an SBOM cannot duplicate them.
+          properties = metadata.setdefault("properties", [])
+          properties[:] = [
+              prop for prop in properties
+              if prop.get("name") not in {"keylease:version", "keylease:commit"}
+          ]
+          properties.extend([
+              {"name": "keylease:version", "value": os.environ["WORKSPACE_VERSION"]},
+              {"name": "keylease:commit", "value": os.environ["COMMIT_SHA"]},
+          ])
+
+          component = metadata["component"]
+          references = component.setdefault("externalReferences", [])
+          references[:] = [ref for ref in references if ref.get("type") != "vcs"]
+          references.append({
+              "type": "vcs",
+              "url": "https://github.com/KeyLease-Security/keylease-core/commit/"
+                  + os.environ["COMMIT_SHA"],
+          })
+
+          out = Path("sbom")
+          out.mkdir(exist_ok=True)
+          (out / "keylease-core.cyclonedx.json").write_text(json.dumps(bom, indent=2) + "\n")
+          PY
+      - name: Verify SBOM metadata
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          bom = json.loads(Path("sbom/keylease-core.cyclonedx.json").read_text())
+          metadata = bom["metadata"]
+          props = {prop["name"]: prop["value"] for prop in metadata["properties"]}
+          if bom["bomFormat"] != "CycloneDX" or not bom["components"]:
+              raise SystemExit("SBOM is not a populated CycloneDX document")
+          if props.get("keylease:version") != metadata["component"]["version"]:
+              raise SystemExit("workspace version is missing from SBOM metadata")
+          if len(props.get("keylease:commit", "")) != 40:
+              raise SystemExit("full commit SHA is missing from SBOM metadata")
+          print(
+              f"SBOM: {len(bom['components'])} components, "
+              f"version {props['keylease:version']}, commit {props['keylease:commit']}"
+          )
+          PY
+      - name: Upload CycloneDX SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          # The release notes link to this artifact by name; keep it stable.
+          name: sbom-cyclonedx
+          path: sbom/keylease-core.cyclonedx.json
+          if-no-files-found: error
+  rustdoc:
+    # Stable check name: branch protection requires `Rustdoc`, so renaming this
+    # job orphans the requirement instead of moving it.
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Intra-doc links, undocumented public items and manifest metadata problems
+      # all become errors here, which is what `cargo doc` otherwise never reports.
+      # `--document-private-items` is part of the gate, not an accident: private
+      # modules are where the storage and event layout lives, and links into them
+      # have to keep resolving too.
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items
+
+  spellcheck:
+    name: Spell Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Docs, README and Rust comments, over every tracked file. The version is
+      # pinned to match the tool contributors run locally, and `_typos.toml` in
+      # the repository root holds the project dictionary, so a local `typos` run
+      # reports exactly what this job reports. Findings fail the job.
+      - uses: crate-ci/typos@v1.52.2
+
+  markdown:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Globs and rule settings come from `.markdownlint-cli2.jsonc`, the same
+      # file `markdownlint-cli2` reads in the repository root. Headings, links
+      # and list style are checked here; `mkdocs build --strict` (docs.yml)
+      # keeps checking navigation and anchors.
+      - uses: DavidAnson/markdownlint-cli2-action@v25
+
+  actionlint:
+    name: Action Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # actionlint is a binary, not an action, so the release is fetched by an
+      # explicit version and its checksum verified against the release's own
+      # checksums file. That keeps the linter version a reviewable constant in
+      # this file instead of whatever `latest` happens to mean today.
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          base="https://github.com/rhysd/actionlint/releases/download/v${version}"
+          curl -sSfL -o "/tmp/${archive}" "${base}/${archive}"
+          curl -sSfL -o /tmp/actionlint-checksums.txt "${base}/actionlint_${version}_checksums.txt"
+          (
+            cd /tmp
+            grep -E "^[0-9a-f]{64}  ${archive}\$" actionlint-checksums.txt | sha256sum --check --status
+          )
+          tar -xzf "/tmp/${archive}" -C /tmp actionlint
+      # actionlint hands every inline `run:` script to shellcheck and skips that
+      # rule silently when the binary is missing, so it is installed here rather
+      # than trusted to be present on the runner image.
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+      # No paths filter: a workflow file can be broken by any PR that edits one,
+      # and this job is only useful if it also catches the ones nobody touched.
+      # With no arguments actionlint lints every file under .github/workflows.
+      - name: Lint every workflow file
+        run: /tmp/actionlint -no-color
+
+  gitleaks:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -sSfL -o "/tmp/${archive}" "${base}/${archive}"
+          curl -sSfL -o /tmp/gitleaks-checksums.txt "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          (
+            cd /tmp
+            grep "  ${archive}$" gitleaks-checksums.txt | sha256sum --check --status
+          )
+          tar -xzf "/tmp/${archive}" -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      # Fails on findings. .gitleaks.toml holds only documented false positives.
+      - name: Scan for committed secrets
+        run: gitleaks detect --source . --redact --verbose --config .gitleaks.toml
 
   deny:
     name: Dependency Policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Checks the committed Cargo.lock against deny.toml: RustSec advisories,
       # license allow-list, wildcard/git dependencies and unknown registries.
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -81,7 +370,7 @@ jobs:
     steps:
       # The checkout only needs to be read; do not leave the job token in
       # .git/config for the scanners to read.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -143,7 +432,7 @@ jobs:
 
       - name: Upload scan report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: clamav-report
           path: clamav-report.txt

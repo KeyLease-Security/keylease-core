@@ -1078,7 +1078,9 @@ version = "0.3.0"
 dependencies = [
  "ed25519-dalek",
  "keylease-mock-token",
+ "serde_json",
  "soroban-sdk",
+ "stellar-xdr",
 ]
 
 [[package]]

@@ -34,8 +34,8 @@ token. **The credential is the lease, and the lease lives on Stellar.**
 | **`Address` authorization** | every state-changing entry point | Actors are Stellar accounts (`G…`) or contracts (`C…`) authenticated by the host's `require_auth()`. Multi-sig and smart-wallet accounts work with no contract change. |
 | **Soroban contract events** | `contracts/registry/src/events.rs` | Each transition publishes a typed event with the ids in its topics, so indexers and providers can follow escrow from the RPC event stream instead of polling storage. |
 | **Ledger time** | lease expiry and the 24-hour settlement grace window | Timestamps come from `env.ledger().timestamp()`, never from an off-chain clock. |
-| **Persistent-storage TTL** | `contracts/registry/src/storage.rs` | Lease entries are extended for their whole term plus the grace window, so escrow can never be evicted while it is still claimable. |
-| **`contractmeta!`** | `contracts/registry/src/lib.rs` | Name, version, description and repository are embedded in the Wasm and readable on-chain. |
+| **Persistent-storage TTL** | `contracts/registry/src/storage.rs` | Writes extend the lease entry for its whole term plus the grace window, so escrow cannot be evicted while it is still claimable. Reads never extend: `bump_lease` / `bump_service` do that, on purpose and on the caller's meter. |
+| **`contractmeta!`** | `contracts/registry/src/lib.rs` | Name, version, description, repository and `eventSchemaVersion` are embedded in the Wasm and readable on-chain. |
 | **Soroban deployer upgrades** | `upgrade(admin, new_wasm_hash)` | The admin can install a new Wasm through `update_current_contract_wasm`, keeping the contract id, balances and in-flight leases. |
 | **`wasm32v1-none` + `soroban-sdk 26`** | `Cargo.toml`, CI | The workspace builds the exact artifact Stellar runs. |
 | **Soroban test utilities incl. the real SAC** | `contracts/registry/src/test.rs` | The suite escrows against `register_stellar_asset_contract_v2`, not just a mock token. |
@@ -80,14 +80,15 @@ keylease-core/
 │   │   ├── src/
 │   │   │   ├── lib.rs     # entry points, contractmeta, upgrade, lifecycle docs
 │   │   │   ├── events.rs  # typed Soroban events (the indexing surface)
-│   │   │   ├── types.rs   # Service, Lease, LeaseStatus
+│   │   │   ├── types.rs   # Service, Lease, ServiceStats, LeaseStatus
 │   │   │   ├── storage.rs # DataKey layout + duration-aware TTL policy
 │   │   │   ├── errors.rs  # stable error codes
-│   │   │   └── test.rs    # lifecycle, SAC, events, upgrade, re-entrancy tests
+│   │   │   └── test.rs    # lifecycle, SAC, events, upgrade, TTL, re-entrancy tests
 │   │   └── Cargo.toml
 │   └── mock_token/        # minimal SEP-41 token for tests & local sandboxes
 ├── scripts/
 │   ├── deploy-testnet.sh  # sequential testnet deploy / upgrade
+│   ├── check-no-std.sh    # CI guard: release Wasm has no std, crates forbid unsafe
 │   ├── create-issues.sh   # batch Wave backlog creation (templates + 130-issue PSV)
 │   └── setup-repo.sh      # topics, labels, branch protection
 ├── docs/                  # Stellar-native protocol docs, guides and references
@@ -105,8 +106,10 @@ keylease-core/
 | --- | --- | --- |
 | `init(admin)` | `admin` | One-time initialization; appoints the protocol admin. Emits `registry_initialized`. |
 | `set_token(admin, token)` | `admin` | Configure the SEP-41 escrow token (native SAC or custom). Emits `escrow_token_set`. |
-| `upgrade(admin, new_wasm_hash)` | `admin` | Install a new Wasm through the Soroban deployer. Emits `contract_upgraded`. |
-| `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. Returns `service_id`. Emits `service_registered`. |
+| `propose_upgrade(admin, new_wasm_hash)` | `admin` | Queue a Wasm behind the 24h delay. Emits `upgrade_proposed`. |
+| `cancel_upgrade(admin)` | `admin` | Drop a pending proposal. Emits `upgrade_cancelled`. |
+| `execute_upgrade(admin)` | `admin` | Install the proposed Wasm after the delay. Emits `contract_upgraded`. |
+| `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. `rate_per_call` must be positive and at most `MAX_RATE_PER_CALL`. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
 | `set_service_receipt_key(provider, service_id, receipt_key)` | `provider` | Opt a service into required provider-signed usage receipts, rotate or clear the ed25519 key. Emits `service_receipt_key_set`. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
@@ -118,12 +121,32 @@ keylease-core/
 | `revoke_expired_lease(consumer, lease_id)` | `consumer` | Credit the full deposit 24h after expiry. Emits `lease_revoked`. |
 | `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. |
 | `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)`, `claimable_balance(address)` | — | Derived lifecycle queries. |
+| `update_service(provider, service_id, rate_per_call, endpoint_hash) -> service_id` | `provider` | Update rate and endpoint hash for a service. Emits `service_rate_updated`. Only the owning provider may call this. Existing leases keep their original rate. |
+| `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
+| `quote_lease(service_id, requested_calls, duration_secs) -> LeaseQuote` | — | Read-only deposit and expiry `create_lease` would produce, with the same validation. |
+| `request_early_cancel(consumer, lease_id)` / `withdraw_early_cancel(consumer, lease_id)` | `consumer` | Ask to end an active lease early, or withdraw the request. |
+| `approve_early_cancel(provider, lease_id, verified_calls)` / `reject_early_cancel(provider, lease_id)` | `provider` | Consent to an early exit (paying served calls and refunding the rest) or decline it. |
+| `settle_lease(provider, lease_id, verified_calls)` | `provider` | Pay the provider, refund the remainder. Emits `lease_settled`. |
+| `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
+| `bump_service(service_id)` | — | Extend a service entry's TTL to its standard horizon. Permissionless; the caller pays the rent. |
+| `bump_lease(lease_id)` | — | Extend a live lease entry using the lease TTL policy. Permissionless; rejects a settled lease. |
+| `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. Never extend a TTL. |
+| `services_for_provider(provider, after, limit) -> ProviderServicePage` | — | One bounded page of a provider's service ids; page with `next` until `done`. Never extends a TTL. |
+| `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)` | — | Derived lifecycle queries. Never extend a TTL. |
+| `service_stats(service_id)` | — | Cumulative settled leases, calls and payout for one service. Never extend a TTL. |
 | `service_count()`, `lease_count()` | — | Monotonic counters. |
+| `get_services(start, limit)`, `get_leases(start, limit)` | — | Bounded pages over the id space, oldest id first, `done` as the end marker. `limit` ≤ `MAX_PAGE_SIZE`. Never extend a TTL. |
 
 ### Events
 
 Contract events are part of the protocol's public interface, not a debugging
 extra. Event names are the first topic; ids follow.
+
+Every payload also carries `schema_version`, the version of the event schema
+that emitted it. It lives in the payload map, never in a topic, because topics
+are positional and an indexer filters on them. See
+[`docs/integration.md`](./docs/integration.md#event-schema-version) for how a
+consumer of the stream should branch on it.
 
 | Event | Topics | Data |
 | --- | --- | --- |
@@ -138,6 +161,23 @@ extra. Event names are the first topic; ids follow.
 | `claimed` | `beneficiary` | `amount` |
 | `service_receipt_key_set` | `service_id` | `provider`, `receipt_key` |
 | `contract_upgraded` | — | `admin`, `new_wasm_hash` |
+| `registry_initialized` | — | `schema_version`, `admin` |
+| `escrow_token_set` | — | `schema_version`, `admin`, `token` |
+| `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
+| `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
+| `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_delegated` | `lease_id` | `schema_version`, `delegate`, `consumer` |
+| `lease_cancellation_requested` | `lease_id` | `schema_version`, `consumer` |
+| `lease_cancellation_rejected` | `lease_id` | `schema_version`, `provider` |
+| `lease_cancellation_withdrawn` | `lease_id` | `schema_version`, `consumer` |
+| `lease_cancelled` | `lease_id` | `schema_version`, `provider`, `consumer`, `verified_calls`, `payout`, `refund` |
+| `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
+| `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+
+`lease_created` is emitted unchanged whether the consumer or a delegate minted
+the lease; `lease_delegated` is added on top and names who paid the transaction
+fee. The delegate holds no claim on the lease.
 
 ```bash
 # Follow escrow from the ledger, no polling:
@@ -146,16 +186,25 @@ stellar events --id $REGISTRY --network testnet --start-ledger <ledger>
 
 ### Lifecycle
 
-```
-Active ──(expires_at reached)──▶ Expired ──(24h grace)──▶ revocable by consumer
-   │                                  │
-   └──(fully consumed)────────────────┴──(provider settles)──▶ Settled
+```text
+Active ──(fully consumed + provider settles)────────────────────▶ Settled
+   │
+   └──(expires_at reached)──▶ Expired ──(provider settles)──────▶ Settled
+                                  │
+                                  └──(24h grace + consumer revokes)──▶ Revoked
 ```
 
 A lease is **settleable** when it has expired **or** `verified_calls ==
 allocated_calls`. It is **revocable** only when expired **and** the 24-hour
-provider grace window has elapsed. Either path ends in `Settled`; a settled
-lease can never be settled or revoked again.
+provider grace window has elapsed. Provider settlement ends the lease as
+`Settled`; consumer reclaim ends it as `Revoked`, and the two read differently
+to clients: a revoked lease reports `used_calls == 0`, earns the provider
+nothing, and never appears in `service_stats`. Either way a closed lease can
+never be settled or revoked again. Before expiry the consumer can ask the
+provider to end the lease early (`request_early_cancel`); if the provider
+approves, served calls are paid and unused calls are refunded immediately,
+ending the lease as `Settled` — and, because the provider earned those calls,
+the settlement does count toward `service_stats`.
 
 Settlement and revocation never transfer tokens inline. They credit **pull
 payments**: the provider and consumer each accumulate a claimable balance and
@@ -176,6 +225,7 @@ cargo test --all
 # 3. Lint the way CI does
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy --target wasm32v1-none --release --all -- -D warnings
 
 # 4. Produce deployable Soroban WASM
 cargo build --target wasm32v1-none --release --all
@@ -216,6 +266,13 @@ stellar contract invoke --id $REGISTRY --network testnet --source-account keylea
      --provider $PROVIDER --rate_per_call 1000000 --endpoint_hash <64_HEX_CHARS>
 ```
 
+Upgrade an existing deployment in place (build → upload → `upgrade` → check
+`version()` against the workspace version):
+
+```bash
+./scripts/upgrade.sh --contract-id C... --admin keylease-admin
+```
+
 `--send=yes` is required for state-changing calls. Deployed addresses are
 recorded in [`docs/deployments.md`](./docs/deployments.md) — never guessed.
 Full options, upgrades and network settings are in
@@ -224,6 +281,17 @@ Full options, upgrades and network settings are in
 [`.env.example`](./.env.example).
 
 ---
+
+## Local secret scanning
+
+Pull requests are scanned by gitleaks in CI. Run it locally before opening a PR:
+
+```bash
+gitleaks detect --source . --redact --verbose --config .gitleaks.toml
+```
+
+`.gitleaks.toml` is the only allowlist; add entries only for documented false
+positives.
 
 ## Documentation
 
@@ -244,6 +312,7 @@ protocol, its Stellar dependencies and how to integrate with it:
 | [Provider](./docs/provider-guide.md) / [Consumer](./docs/consumer-guide.md) guides | using the protocol |
 | [Developer guide](./docs/developer-guide.md) | building, testing, upgrading and extending |
 | [Deployment](./docs/deployment.md) | `stellar contract` commands and upgrade procedure |
+| [Troubleshooting](./docs/troubleshooting.md) | every failure by actor, with the command that verifies it |
 
 ---
 
@@ -268,11 +337,27 @@ invariants:
 5. **TTL-safe leases.** `create_lease` caps `duration_secs` at
    `MAX_LEASE_DURATION_SECS` (30 days) and extends the lease's persistent entry
    for its whole term plus the grace window, so escrow cannot be evicted while
-   it is still claimable.
-6. **Explicit authorization.** Every state-changing entry point calls
+   it is still claimable. Every extension is clamped to
+   `MAX_ENTRY_TTL_LEDGERS` (90 days) and to the network's live `maxEntryTtl`, so
+   no entry horizon is derived only from a stored `expires_at`.
+6. **Bounded deposits.** `create_lease` rejects a `rate_per_call ×
+   requested_calls` product above `MAX_LEASE_DEPOSIT` with `DepositTooLarge`,
+   before allocating a lease id or calling the token. Checked arithmetic cannot
+   cover this: a product can fit `i128` and still be far more than the consumer
+   meant to lock.
+7. **Listed prices are leasable.** `register_service` caps `rate_per_call` at
+   `MAX_RATE_PER_CALL`, which equals `MAX_LEASE_DEPOSIT` — so no service can be
+   advertised at a price that cannot fund even a one-call lease, and every
+   accepted deposit and payout stays inside `i128`.
+8. **Explicit authorization.** Every state-changing entry point calls
    `require_auth()` on the actor it claims to represent, and cross-checks that
-   actor against stored ownership where relevant.
-7. **Bounded admin.** The admin can configure the token and upgrade the Wasm. It
+   actor against stored ownership where relevant. A delegate sponsoring
+   `create_lease_for` needs the consumer's signature as well, so no third party
+   can lock a balance it does not own.
+9. **Revocation is not settlement.** A reclaimed lease reports
+   `LeaseStatus::Revoked`, keeps `used_calls == 0`, and never enters
+   `service_stats`, so refund and revenue stay distinguishable to any reader.
+10. **Bounded admin.** The admin can configure the token and upgrade the Wasm. It
    cannot move escrowed funds.
 
 ### Trusting the escrow token
@@ -287,6 +372,41 @@ re-entrant token.
 > It must never be deployed to a network holding real value. The test suite
 > additionally exercises the real Stellar Asset Contract.
 
+### Audit status
+
+**This contract has not been independently audited.** As of v0.2.1 no third party
+has reviewed `contracts/registry`, no firm is engaged, and no report exists. The
+numbered properties in the model above are what the authors believe and test, not
+what an outside reviewer has confirmed.
+
+What stands in place of an audit:
+
+| Coverage | Amount |
+| --- | --- |
+| Contract tests, including two adversarial ones | 63 in `contracts/registry/src/test.rs` |
+| Security properties this README states | 8, in [Security model](#security-model) |
+| Invariants asserted outright in tests | 5, in [Security model → Invariants](./docs/security.md#invariants) |
+| Threats modelled | 14, in [Security model → Threats considered](./docs/security.md#threats-considered) |
+| CI gates on every PR | 9 (`Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Secret Scan`, `Spell Check`, `Markdown Lint`, `Dependency Policy`, `Malware Scan`) |
+
+The eight above are the security properties this README claims; the five are the
+ones `contracts/registry/src/test.rs` asserts outright. They overlap and are not
+the same list, which is itself a fact an auditor would want.
+
+The adversarial pair is `test_reentrant_token_cannot_settle_a_lease_twice`, which
+installs a token that calls back into `settle_lease` mid-payout, and the full
+lifecycle test escrowed with the **native Stellar Asset Contract** instead of the
+mock. Neither is a substitute for a reviewer asking what the suite never thought
+to assert.
+
+Mainnet is therefore **not deployed and not scheduled**: it is deferred until an
+independent audit is published, its findings fixed with tests, and the admin's
+upgrade power bounded by a multisig or timelock. The full gate list is in
+[Security model → Audit status](./docs/security.md#audit-status), and
+[SECURITY.md](./SECURITY.md) carries the same statement for reporters. Use this
+on Testnet, where the escrow is fake XLM and the worst failure costs an
+afternoon of redeploying.
+
 ---
 
 ## Testing
@@ -296,15 +416,28 @@ cargo test --all
 ```
 
 The 72 tests in `contracts/registry/src/test.rs` cover:
+The 133 tests in `contracts/registry/src/test.rs` cover:
 
 - service registration and ID monotonicity,
 - the happy path (lock → full-usage settle before expiry),
+- early cancellation with provider consent, refusal, withdrawal, authorization,
+  conservation at both extremes, and rejection after settlement,
 - partial settlement after expiry with correct refund,
 - expired, unsettled leases being fully reclaimed by the consumer,
 - the 24-hour grace window (boundary, early-settle, and post-settle cases),
 - unauthorized settle/revoke/upgrade/top-up/claim attempts,
 - rate-math, timestamp and duration overflow/rejection,
+- the deposit ceiling at the limit, one unit above it, and as a product,
+- the published-price bound, and the one-call lease it still has to fund,
+- per-service settlement totals, including zero-call settlements,
+- delegated creation: both signatures required, refund owned by the consumer,
+- revoked leases excluded from `service_stats` and read as `Revoked`,
 - every emitted event, including its topics and payload,
+- the `schema_version` on each payload, and that topics stay position-stable,
+- reads that never extend a TTL, including the revocation marker and the
+  settlement counters,
+- the explicit `bump_service` / `bump_lease` maintenance calls and the lease TTL
+  policy behind them,
 - the full lifecycle escrowed with the **native Stellar Asset Contract**,
 - a **re-entrant token** attempting a second claim,
 - lease top-ups (calls, duration, rate preservation, partial settlement),
@@ -312,12 +445,16 @@ The 72 tests in `contracts/registry/src/test.rs` cover:
 - pull-payment claims (accumulation, single use, conservation),
 - optional signed usage receipts (valid, invalid, mismatched and replayed),
 - status transitions and derived views.
+- a **re-entrant token** attempting a second settlement,
+- status transitions and derived views,
+- the stored `LeaseStatus` and `Error` discriminants, so nothing existing can be
+  silently renumbered.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). 
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Security
 

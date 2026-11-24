@@ -1,0 +1,42 @@
+# Spell-check configuration for the `Spell Check` job in
+# .github/workflows/ci.yml. typos loads this file automatically, so running
+# `typos` in the repository root checks the same words over the same files as CI.
+#
+# Install and run locally (CI pins 1.52.2):
+#
+#   cargo install typos-cli --locked
+#   typos                     # findings exit non-zero, which fails the job
+#
+# The job sets no `continue-on-error`: one finding stops the build.
+
+[default]
+# `locale` is deliberately unset. The repository uses British spellings
+# ("behaviour", "authorised", "initialised"), and `locale = "en"` would report
+# every one of them as a misspelling. That is a style war, not a typo check.
+
+[files]
+# `Cargo.lock` is generated and its contents are other projects' crate names: a
+# dependency rename would otherwise fail every documentation pull request. The
+# file scans clean today, so this exclusion hides no current finding.
+extend-exclude = ["Cargo.lock"]
+
+[default.extend-words]
+# The project dictionary. A term is accepted by mapping it to itself.
+#
+# The terms below are Stellar and Soroban vocabulary this repository uses
+# constantly, and every one of them already passes typos' built-in dictionary:
+# the tracked tree and a candidate list of roughly 150 domain terms report no
+# findings at 1.52.2. So each entry is a pin against a future dictionary
+# revision, not a workaround for a suppression somebody wanted. Add a term when
+# `typos` starts reporting it, and say why.
+#
+# `SEP-41`, `StrKey` and `KeyLease` were probed the same way and need no entry;
+# the mixed-case spellings below are listed anyway because the tokens appear in
+# prose, identifiers and doc comments and a dictionary change should not be able
+# to fail an unrelated pull request.
+soroban = "soroban"
+Soroban = "Soroban"
+stroop = "stroop"
+stroops = "stroops"
+strkey = "strkey"
+keylease = "keylease"

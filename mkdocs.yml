@@ -60,6 +60,7 @@ nav:
   - Overview:
       - Introduction: introduction.md
       - Architecture: architecture.md
+      - Glossary: glossary.md
   - Protocol:
       - How the protocol works: protocol.md
       - Contract reference: contract-reference.md
@@ -72,9 +73,16 @@ nav:
       - Consumer guide: consumer-guide.md
       - Developer guide: developer-guide.md
       - Deployment: deployment.md
+      - Troubleshooting: troubleshooting.md
+      - FAQ: faq.md
   - Project:
+      - 'Design: time-locked upgrades': design/upgrade-timelock.md
+      - 'Design: early cancellation': design/early-cancellation.md
       - Deployments: deployments.md
       - Design notes: design/wave-11.md
+      - Design notes:
+          - Provider staking and slashing (#137): design/137-provider-staking.md
+          - Revenue splits (#133): design/133-revenue-splits.md
       - Release notes: releases/v0.2.1.md
       - v0.2.0: releases/v0.2.0.md
       - v0.1.0: releases/v0.1.0.md

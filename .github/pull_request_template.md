@@ -33,6 +33,7 @@ Closes #
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy --target wasm32v1-none --release --all -- -D warnings
 cargo test --all
 cargo build --target wasm32v1-none --release --all
 ```

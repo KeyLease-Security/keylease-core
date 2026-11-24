@@ -1,4 +1,11 @@
 #![no_std]
+// No unsafe code in contract crates (CONTRIBUTING.md#unsafe-code-and-std).
+// `forbid` on the deployed Wasm. On the host, soroban-sdk's `testutils`
+// feature registers contracts through `ctor`, whose expansion carries its own
+// `#[allow(unsafe_code)]`, which `forbid` rejects; `deny` still rejects any
+// unsafe written in this crate. scripts/check-no-std.sh checks these lines.
+#![cfg_attr(target_family = "wasm", forbid(unsafe_code))]
+#![cfg_attr(not(target_family = "wasm"), deny(unsafe_code))]
 
 //! # KeyLease Mock Token
 //!
@@ -9,6 +16,11 @@
 //! is expected.
 //!
 //! **Not for production.** The admin can mint without limit.
+//!
+//! Every balance and allowance movement uses checked arithmetic and returns
+//! [`TokenError::Overflow`] instead of trapping: the workspace release profile
+//! sets `overflow-checks = true`, so a plain `+` that overflowed would fail the
+//! transaction with a host error rather than a token error.
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String};
 
@@ -42,6 +54,10 @@ pub enum TokenError {
     NotInitialized = 5,
     /// Only the admin may perform this operation.
     Unauthorized = 6,
+    /// A balance or allowance would not fit in `i128` after the operation.
+    ///
+    /// Codes are append-only: a caller maps the number, never the name.
+    Overflow = 7,
 }
 
 #[contract]
@@ -79,7 +95,8 @@ impl MockToken {
 
         let key = DataKey::Balance(to.clone());
         let balance = read_balance(&env, &to);
-        env.storage().persistent().set(&key, &(balance + amount));
+        let minted = balance.checked_add(amount).ok_or(TokenError::Overflow)?;
+        env.storage().persistent().set(&key, &minted);
         Ok(())
     }
 
@@ -99,14 +116,24 @@ impl MockToken {
     ) -> Result<(), TokenError> {
         spender.require_auth();
 
+        // Validate before drawing anything down. A negative `amount` passes the
+        // `allowance < amount` test below and would otherwise widen the spender's
+        // allowance before `move_balance` rejected the transfer.
+        if amount <= 0 {
+            return Err(TokenError::InvalidAmount);
+        }
         let allowance = read_allowance(&env, &from, &spender);
         if allowance < amount {
             return Err(TokenError::InsufficientAllowance);
         }
-        let key = DataKey::Allowance(from.clone(), spender.clone());
-        env.storage().persistent().set(&key, &(allowance - amount));
 
-        move_balance(&env, &from, &to, amount)
+        move_balance(&env, &from, &to, amount)?;
+
+        // Reached only after the transfer succeeded, so `0 <= amount <=
+        // allowance` and this subtraction cannot underflow or overflow.
+        let key = DataKey::Allowance(from, spender);
+        env.storage().persistent().set(&key, &(allowance - amount));
+        Ok(())
     }
 
     /// Approve `spender` to spend up to `amount` of `from`'s tokens.
@@ -215,12 +242,18 @@ fn move_balance(env: &Env, from: &Address, to: &Address, amount: i128) -> Result
     let from_key = DataKey::Balance(from.clone());
     let to_key = DataKey::Balance(to.clone());
 
+    // The credit is the side that can overflow: the check above guarantees
+    // `from_balance >= amount`, so the debit cannot underflow, while a recipient
+    // already holding `i128::MAX` would overflow a plain addition. Computing it
+    // first also means a rejected transfer writes no debit.
+    let to_balance = read_balance(env, to)
+        .checked_add(amount)
+        .ok_or(TokenError::Overflow)?;
+
     env.storage()
         .persistent()
         .set(&from_key, &(from_balance - amount));
-    env.storage()
-        .persistent()
-        .set(&to_key, &(read_balance(env, to) + amount));
+    env.storage().persistent().set(&to_key, &to_balance);
 
     env.storage()
         .persistent()
@@ -244,4 +277,106 @@ fn read_allowance(env: &Env, from: &Address, spender: &Address) -> i128 {
         .persistent()
         .get(&DataKey::Allowance(from.clone(), spender.clone()))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MockToken, MockTokenClient, TokenError};
+    use soroban_sdk::{testutils::Address as _, Address, Env};
+
+    struct Ctx<'a> {
+        token: MockTokenClient<'a>,
+        alice: Address,
+        bob: Address,
+    }
+
+    fn setup(env: &Env) -> Ctx<'_> {
+        env.mock_all_auths();
+
+        let admin = Address::generate(env);
+        let alice = Address::generate(env);
+        let bob = Address::generate(env);
+
+        let token_id = env.register(MockToken, ());
+        let token = MockTokenClient::new(env, &token_id);
+        token.init(&admin);
+
+        Ctx { token, alice, bob }
+    }
+
+    #[test]
+    fn mint_past_the_ceiling_reports_overflow() {
+        let env = Env::default();
+        let ctx = setup(&env);
+
+        ctx.token.mint(&ctx.alice, &i128::MAX);
+        assert_eq!(ctx.token.balance(&ctx.alice), i128::MAX);
+
+        assert_eq!(
+            ctx.token.try_mint(&ctx.alice, &1),
+            Err(Ok(TokenError::Overflow))
+        );
+        assert_eq!(ctx.token.balance(&ctx.alice), i128::MAX);
+    }
+
+    #[test]
+    fn transfer_into_a_saturated_account_reports_overflow() {
+        let env = Env::default();
+        let ctx = setup(&env);
+
+        ctx.token.mint(&ctx.alice, &i128::MAX);
+        ctx.token.mint(&ctx.bob, &i128::MAX);
+
+        assert_eq!(
+            ctx.token.try_transfer(&ctx.alice, &ctx.bob, &1),
+            Err(Ok(TokenError::Overflow))
+        );
+        assert_eq!(ctx.token.balance(&ctx.alice), i128::MAX);
+        assert_eq!(ctx.token.balance(&ctx.bob), i128::MAX);
+    }
+
+    #[test]
+    fn transfer_from_checks_the_amount_before_drawing_the_allowance() {
+        let env = Env::default();
+        let ctx = setup(&env);
+
+        ctx.token.mint(&ctx.alice, &1_000);
+        ctx.token.approve(&ctx.alice, &ctx.bob, &i128::MAX, &0);
+
+        // `i128::MIN` is smaller than every allowance, so a spender could once
+        // turn it into a negative debit and widen its own allowance.
+        assert_eq!(
+            ctx.token
+                .try_transfer_from(&ctx.bob, &ctx.alice, &ctx.bob, &i128::MIN),
+            Err(Ok(TokenError::InvalidAmount))
+        );
+        assert_eq!(ctx.token.allowance(&ctx.alice, &ctx.bob), i128::MAX);
+        assert_eq!(ctx.token.balance(&ctx.bob), 0);
+    }
+
+    #[test]
+    fn transfer_from_spends_exactly_the_allowance() {
+        let env = Env::default();
+        let ctx = setup(&env);
+
+        ctx.token.mint(&ctx.alice, &500);
+        ctx.token.approve(&ctx.alice, &ctx.bob, &500, &0);
+        ctx.token
+            .transfer_from(&ctx.bob, &ctx.alice, &ctx.bob, &500);
+
+        assert_eq!(ctx.token.allowance(&ctx.alice, &ctx.bob), 0);
+        assert_eq!(ctx.token.balance(&ctx.alice), 0);
+        assert_eq!(ctx.token.balance(&ctx.bob), 500);
+    }
+
+    #[test]
+    fn error_codes_keep_their_on_chain_numbers() {
+        assert_eq!(TokenError::InvalidAmount as u32, 1);
+        assert_eq!(TokenError::InsufficientBalance as u32, 2);
+        assert_eq!(TokenError::InsufficientAllowance as u32, 3);
+        assert_eq!(TokenError::AlreadyInitialized as u32, 4);
+        assert_eq!(TokenError::NotInitialized as u32, 5);
+        assert_eq!(TokenError::Unauthorized as u32, 6);
+        assert_eq!(TokenError::Overflow as u32, 7);
+    }
 }
