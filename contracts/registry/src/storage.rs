@@ -117,6 +117,7 @@ pub enum DataKey {
     /// Pending, time-locked Wasm upgrade (instance storage). Append-only:
     /// existing keys keep their wire encoding.
     PendingUpgrade,
+    PayoutCircuit,
     /// Service ids registered by a provider, oldest first (persistent storage).
     ///
     /// Derived state, appended to by [`save_service`]: `Service.provider` stays
@@ -168,6 +169,16 @@ pub fn get_pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
 /// Drop a pending upgrade after execution or cancellation.
 pub fn remove_pending_upgrade(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingUpgrade);
+}
+
+pub fn set_payout_circuit(env: &Env, circuit: &crate::types::PayoutCircuit) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PayoutCircuit, circuit);
+}
+
+pub fn get_payout_circuit(env: &Env) -> Option<crate::types::PayoutCircuit> {
+    env.storage().instance().get(&DataKey::PayoutCircuit)
 }
 
 /// Bump the TTL of the instance (configuration) storage entry.

@@ -1034,6 +1034,39 @@ fn test_services_for_provider_is_a_view() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn test_payout_circuit_boundary_pause_event_revoke_and_reset() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    ctx.registry
+        .configure_payout_circuit(&ctx.admin, &500, &100);
+
+    let lease_1 = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &5, &3_600);
+    ctx.registry.settle_lease(&ctx.provider, &lease_1, &5);
+    assert_eq!(ctx.registry.get_payout_circuit().unwrap().payout_total, 500);
+
+    let lease_2 = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &5, &3_600);
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &lease_2, &5),
+        Ok(Ok(()))
+    );
+    assert!(ctx.registry.get_payout_circuit().unwrap().paused);
+
+    env.ledger().set_timestamp(100_000);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_2);
+
+    ctx.registry.reset_payout_circuit(&ctx.admin);
+    let state = ctx.registry.get_payout_circuit().unwrap();
+    assert!(!state.paused);
+    assert_eq!(state.payout_total, 0);
+}
+
+#[test]
 fn test_full_usage_can_settle_before_expiry() {
     let env = Env::default();
     env.ledger().set_timestamp(1_000);
@@ -3988,7 +4021,7 @@ fn test_fresh_counters_start_at_zero_and_move_only_on_success() {
 /// Every published error code with the variant it names, in order. This is the
 /// table in `docs/contract-reference.md`; the two must change together, and only
 /// by appending.
-const ERROR_ABI: [(u32, Error); 28] = [
+const ERROR_ABI: [(u32, Error); 30] = [
     (1, Error::AlreadyInitialized),
     (2, Error::NotInitialized),
     (3, Error::Unauthorized),
@@ -4017,6 +4050,8 @@ const ERROR_ABI: [(u32, Error); 28] = [
     (26, Error::CancellationAlreadyRequested),
     (27, Error::LeaseExpired),
     (28, Error::RateTooHigh),
+    (29, Error::PayoutCircuitPaused),
+    (30, Error::InvalidPayoutCap),
 ];
 
 #[test]

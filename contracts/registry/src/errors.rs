@@ -74,4 +74,6 @@ pub enum Error {
     /// early-cancellation codes, so every number already published keeps its
     /// meaning.
     RateTooHigh = 28,
+    PayoutCircuitPaused = 29,
+    InvalidPayoutCap = 30,
 }
