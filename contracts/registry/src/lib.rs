@@ -265,6 +265,64 @@ impl KeyLeaseRegistry {
         Ok(())
     }
 
+    /// Configure the aggregate payout rolling-window cap. Admin only.
+    pub fn configure_payout_circuit(
+        env: Env,
+        admin: Address,
+        cap: i128,
+        window_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        if cap <= 0 || window_secs == 0 {
+            return Err(Error::InvalidPayoutCap);
+        }
+        let now = env.ledger().timestamp();
+        storage::set_payout_circuit(
+            &env,
+            &crate::types::PayoutCircuit {
+                window_secs,
+                window_started_at: now,
+                payout_total: 0,
+                cap,
+                paused: false,
+            },
+        );
+        storage::extend_instance_ttl(&env);
+        crate::events::PayoutCircuitConfigured {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            cap,
+            window_secs,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Reset totals and resume payouts after an incident review. Admin only.
+    pub fn reset_payout_circuit(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        let mut circuit = storage::get_payout_circuit(&env).ok_or(Error::InvalidPayoutCap)?;
+        let now = env.ledger().timestamp();
+        circuit.window_started_at = now;
+        circuit.payout_total = 0;
+        circuit.paused = false;
+        storage::set_payout_circuit(&env, &circuit);
+        storage::extend_instance_ttl(&env);
+        crate::events::PayoutCircuitReset {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Read the current payout circuit state.
+    pub fn get_payout_circuit(env: Env) -> Option<crate::types::PayoutCircuit> {
+        storage::get_payout_circuit(&env)
+    }
+
     /// Configure the SEP-41 token used to escrow deposits. Admin only.
     ///
     /// Kept as a separate, admin-gated entry point so that deployments can point
@@ -785,6 +843,9 @@ impl KeyLeaseRegistry {
         if payout.checked_add(refund) != Some(lease.locked_deposit) {
             return Err(Error::Overflow);
         }
+        if apply_payout_circuit(&env, payout)? {
+            return Ok(());
+        }
 
         // checks-effects-interactions: settle the lease and clear the request
         // before any token transfer.
@@ -909,6 +970,9 @@ impl KeyLeaseRegistry {
             .locked_deposit
             .checked_sub(payout)
             .ok_or(Error::Overflow)?;
+        if apply_payout_circuit(&env, payout)? {
+            return Ok(());
+        }
 
         // checks-effects-interactions: persist the settlement before any token
         // transfer, so a re-entrant token sees a settled lease and reverts.
@@ -1322,6 +1386,43 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
         return Err(Error::Unauthorized);
     }
     Ok(())
+}
+
+fn apply_payout_circuit(env: &Env, payout: i128) -> Result<bool, Error> {
+    let mut circuit = match storage::get_payout_circuit(env) {
+        Some(circuit) => circuit,
+        None => return Ok(false),
+    };
+    if circuit.paused {
+        return Ok(true);
+    }
+    let now = env.ledger().timestamp();
+    let window_end = circuit
+        .window_started_at
+        .checked_add(circuit.window_secs)
+        .ok_or(Error::Overflow)?;
+    if now >= window_end {
+        circuit.window_started_at = now;
+        circuit.payout_total = 0;
+    }
+    let next_total = circuit
+        .payout_total
+        .checked_add(payout)
+        .ok_or(Error::Overflow)?;
+    if next_total > circuit.cap {
+        circuit.paused = true;
+        storage::set_payout_circuit(env, &circuit);
+        crate::events::PayoutCircuitPaused {
+            schema_version: EVENT_SCHEMA_VERSION,
+            payout_total: next_total,
+            cap: circuit.cap,
+        }
+        .publish(env);
+        return Ok(true);
+    }
+    circuit.payout_total = next_total;
+    storage::set_payout_circuit(env, &circuit);
+    Ok(false)
 }
 
 /// Fund the escrow and record the lease, shared by `create_lease` and

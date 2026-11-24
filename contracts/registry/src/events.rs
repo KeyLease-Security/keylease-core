@@ -62,6 +62,30 @@ pub struct RegistryInitialized {
     pub admin: Address,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutCircuitConfigured {
+    pub schema_version: u32,
+    pub admin: Address,
+    pub cap: i128,
+    pub window_secs: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutCircuitPaused {
+    pub schema_version: u32,
+    pub payout_total: i128,
+    pub cap: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutCircuitReset {
+    pub schema_version: u32,
+    pub admin: Address,
+}
+
 /// Emitted when the admin points the registry at the SEP-41 escrow token.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

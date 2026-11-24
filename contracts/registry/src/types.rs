@@ -84,6 +84,21 @@ pub struct PendingUpgrade {
     pub execute_after: u64,
 }
 
+/// Rolling payout circuit state.
+///
+/// The window starts at `window_started_at` and lasts `window_secs`. Payout
+/// attempts are bounded by `cap` across every provider and every lease in that
+/// window, so splitting payouts cannot bypass the aggregate limit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutCircuit {
+    pub window_secs: u64,
+    pub window_started_at: u64,
+    pub payout_total: i128,
+    pub cap: i128,
+    pub paused: bool,
+}
+
 /// What [`crate::KeyLeaseRegistry::create_lease`] would lock, computed without
 /// authorization and without moving funds.
 ///
