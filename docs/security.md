@@ -66,8 +66,9 @@ take more than it is owed, and it cannot prevent the consumer's refund.
     therefore never be listed at a price that cannot fund even the smallest
     (one-call) lease, and the worst legal `rate × calls` product stays far inside
     `i128`, so a consumer's quote is always the amount that moves.
-11. **The admin cannot redirect user funds.** It can call `set_token`, `upgrade`,
-    and `resolve_challenge`. Resolution only chooses between the provider's
+11. **The admin cannot redirect user funds.** It can call `set_token`, the
+    upgrade entry points, the admin-rotation entry points and
+    `resolve_challenge`. Resolution only chooses between the provider's
     proposal and a full consumer refund; there is no path that pays an arbitrary
     recipient.
 12. **Every mutation is authenticated.** No state-changing entry point trusts its
@@ -90,6 +91,9 @@ take more than it is owed, and it cannot prevent the consumer's refund.
     refund path always belong to the same address (`Unauthorized`,
     `LeaseNotTransferable`, `InvalidConsumer`). A pending early-cancellation
     request is cleared so the previous owner cannot trigger a payout.
+17. **The admin role changes hands only with both signatures.** `propose_admin`
+    needs the current admin, `accept_admin` needs the proposed address, and a
+    proposal expires after `ADMIN_TRANSFER_WINDOW_SECS` (7 days).
 
 ## Invariants
 
@@ -143,7 +147,12 @@ violation.
 | Provider inflates reported revenue | revoked leases are excluded from `service_stats`; totals use `checked_add` and revert on overflow |
 | Long lease is evicted from storage | `DurationTooLong` + duration-aware TTL extension |
 | Fake "KeyLease" contract id | Only ids in [Deployments](deployments.md) are ours |
+| Third party takes over the admin role | `accept_admin` requires the proposed address's auth and a proposal made by the sitting admin; adversarial tests with real auth |
+| Admin role handed to a mistyped or unreachable address | Two-step hand-over: nothing changes until the successor signs `accept_admin` |
+| Forgotten proposal accepted months later | Proposals expire after 7 days (`AdminTransferExpired`); the admin can cancel at any time |
 | Silent logic change on upgrade | 24h delay + admin-only execution, emits `upgrade_proposed`/`contract_upgraded`, `contractmeta!` exposes the version |
+| Upgrade installs code that misreads the stored layout | Storage schema stamp; state-changing calls stop (`SchemaMigrationRequired`) until an explicit, bounded `migrate` |
+| Downgrade to code that cannot read newer data | Stopped with `SchemaVersionUnsupported`; `migrate` refuses, only re-upgrading resumes |
 
 ## Running with a multisig admin
 
@@ -323,6 +332,10 @@ gitleaks detect --source . --redact --verbose --config .gitleaks.toml
 - Only trust contract ids in [`docs/deployments.md`](deployments.md).
 - The admin key should be a cold or multisig Stellar account. It can change the
   escrow token and propose/cancel upgrades, but execution waits 24h on-ledger.
+  Rotate it with `propose_admin` followed by `accept_admin` from the new
+  account; a key that is already lost cannot propose, so rotate *before*
+  retiring a key, and prefer a multisig admin whose signers can be replaced at
+  the account level.
 - Verify the deployed metadata and configuration after deploy:
 
 ```bash

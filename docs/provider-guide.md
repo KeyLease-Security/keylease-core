@@ -14,7 +14,9 @@ the Soroban contract.
   expiry. That guarantee is what makes consumers willing to prepay.
 
 You never publish a secret on-chain. `endpoint_hash` is a commitment, not a
-credential.
+credential. It must digest the descriptor's actual content; an all-zero hash is
+rejected with `InvalidEndpointHash`, because a placeholder commits to nothing and
+gives consumers nothing to verify against.
 
 ## 1. Register a service
 

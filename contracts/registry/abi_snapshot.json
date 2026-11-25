@@ -1,7 +1,7 @@
 [
   {
     "function_v0": {
-      "doc": "Initialize the registry and appoint `admin`.\\n\\nCan only be called once. The admin is the only account allowed to\\nconfigure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via\\n[`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and\\n[`KeyLeaseRegistry::cancel_upgrade`].",
+      "doc": "Initialize the registry and appoint `admin`.\\n\\nCan only be called once. The admin is the only account allowed to\\nconfigure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via\\n[`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and\\n[`KeyLeaseRegistry::cancel_upgrade`].\\nThe role can later be handed over with [`KeyLeaseRegistry::propose_admin`]\\nand [`KeyLeaseRegistry::accept_admin`].",
       "name": "init",
       "inputs": [
         {
@@ -48,7 +48,7 @@
   },
   {
     "function_v0": {
-      "doc": "Queue a Wasm upgrade behind the mandatory [`UPGRADE_DELAY_SECS`] delay.\\n\\nAdmin only. `new_wasm_hash` is the hash produced by\\n`stellar contract upload`. A new proposal replaces a pending one and\\nrestarts the delay, so the exit window can never be shortened. The hash\\nand the execution ledger timestamp are stored and reported by\\n[`UpgradeProposed`]; clients can read them with\\n[`KeyLeaseRegistry::get_pending_upgrade`].",
+      "doc": "Queue a Wasm upgrade behind the mandatory [`UPGRADE_DELAY_SECS`] delay.\\n\\nAdmin only. `new_wasm_hash` is the hash produced by\\n`stellar contract upload`. A new proposal replaces a pending one and\\nrestarts the delay, so the exit window can never be shortened. The hash\\nand the execution ledger timestamp are stored and reported by\\n[`UpgradeProposed`]; clients can read them with\\n[`KeyLeaseRegistry::get_pending_upgrade`].\\n\\nThe upgrade entry points are deliberately **not** gated on the schema\\ncheck: if an upgrade installs the wrong Wasm (for example an older\\nschema, which stops the registry with `SchemaVersionUnsupported`), the\\nadmin must still be able to propose and execute the right one. After an\\nupgrade that raises the schema, every state-changing entry point returns\\n`SchemaMigrationRequired` until [`KeyLeaseRegistry::migrate`] runs.",
       "name": "propose_upgrade",
       "inputs": [
         {
@@ -99,12 +99,101 @@
   },
   {
     "function_v0": {
-      "doc": "Install the pending Wasm, but only once the delay has elapsed. Admin only.\\n\\nBefore execution, `ledger.timestamp()` must have reached the\\n`execute_after` recorded at proposal time; an early call fails with\\n[`Error::UpgradeDelayNotElapsed`]. The proposal is consumed atomically\\nwith the install and [`ContractUpgraded`] reports both the installed hash\\nand the ledger timestamp that had to be reached.\\n\\nThe contract id stays the same; storage, balances and in-flight leases\\nare preserved, which is why upgrades must never change the storage layout.",
+      "doc": "Install the pending Wasm, but only once the delay has elapsed. Admin only.\\n\\nBefore execution, `ledger.timestamp()` must have reached the\\n`execute_after` recorded at proposal time; an early call fails with\\n[`Error::UpgradeDelayNotElapsed`]. The proposal is consumed atomically\\nwith the install and [`ContractUpgraded`] reports both the installed hash\\nand the ledger timestamp that had to be reached.\\n\\nThe contract id stays the same; storage, balances and in-flight leases\\nare preserved, which is why a layout change must bump [`SCHEMA_VERSION`]\\nand ship a migration.",
       "name": "execute_upgrade",
       "inputs": [
         {
           "doc": "",
           "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Migrate stored data to [`SCHEMA_VERSION`] and lift the post-upgrade\\nstop. Admin only. Returns the schema version now in force.\\n\\nRuns every step from the stored version up to the code's version, then\\nstamps the new version, all in one transaction: either the whole path\\napplies or nothing does. Steps are bounded (see `storage::migrate_step`),\\nso a migration never iterates over leases or services.\\n\\n- **Auth:** `admin`, which must be the stored admin.\\n- **Already current:** no-op; nothing is written and no event is\\npublished, so it is safe to call after every upgrade.\\n- **Stored schema newer than this Wasm:** `SchemaVersionUnsupported`;\\nthe upgrade was a downgrade and must be rolled back, not migrated.\\n- **Events:** `schema_migrated { admin, from_version, to_version }`.\\n- **Errors:** `NotInitialized`, `Unauthorized`,\\n`SchemaVersionUnsupported`.",
+      "name": "migrate",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u32",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Propose `new_admin` as the next registry admin and return the ledger\\ntimestamp at which the proposal expires.\\n\\nThis is the first half of a two-step hand-over; nothing changes until\\n`new_admin` calls [`KeyLeaseRegistry::accept_admin`] before `expires_at`\\n(`now + ADMIN_TRANSFER_WINDOW_SECS`). Splitting the hand-over means the\\ncurrent admin's authorization alone can never move the role, and the\\nsuccessor's authorization alone can never claim it.\\n\\n- **Auth:** `admin`, which must be the stored admin.\\n- **Preconditions:** `new_admin` differs from the current admin.\\n- **Effects:** stores (or replaces) the single pending proposal and\\nextends the instance TTL.\\n- **Events:** `admin_transfer_proposed`.\\n- **Errors:** `NotInitialized`, `Unauthorized`, `InvalidAdmin`, `Overflow`,\\n`SchemaMigrationRequired`, `SchemaVersionUnsupported`.",
+      "name": "propose_admin",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "new_admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u64",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Withdraw the pending admin transfer. Admin only.\\n\\nWorks whether or not the proposal has expired, so a stale proposal can\\nalways be cleared explicitly.\\n\\n- **Auth:** `admin`, which must be the stored admin.\\n- **Preconditions:** a proposal is pending.\\n- **Effects:** removes the proposal and extends the instance TTL.\\n- **Events:** `admin_transfer_canceled`.\\n- **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingAdminTransfer`,\\n`SchemaMigrationRequired`, `SchemaVersionUnsupported`.",
+      "name": "cancel_admin_transfer",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Accept a pending admin transfer and become the registry admin.\\n\\nThe second half of the hand-over started by [`KeyLeaseRegistry::propose_admin`].\\nTogether the two calls require authorization from both the outgoing and\\nthe incoming admin, so no third party can take over the registry, and a\\nmistyped or unreachable successor simply never accepts.\\n\\n- **Auth:** `new_admin`, which must be the proposed address.\\n- **Preconditions:** a proposal is pending, it names `new_admin`, it was\\nmade by the admin still in office, and `now < expires_at`.\\n- **Effects:** stores `new_admin` as admin, clears the proposal and\\nextends the instance TTL. The previous admin loses every admin right in\\nthe same transaction.\\n- **Events:** `admin_transfer_accepted`.\\n- **Errors:** `NotInitialized`, `NoPendingAdminTransfer`, `Unauthorized`,\\n`AdminTransferExpired`, `SchemaMigrationRequired`, `SchemaVersionUnsupported`.",
+      "name": "accept_admin",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "new_admin",
           "type_": "address"
         }
       ],
@@ -542,7 +631,7 @@
   },
   {
     "function_v0": {
-      "doc": "Extend the storage entry of a registered service to its standard\\nhorizon. Permissionless.\\n\\nReads stopped extending TTLs (a view that writes the ledger charges the\\ncaller rent and cannot run read-only), so a service that is neither\\ncreated nor updated for 30 days would otherwise be evicted and start\\nanswering `ServiceNotFound` while its leases are still live. This is the\\nexplicit way to prevent that. `create_lease` bumps the service it leases\\nfrom, so an actively-used service never needs this call.\\n\\nThere is no authorisation: the caller pays for the extension out of\\ntheir own transaction fee, the horizon is fixed by the storage policy\\nrather than by the caller, and no lease or balance changes. Bumping a\\nservice you do not own is a donation of rent, not an attack.",
+      "doc": "Extend the storage entry of a registered service to its standard\\nhorizon. Permissionless.\\n\\nReads stopped extending TTLs (a view that writes the ledger charges the\\ncaller rent and cannot run read-only), so a service that is neither\\ncreated nor updated for 30 days would otherwise be evicted and start\\nanswering `ServiceNotFound` while its leases are still live. This is the\\nexplicit way to prevent that. `create_lease` bumps the service it leases\\nfrom, so an actively-used service never needs this call.\\n\\nThere is no authorisation: the caller pays for the extension out of\\ntheir own transaction fee, the horizon is fixed by the storage policy\\nrather than by the caller, and no lease or balance changes. Bumping a\\nservice you do not own is a donation of rent, not an attack.\\n\\nNot gated on the schema check: it changes no stored value, and keeping\\nentries alive is exactly what a stopped registry awaiting `migrate`\\nneeds.",
       "name": "bump_service",
       "inputs": [
         {
@@ -632,11 +721,54 @@
   },
   {
     "function_v0": {
+      "doc": "The pending admin transfer, if any. Pure read.\\n\\nAn expired proposal is still returned (compare `expires_at` with the\\nledger time) until the admin cancels or replaces it; it can no longer be\\naccepted.",
+      "name": "get_pending_admin",
+      "inputs": [],
+      "outputs": [
+        {
+          "option": {
+            "value_type": {
+              "udt": {
+                "name": "PendingAdminTransfer"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
       "doc": "Version string embedded in the Wasm by `contractmeta!`.",
       "name": "version",
       "inputs": [],
       "outputs": [
         "string"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Storage schema the stored data conforms to. Pure read.\\n\\n`0` for a registry deployed before the schema was versioned. When this\\ndiffers from [`KeyLeaseRegistry::code_schema_version`], state-changing calls are\\nstopped until the admin runs [`KeyLeaseRegistry::migrate`]. `NotInitialized` before\\n`init`.",
+      "name": "schema_version",
+      "inputs": [],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u32",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Storage schema the running Wasm was built for ([`SCHEMA_VERSION`]).\\nPure read.",
+      "name": "code_schema_version",
+      "inputs": [],
+      "outputs": [
+        "u32"
       ]
     }
   },
@@ -1570,6 +1702,142 @@
     }
   },
   {
+    "event_v0": {
+      "doc": "Emitted when the admin migrates stored data to the running Wasm's schema,\\nlifting the stop that an upgrade put in place.",
+      "lib": "",
+      "name": "SchemaMigrated",
+      "prefix_topics": [
+        "schema_migrated"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs. (Not the storage schema.)",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that authorized the migration.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Storage schema the data conformed to before the migration.",
+          "name": "from_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Storage schema the data conforms to now.",
+          "name": "to_version",
+          "type_": "u32",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin proposes handing the registry to `new_admin`.\\n\\nNothing changes until `new_admin` accepts. A later proposal supersedes this\\none, so an indexer should treat the most recent `admin_transfer_proposed`\\nas the only live proposal.",
+      "lib": "",
+      "name": "AdminTransferProposed",
+      "prefix_topics": [
+        "admin_transfer_proposed"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Current admin that authorized the proposal.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Address that must accept to become admin.",
+          "name": "new_admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Ledger timestamp from which the proposal can no longer be accepted.",
+          "name": "expires_at",
+          "type_": "u64",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin withdraws a pending transfer before it is accepted.",
+      "lib": "",
+      "name": "AdminTransferCanceled",
+      "prefix_topics": [
+        "admin_transfer_canceled"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Current admin that authorized the cancellation.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Address whose proposal was withdrawn.",
+          "name": "new_admin",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the proposed admin accepts and the registry changes hands.",
+      "lib": "",
+      "name": "AdminTransferAccepted",
+      "prefix_topics": [
+        "admin_transfer_accepted"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that proposed the transfer and no longer holds the role.",
+          "name": "previous_admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Address that authorized the acceptance and is now the admin.",
+          "name": "new_admin",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
     "udt_error_enum_v0": {
       "doc": "Contract-level error codes returned by [`crate::KeyLeaseRegistry`].\\n * Codes are stable and start at 1 (`0` is reserved by the host for success).\\n * New codes must be appended; codes are part of the ABI.\\n * The full mapping is pinned by `ERROR_ABI` in `test.rs`; extend it on append.",
       "lib": "",
@@ -1759,6 +2027,36 @@
           "doc": "Published `rate_per_call` exceeds `MAX_RATE_PER_CALL`. Appended after the\\nchallenge-window and transfer codes so every number already published\\nkeeps its meaning.",
           "name": "RateTooHigh",
           "value": 37
+        },
+        {
+          "doc": "Stored data predates the schema this Wasm was built for. The registry\\nis stopped until the admin runs `migrate`.",
+          "name": "SchemaMigrationRequired",
+          "value": 38
+        },
+        {
+          "doc": "Stored data was written by a newer schema than this Wasm understands\\n(a downgrade), or no migration path exists. Roll the upgrade back.",
+          "name": "SchemaVersionUnsupported",
+          "value": 39
+        },
+        {
+          "doc": "No admin transfer is pending, so there is nothing to accept or cancel.",
+          "name": "NoPendingAdminTransfer",
+          "value": 40
+        },
+        {
+          "doc": "The pending admin transfer is past its `expires_at` and can no longer\\nbe accepted. The current admin must propose again.",
+          "name": "AdminTransferExpired",
+          "value": 41
+        },
+        {
+          "doc": "The proposed admin is the current admin; a transfer must change hands.",
+          "name": "InvalidAdmin",
+          "value": 42
+        },
+        {
+          "doc": "`register_service` was called with an all-zero `endpoint_hash`, which\\ncommits to nothing and is treated as a placeholder. Appended after the\\nschema-versioning and admin-transfer codes so every number already\\npublished keeps its meaning.",
+          "name": "InvalidEndpointHash",
+          "value": 43
         }
       ]
     }

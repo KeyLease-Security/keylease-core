@@ -23,6 +23,7 @@
 - [Consumer guide](consumer-guide.md)
 - [Developer guide](developer-guide.md)
 - [Deployment](deployment.md)
+- [Mainnet runbook](mainnet-runbook.md)
 - [Troubleshooting](troubleshooting.md)
 - [Protocol FAQ](faq.md)
 
@@ -33,6 +34,8 @@
 - [Design: early cancellation](design/early-cancellation.md)
 - [Deployments](deployments.md)
 - Design notes
+  - [Storage schema versioning (#123)](design/123-storage-schema-versioning.md)
+  - [Two-step admin transfer (#121)](design/121-admin-transfer.md)
   - [Provider staking and slashing (#137)](design/137-provider-staking.md)
   - [Revenue splits (#133)](design/133-revenue-splits.md)
   - [Transferable leases (#134)](design/transferable-leases.md)

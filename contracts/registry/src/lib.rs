@@ -79,9 +79,14 @@
 //!   duration plus the grace period whenever it is written, so escrow cannot
 //!   fall off the ledger. Reads never extend: `bump_lease` and `bump_service`
 //!   keep an entry alive on their own terms (see `storage`).
+//! * **Two-step admin rotation** — the admin role moves only when the current
+//!   admin proposes a successor and that successor authorizes acceptance, so a
+//!   typo or an unreachable address can never strand upgrade and token control.
 //! * **Wasm upgrades** — the admin proposes a new Wasm through the Soroban
 //!   deployer and may only execute it after a 24-hour on-ledger delay, giving
 //!   consumers time to exit; `contractmeta!` identifies the running version.
+//!   The storage schema is versioned: state-changing calls stop until the
+//!   admin runs `migrate` after an upgrade, and a downgrade is rejected.
 
 mod errors;
 mod events;
@@ -101,16 +106,19 @@ use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, St
 
 pub use crate::errors::Error;
 pub use crate::events::{
-    ContractUpgraded, EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
+    AdminTransferAccepted, AdminTransferCanceled, AdminTransferProposed, ContractUpgraded,
+    EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
     LeaseCancellationWithdrawn, LeaseCancelled, LeaseChallengeCancelled, LeaseChallengeResolved,
     LeaseChallenged, LeaseCreated, LeaseDelegated, LeaseRevoked, LeaseSettled,
-    LeaseSettlementProposed, LeaseTransferred, RegistryInitialized, ServiceAttestorSet,
-    ServiceRateUpdated, ServiceRegistered, ServiceStatusChanged, UpgradeCancelled, UpgradeProposed,
-    EVENT_SCHEMA_VERSION,
+    LeaseSettlementProposed, LeaseTransferred, RegistryInitialized, SchemaMigrated,
+    ServiceAttestorSet, ServiceRateUpdated, ServiceRegistered, ServiceStatusChanged,
+    UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
 };
+pub use crate::storage::SCHEMA_VERSION;
 pub use crate::types::{
-    CancelRequest, Lease, LeasePage, LeaseQuote, LeaseStatus, PendingUpgrade, ProviderServicePage,
-    Service, ServicePage, ServiceStats, Settlement, SettlementState, UsageAttestation,
+    CancelRequest, Lease, LeasePage, LeaseQuote, LeaseStatus, PendingAdminTransfer, PendingUpgrade,
+    ProviderServicePage, Service, ServicePage, ServiceStats, Settlement, SettlementState,
+    UsageAttestation,
 };
 
 // On-chain contract metadata, readable from the ledger without the source.
@@ -119,6 +127,10 @@ soroban_sdk::contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
 // The event payload schema is versioned independently of the release: `version`
 // moves on every deploy, this only when an event gains or loses a field.
 soroban_sdk::contractmeta!(key = "eventSchemaVersion", val = "1");
+// The storage schema this Wasm reads and writes (`storage::SCHEMA_VERSION`),
+// readable before the Wasm is installed, so a reviewer can tell from the
+// uploaded artifact whether an upgrade will need `migrate`.
+soroban_sdk::contractmeta!(key = "storageSchemaVersion", val = "1");
 soroban_sdk::contractmeta!(
     key = "description",
     val = "Time-bound micro-leases for API/RPC access, escrowed with SEP-41 tokens on Stellar."
@@ -253,6 +265,14 @@ pub fn usage_attestation_message(
     Bytes::from_slice(env, &buf)
 }
 
+/// How long a proposed admin transfer stays acceptable.
+///
+/// Long enough for a multisig successor to collect signatures across time zones,
+/// short enough that a forgotten proposal does not sit around as a latent
+/// hand-over to an address whose key may since have leaked. After the window the
+/// proposal can only be cancelled or replaced, never accepted.
+pub const ADMIN_TRANSFER_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
+
 /// The KeyLease registry contract: services, escrowed leases and settlement.
 #[contract]
 pub struct KeyLeaseRegistry;
@@ -269,12 +289,17 @@ impl KeyLeaseRegistry {
     /// configure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via
     /// [`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and
     /// [`KeyLeaseRegistry::cancel_upgrade`].
+    /// The role can later be handed over with [`KeyLeaseRegistry::propose_admin`]
+    /// and [`KeyLeaseRegistry::accept_admin`].
     pub fn init(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
-        if storage::is_initialized(&env) {
+        // A stamped schema without an admin can only come from foreign or
+        // corrupted state; refuse it rather than adopt data we did not write.
+        if storage::is_initialized(&env) || storage::has_schema_version(&env) {
             return Err(Error::AlreadyInitialized);
         }
         storage::set_admin(&env, &admin);
+        storage::set_schema_version(&env, SCHEMA_VERSION);
         storage::extend_instance_ttl(&env);
         RegistryInitialized {
             schema_version: EVENT_SCHEMA_VERSION,
@@ -299,6 +324,7 @@ impl KeyLeaseRegistry {
     pub fn set_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
+        storage::check_schema(&env)?;
 
         // Guard the early return with the authorization above: an unauthorized
         // caller must still get `Unauthorized`, never a silent `Ok(())`.
@@ -325,6 +351,13 @@ impl KeyLeaseRegistry {
     /// and the execution ledger timestamp are stored and reported by
     /// [`UpgradeProposed`]; clients can read them with
     /// [`KeyLeaseRegistry::get_pending_upgrade`].
+    ///
+    /// The upgrade entry points are deliberately **not** gated on the schema
+    /// check: if an upgrade installs the wrong Wasm (for example an older
+    /// schema, which stops the registry with `SchemaVersionUnsupported`), the
+    /// admin must still be able to propose and execute the right one. After an
+    /// upgrade that raises the schema, every state-changing entry point returns
+    /// `SchemaMigrationRequired` until [`KeyLeaseRegistry::migrate`] runs.
     pub fn propose_upgrade(
         env: Env,
         admin: Address,
@@ -385,7 +418,8 @@ impl KeyLeaseRegistry {
     /// and the ledger timestamp that had to be reached.
     ///
     /// The contract id stays the same; storage, balances and in-flight leases
-    /// are preserved, which is why upgrades must never change the storage layout.
+    /// are preserved, which is why a layout change must bump [`SCHEMA_VERSION`]
+    /// and ship a migration.
     pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
@@ -412,6 +446,175 @@ impl KeyLeaseRegistry {
         Ok(())
     }
 
+    /// Migrate stored data to [`SCHEMA_VERSION`] and lift the post-upgrade
+    /// stop. Admin only. Returns the schema version now in force.
+    ///
+    /// Runs every step from the stored version up to the code's version, then
+    /// stamps the new version, all in one transaction: either the whole path
+    /// applies or nothing does. Steps are bounded (see `storage::migrate_step`),
+    /// so a migration never iterates over leases or services.
+    ///
+    /// - **Auth:** `admin`, which must be the stored admin.
+    /// - **Already current:** no-op; nothing is written and no event is
+    ///   published, so it is safe to call after every upgrade.
+    /// - **Stored schema newer than this Wasm:** `SchemaVersionUnsupported`;
+    ///   the upgrade was a downgrade and must be rolled back, not migrated.
+    /// - **Events:** `schema_migrated { admin, from_version, to_version }`.
+    /// - **Errors:** `NotInitialized`, `Unauthorized`,
+    ///   `SchemaVersionUnsupported`.
+    pub fn migrate(env: Env, admin: Address) -> Result<u32, Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        let from = storage::stored_schema_version(&env).ok_or(Error::NotInitialized)?;
+        if from == SCHEMA_VERSION {
+            return Ok(SCHEMA_VERSION);
+        }
+        if from > SCHEMA_VERSION {
+            return Err(Error::SchemaVersionUnsupported);
+        }
+
+        // Bounded by the compile-time distance between two schema versions.
+        for version in from..SCHEMA_VERSION {
+            storage::migrate_step(&env, version)?;
+        }
+        storage::set_schema_version(&env, SCHEMA_VERSION);
+        storage::extend_instance_ttl(&env);
+        SchemaMigrated {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            from_version: from,
+            to_version: SCHEMA_VERSION,
+        }
+        .publish(&env);
+        Ok(SCHEMA_VERSION)
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin rotation
+    // -----------------------------------------------------------------------
+
+    /// Propose `new_admin` as the next registry admin and return the ledger
+    /// timestamp at which the proposal expires.
+    ///
+    /// This is the first half of a two-step hand-over; nothing changes until
+    /// `new_admin` calls [`KeyLeaseRegistry::accept_admin`] before `expires_at`
+    /// (`now + ADMIN_TRANSFER_WINDOW_SECS`). Splitting the hand-over means the
+    /// current admin's authorization alone can never move the role, and the
+    /// successor's authorization alone can never claim it.
+    ///
+    /// - **Auth:** `admin`, which must be the stored admin.
+    /// - **Preconditions:** `new_admin` differs from the current admin.
+    /// - **Effects:** stores (or replaces) the single pending proposal and
+    ///   extends the instance TTL.
+    /// - **Events:** `admin_transfer_proposed`.
+    /// - **Errors:** `NotInitialized`, `Unauthorized`, `InvalidAdmin`, `Overflow`,
+    ///   `SchemaMigrationRequired`, `SchemaVersionUnsupported`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<u64, Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::check_schema(&env)?;
+        if new_admin == admin {
+            return Err(Error::InvalidAdmin);
+        }
+
+        let now = env.ledger().timestamp();
+        let expires_at = now
+            .checked_add(ADMIN_TRANSFER_WINDOW_SECS)
+            .ok_or(Error::Overflow)?;
+        storage::set_pending_admin(
+            &env,
+            &PendingAdminTransfer {
+                proposed_by: admin.clone(),
+                new_admin: new_admin.clone(),
+                proposed_at: now,
+                expires_at,
+            },
+        );
+        storage::extend_instance_ttl(&env);
+        AdminTransferProposed {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            new_admin,
+            expires_at,
+        }
+        .publish(&env);
+        Ok(expires_at)
+    }
+
+    /// Withdraw the pending admin transfer. Admin only.
+    ///
+    /// Works whether or not the proposal has expired, so a stale proposal can
+    /// always be cleared explicitly.
+    ///
+    /// - **Auth:** `admin`, which must be the stored admin.
+    /// - **Preconditions:** a proposal is pending.
+    /// - **Effects:** removes the proposal and extends the instance TTL.
+    /// - **Events:** `admin_transfer_canceled`.
+    /// - **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingAdminTransfer`,
+    ///   `SchemaMigrationRequired`, `SchemaVersionUnsupported`.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::check_schema(&env)?;
+        let pending = storage::get_pending_admin(&env).ok_or(Error::NoPendingAdminTransfer)?;
+
+        storage::clear_pending_admin(&env);
+        storage::extend_instance_ttl(&env);
+        AdminTransferCanceled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            new_admin: pending.new_admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer and become the registry admin.
+    ///
+    /// The second half of the hand-over started by [`KeyLeaseRegistry::propose_admin`].
+    /// Together the two calls require authorization from both the outgoing and
+    /// the incoming admin, so no third party can take over the registry, and a
+    /// mistyped or unreachable successor simply never accepts.
+    ///
+    /// - **Auth:** `new_admin`, which must be the proposed address.
+    /// - **Preconditions:** a proposal is pending, it names `new_admin`, it was
+    ///   made by the admin still in office, and `now < expires_at`.
+    /// - **Effects:** stores `new_admin` as admin, clears the proposal and
+    ///   extends the instance TTL. The previous admin loses every admin right in
+    ///   the same transaction.
+    /// - **Events:** `admin_transfer_accepted`.
+    /// - **Errors:** `NotInitialized`, `NoPendingAdminTransfer`, `Unauthorized`,
+    ///   `AdminTransferExpired`, `SchemaMigrationRequired`, `SchemaVersionUnsupported`.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        new_admin.require_auth();
+        let current = storage::get_admin(&env).ok_or(Error::NotInitialized)?;
+        storage::check_schema(&env)?;
+        let pending = storage::get_pending_admin(&env).ok_or(Error::NoPendingAdminTransfer)?;
+
+        // Only the named successor may accept, and only a proposal made by the
+        // admin still in office counts. The second check cannot fail through
+        // this contract's own entry points (acceptance clears the proposal),
+        // but it keeps a proposal carried across an upgrade from outliving the
+        // admin that made it.
+        if pending.new_admin != new_admin || pending.proposed_by != current {
+            return Err(Error::Unauthorized);
+        }
+        if env.ledger().timestamp() >= pending.expires_at {
+            return Err(Error::AdminTransferExpired);
+        }
+
+        storage::set_admin(&env, &new_admin);
+        storage::clear_pending_admin(&env);
+        storage::extend_instance_ttl(&env);
+        AdminTransferAccepted {
+            schema_version: EVENT_SCHEMA_VERSION,
+            previous_admin: current,
+            new_admin,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Services
     // -----------------------------------------------------------------------
@@ -428,6 +631,7 @@ impl KeyLeaseRegistry {
         endpoint_hash: BytesN<32>,
     ) -> Result<u64, Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         if rate_per_call <= 0 {
             return Err(Error::InvalidRate);
@@ -438,6 +642,12 @@ impl KeyLeaseRegistry {
         // advertise a service no lease can fund.
         if rate_per_call > MAX_RATE_PER_CALL {
             return Err(Error::RateTooHigh);
+        }
+        // An all-zero digest commits to nothing, so it cannot be a real
+        // endpoint commitment. Reject it here, where the listing is made, so
+        // no service is ever stored with an unattested descriptor.
+        if endpoint_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEndpointHash);
         }
 
         let service_id = storage::next_service_id(&env)?;
@@ -478,6 +688,7 @@ impl KeyLeaseRegistry {
         is_active: bool,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let mut service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -513,6 +724,7 @@ impl KeyLeaseRegistry {
         endpoint_hash: BytesN<32>,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let mut service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -567,6 +779,7 @@ impl KeyLeaseRegistry {
         attestor: Option<BytesN<32>>,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -612,6 +825,7 @@ impl KeyLeaseRegistry {
         duration_secs: u64,
     ) -> Result<u64, Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         mint_lease(&env, &consumer, service_id, requested_calls, duration_secs)
     }
@@ -652,6 +866,7 @@ impl KeyLeaseRegistry {
     ) -> Result<u64, Error> {
         delegate.require_auth();
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let lease_id = mint_lease(&env, &consumer, service_id, requested_calls, duration_secs)?;
 
@@ -678,6 +893,7 @@ impl KeyLeaseRegistry {
     /// request with [`KeyLeaseRegistry::withdraw_early_cancel`].
     pub fn request_early_cancel(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         if lease.consumer != consumer {
@@ -716,6 +932,7 @@ impl KeyLeaseRegistry {
     /// Withdraw a pending early-cancellation request. Requires consumer auth.
     pub fn withdraw_early_cancel(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         if lease.consumer != consumer {
@@ -741,6 +958,7 @@ impl KeyLeaseRegistry {
     /// provider's auth; the lease stays active and unchanged.
     pub fn reject_early_cancel(env: Env, provider: Address, lease_id: u64) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         require_lease_provider(&env, &lease, &provider)?;
@@ -777,6 +995,7 @@ impl KeyLeaseRegistry {
         verified_calls: u32,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let mut lease = storage::get_lease(&env, lease_id)?;
         require_lease_provider(&env, &lease, &provider)?;
@@ -919,6 +1138,7 @@ impl KeyLeaseRegistry {
         verified_calls: u32,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         if storage::get_service_attestor(&env, lease.service_id).is_some() {
@@ -949,6 +1169,7 @@ impl KeyLeaseRegistry {
         attestation: UsageAttestation,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         verify_attestation(&env, &lease, verified_calls, &attestation)?;
@@ -1194,6 +1415,7 @@ impl KeyLeaseRegistry {
     /// nothing. Revocation leaves the service's revenue totals untouched.
     pub fn revoke_expired_lease(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let mut lease = storage::get_lease(&env, lease_id)?;
         if lease.consumer != consumer {
@@ -1269,6 +1491,10 @@ impl KeyLeaseRegistry {
     /// their own transaction fee, the horizon is fixed by the storage policy
     /// rather than by the caller, and no lease or balance changes. Bumping a
     /// service you do not own is a donation of rent, not an attack.
+    ///
+    /// Not gated on the schema check: it changes no stored value, and keeping
+    /// entries alive is exactly what a stopped registry awaiting `migrate`
+    /// needs.
     pub fn bump_service(env: Env, service_id: u64) -> Result<(), Error> {
         // A miss must be an error rather than a silent no-op: `extend_ttl` on a
         // non-existent key would otherwise leave the caller paying for nothing.
@@ -1315,6 +1541,15 @@ impl KeyLeaseRegistry {
     /// Return the configured admin, or `NotInitialized` before `init`.
     pub fn get_admin(env: Env) -> Result<Address, Error> {
         storage::get_admin(&env).ok_or(Error::NotInitialized)
+    }
+
+    /// The pending admin transfer, if any. Pure read.
+    ///
+    /// An expired proposal is still returned (compare `expires_at` with the
+    /// ledger time) until the admin cancels or replaces it; it can no longer be
+    /// accepted.
+    pub fn get_pending_admin(env: Env) -> Option<PendingAdminTransfer> {
+        storage::get_pending_admin(&env)
     }
 
     /// Return the configured escrow token, or `TokenNotSet`.
@@ -1474,6 +1709,22 @@ impl KeyLeaseRegistry {
     pub fn service_stats(env: Env, service_id: u64) -> Result<ServiceStats, Error> {
         storage::get_service(&env, service_id)?;
         Ok(storage::get_service_stats(&env, service_id))
+    }
+
+    /// Storage schema the stored data conforms to. Pure read.
+    ///
+    /// `0` for a registry deployed before the schema was versioned. When this
+    /// differs from [`KeyLeaseRegistry::code_schema_version`], state-changing calls are
+    /// stopped until the admin runs [`KeyLeaseRegistry::migrate`]. `NotInitialized` before
+    /// `init`.
+    pub fn schema_version(env: Env) -> Result<u32, Error> {
+        storage::stored_schema_version(&env).ok_or(Error::NotInitialized)
+    }
+
+    /// Storage schema the running Wasm was built for ([`SCHEMA_VERSION`]).
+    /// Pure read.
+    pub fn code_schema_version(_env: Env) -> u32 {
+        SCHEMA_VERSION
     }
 
     /// Number of calls still available on a lease (zero once settled/expired).
@@ -1668,11 +1919,8 @@ fn mint_lease(
     // fail before mutating state.
     let token_addr = storage::get_token(env).ok_or(Error::TokenNotSet)?;
 
-    let expires_at = env
-        .ledger()
-        .timestamp()
-        .checked_add(duration_secs)
-        .ok_or(Error::Overflow)?;
+    let now = env.ledger().timestamp();
+    let expires_at = now.checked_add(duration_secs).ok_or(Error::Overflow)?;
 
     let lease_id = storage::next_lease_id(env)?;
     let lease = Lease {
@@ -1684,6 +1932,7 @@ fn mint_lease(
         expires_at,
         locked_deposit: required_deposit,
         settled: false,
+        created_at: now,
     };
 
     // checks-effects-interactions: the lease exists before the token is

@@ -32,7 +32,7 @@ usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 info() { printf '    %s\n' "$*"; }
 
-need_value() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"; }
+need_value() { if [ $# -lt 2 ] || [ -z "${2:-}" ]; then die "$1 requires a value"; fi; }
 
 while [ $# -gt 0 ]; do
   case "$1" in

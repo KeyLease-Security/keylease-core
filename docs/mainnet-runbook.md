@@ -55,16 +55,16 @@ made to trust a new address without an upgrade.
 1. Pin the release commit and verify a clean worktree.
 2. Run all gates and archive complete outputs:
 
-```bash
-git rev-parse HEAD
-git status --porcelain
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all
-rustup target add wasm32v1-none
-cargo build --target wasm32v1-none --release --all
-sha256sum target/wasm32v1-none/release/keylease_registry.wasm
-```
+   ```bash
+   git rev-parse HEAD
+   git status --porcelain
+   cargo fmt --all -- --check
+   cargo clippy --all-targets -- -D warnings
+   cargo test --all
+   rustup target add wasm32v1-none
+   cargo build --target wasm32v1-none --release --all
+   sha256sum target/wasm32v1-none/release/keylease_registry.wasm
+   ```
 
 3. Independently reproduce the Wasm hash from a clean checkout.
 4. Confirm RPC, network passphrase, native SAC/token id, multisig threshold,
@@ -112,6 +112,7 @@ stellar contract invoke --id "$REGISTRY" --source-account "$PROVIDER" \
 ```
 
 Expected:
+
 - upload output is the Wasm hash and it equals the pinned SHA-256;
 - deploy output starts with `C` and is the new contract id;
 - `init`, `set_token`, and `register_service` each return success and emit

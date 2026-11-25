@@ -17,6 +17,10 @@ fn collect_spec_entries() -> Vec<ScSpecEntry> {
         crate::KeyLeaseRegistry::spec_xdr_propose_upgrade().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_cancel_upgrade().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_execute_upgrade().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_migrate().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_propose_admin().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_cancel_admin_transfer().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_accept_admin().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_register_service().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_set_service_active().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_update_service().to_vec(),
@@ -35,7 +39,10 @@ fn collect_spec_entries() -> Vec<ScSpecEntry> {
         crate::KeyLeaseRegistry::spec_xdr_get_admin().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_get_token().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_get_pending_upgrade().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_get_pending_admin().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_version().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_schema_version().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_code_schema_version().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_service_count().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_lease_count().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_get_service().to_vec(),
@@ -70,6 +77,10 @@ fn collect_spec_entries() -> Vec<ScSpecEntry> {
         crate::events::UpgradeProposed::spec_xdr().to_vec(),
         crate::events::UpgradeCancelled::spec_xdr().to_vec(),
         crate::events::ContractUpgraded::spec_xdr().to_vec(),
+        crate::events::SchemaMigrated::spec_xdr().to_vec(),
+        crate::events::AdminTransferProposed::spec_xdr().to_vec(),
+        crate::events::AdminTransferCanceled::spec_xdr().to_vec(),
+        crate::events::AdminTransferAccepted::spec_xdr().to_vec(),
     ];
     for xdr in events {
         entries.push(ScSpecEntry::from_xdr(xdr, Limits::none()).unwrap());

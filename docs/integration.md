@@ -191,6 +191,7 @@ export async function readLease(leaseId: bigint) {
     consumer: string;
     allocated_calls: number;
     used_calls: number;
+    created_at: bigint;
     expires_at: bigint;
     locked_deposit: bigint;
     settled: boolean;

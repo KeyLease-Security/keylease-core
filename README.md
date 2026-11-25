@@ -108,7 +108,11 @@ keylease-core/
 | `set_token(admin, token)` | `admin` | Configure the SEP-41 escrow token (native SAC or custom). Emits `escrow_token_set`. |
 | `propose_upgrade(admin, new_wasm_hash)` | `admin` | Queue a Wasm behind the 24h delay. Emits `upgrade_proposed`. |
 | `cancel_upgrade(admin)` | `admin` | Drop a pending proposal. Emits `upgrade_cancelled`. |
-| `execute_upgrade(admin)` | `admin` | Install the proposed Wasm after the delay. Emits `contract_upgraded`. |
+| `execute_upgrade(admin)` | `admin` | Install the proposed Wasm after the delay. Emits `contract_upgraded`. The upgrade calls work even while the registry is stopped by a schema mismatch, so an upgrade can always be rolled back. |
+| `migrate(admin) -> u32` | `admin` | Migrate stored data to the running Wasm's storage schema and lift the post-upgrade stop. No-op when current; refuses a downgrade. Emits `schema_migrated`. |
+| `propose_admin(admin, new_admin) -> u64` | `admin` | Start a two-step admin hand-over; returns `expires_at` (now + 7 days). Replaces any pending proposal. Emits `admin_transfer_proposed`. |
+| `cancel_admin_transfer(admin)` | `admin` | Withdraw the pending proposal, expired or not. Emits `admin_transfer_canceled`. |
+| `accept_admin(new_admin)` | `new_admin` | Complete the hand-over before `expires_at`; the previous admin loses every admin right. Emits `admin_transfer_accepted`. |
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. `rate_per_call` must be positive and at most `MAX_RATE_PER_CALL`. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
 | `update_service(provider, service_id, rate_per_call, endpoint_hash) -> service_id` | `provider` | Update rate and endpoint hash for a service. Emits `service_rate_updated`. Only the owning provider may call this. Existing leases keep their original rate. |
@@ -124,12 +128,13 @@ keylease-core/
 | `revoke_expired_lease(consumer, lease_id)` | `consumer` | Reclaim the full deposit 24h after expiry. Emits `lease_revoked`. |
 | `bump_service(service_id)` | — | Extend a service entry's TTL to its standard horizon. Permissionless; the caller pays the rent. |
 | `bump_lease(lease_id)` | — | Extend a live lease entry using the lease TTL policy. Permissionless; rejects a settled lease. |
-| `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. Never extend a TTL. |
+| `get_admin()`, `get_pending_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. Never extend a TTL. |
 | `services_for_provider(provider, after, limit) -> ProviderServicePage` | — | One bounded page of a provider's service ids; page with `next` until `done`. Never extends a TTL. |
 | `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)` | — | Derived lifecycle queries. Never extend a TTL. |
 | `service_stats(service_id)` | — | Cumulative settled leases, calls and payout for one service. Never extend a TTL. |
 | `service_count()`, `lease_count()` | — | Monotonic counters. |
 | `get_services(start, limit)`, `get_leases(start, limit)` | — | Bounded pages over the id space, oldest id first, `done` as the end marker. `limit` ≤ `MAX_PAGE_SIZE`. Never extend a TTL. |
+| `schema_version()`, `code_schema_version()` | — | Storage schema of the stored data and of the running Wasm. State-changing calls are stopped while they differ. |
 
 ### Events
 
@@ -162,6 +167,10 @@ consumer of the stream should branch on it.
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `schema_migrated` | — | `schema_version`, `admin`, `from_version`, `to_version` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 `lease_created` is emitted unchanged whether the consumer or a delegate minted
 the lease; `lease_delegated` is added on top and names who paid the transaction
@@ -355,7 +364,8 @@ invariants:
 9. **Revocation is not settlement.** A reclaimed lease reports
    `LeaseStatus::Revoked`, keeps `used_calls == 0`, and never enters
    `service_stats`, so refund and revenue stay distinguishable to any reader.
-10. **Bounded admin.** The admin can configure the token and upgrade the Wasm. It
+10. **Bounded admin.** The admin can configure the token, upgrade the Wasm and
+   hand the role over with a two-step `propose_admin` / `accept_admin`. It
    cannot move escrowed funds.
 
 ### Trusting the escrow token

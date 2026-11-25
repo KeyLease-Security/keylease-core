@@ -361,6 +361,13 @@ stellar contract invoke --id $REGISTRY --source-account admin --network testnet 
 Rules for upgrades:
 
 - Never change the `DataKey` layout or the meaning of stored values.
+- Append fields to a `#[contracttype]` struct; never reorder, rename or remove
+  one. A struct decodes by unpacking the field names it declares, so a missing
+  field makes existing entries undecodable. `Lease.created_at` is the worked
+  example: it was appended, and `storage::get_lease` keeps a legacy fallback that
+  reads pre-`created_at` entries and reports `created_at = 0` (unknown) so
+  settlement and refunds still work across the upgrade. Add the same fallback, or
+  drain the affected entries, whenever you extend a stored type.
 - Never renumber or reuse an error code.
 - Keep event names and payload fields compatible; add new events for new
   transitions.

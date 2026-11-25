@@ -380,11 +380,13 @@ Initialize the registry and appoint `admin`.
 - **Caller / auth:** `admin` must authorize.
 - **Trigger:** once, immediately after deploy.
 - **Preconditions:** the registry must not already be initialized.
-- **State:** sets `Admin`; extends instance TTL.
+- **State:** sets `Admin` and `SchemaVersion = SCHEMA_VERSION`; extends instance TTL.
 - **Events:** `registry_initialized { admin }`.
-- **Errors:** `AlreadyInitialized`.
-- **Notes:** the admin can only call `set_token` and manage upgrades through the
-  propose/execute/cancel flow below. It cannot move user funds.
+- **Errors:** `AlreadyInitialized`, also returned when a `SchemaVersion`
+  entry already exists without an admin (state this contract did not write).
+- **Notes:** the admin can only call `set_token`, manage upgrades through the
+  propose/execute/cancel flow below and use the admin-rotation entry points. It
+  cannot move user funds.
 
 ### `set_token`
 
@@ -458,8 +460,97 @@ Install the proposed Wasm through `env.deployer().update_current_contract_wasm`.
 - **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingUpgrade`,
   `UpgradeDelayNotElapsed`.
 - **Notes:** the contract id, storage and balances are preserved, so an upgrade
-  must never change the `DataKey` layout or the meaning of stored values. See
-  [Deployment](deployment.md#upgrading).
+  must never change the `DataKey` layout or the meaning of stored values without
+  bumping the storage schema. See [Deployment](deployment.md#upgrading).
+- **Schema:** not gated on the schema check, so it stays callable while the
+  registry is stopped and a bad upgrade can always be reverted. An upgrade to a
+  Wasm with a higher `storageSchemaVersion` stops every state-changing entry
+  point until `migrate` runs.
+
+### `migrate`
+
+```rust
+pub fn migrate(env: Env, admin: Address) -> Result<u32, Error>
+```
+
+Migrate stored data to the running Wasm's storage schema (`SCHEMA_VERSION`) and
+return the version now in force.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **Trigger:** immediately after every `execute_upgrade`.
+- **Effects:** applies each bounded `storage::migrate_step` from the stored
+  version up to `SCHEMA_VERSION`, writes the new `SchemaVersion` and extends
+  the instance TTL, all atomically. When the schema is already current, nothing
+  is written and no event is published.
+- **Events:** `schema_migrated { admin, from_version, to_version }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `SchemaVersionUnsupported`
+  (the stored schema is newer than this Wasm, or has no migration path).
+- **Notes:** see [Storage schema migrations](deployment.md#storage-schema-migrations)
+  for how a migration is proposed, reviewed and executed.
+
+### Schema gate
+
+Every state-changing entry point other than the ones listed below — `set_token`,
+`propose_admin`, `cancel_admin_transfer`, `accept_admin`,
+`register_service`, `set_service_active`, `update_service`,
+`set_service_attestor`, `create_lease`, `create_lease_for`,
+`request_early_cancel`, `withdraw_early_cancel`, `reject_early_cancel`,
+`approve_early_cancel`, `settle_lease`, `settle_lease_attested` and
+`revoke_expired_lease` — first checks that the stored schema equals
+`SCHEMA_VERSION`. Otherwise it returns `SchemaMigrationRequired` (data older than
+the code) or `SchemaVersionUnsupported` (data newer than the code). `init`,
+`propose_upgrade`, `cancel_upgrade`, `execute_upgrade`, `migrate`,
+`bump_service`, `bump_lease` and every view are not gated.
+
+### `propose_admin`
+
+```rust
+pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<u64, Error>
+```
+
+Start a two-step admin hand-over to `new_admin` and return `expires_at`.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **Preconditions:** `new_admin != admin`.
+- **State:** stores `PendingAdmin { proposed_by, new_admin, proposed_at,
+  expires_at }` with `expires_at = now + ADMIN_TRANSFER_WINDOW_SECS` (7 days),
+  replacing any earlier proposal; extends instance TTL. The admin does **not**
+  change yet.
+- **Events:** `admin_transfer_proposed { admin, new_admin, expires_at }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `InvalidAdmin`, `Overflow`.
+
+### `cancel_admin_transfer`
+
+```rust
+pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), Error>
+```
+
+Withdraw the pending proposal, whether or not it has expired.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **State:** removes `PendingAdmin`; extends instance TTL.
+- **Events:** `admin_transfer_canceled { admin, new_admin }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingAdminTransfer`.
+
+### `accept_admin`
+
+```rust
+pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error>
+```
+
+Complete the hand-over and become the admin.
+
+- **Caller / auth:** `new_admin`, which must be the proposed address.
+- **Preconditions:** a proposal is pending, names `new_admin`, was made by the
+  admin still in office, and `now < expires_at`.
+- **State:** sets `Admin = new_admin`; removes `PendingAdmin`; extends instance
+  TTL. The previous admin loses every admin right in the same transaction.
+- **Events:** `admin_transfer_accepted { previous_admin, new_admin }`.
+- **Errors:** `NotInitialized`, `NoPendingAdminTransfer`, `Unauthorized`,
+  `AdminTransferExpired`.
+- **Notes:** `propose_admin` carries the outgoing admin's authorization and
+  `accept_admin` the incoming one's, so the hand-over as a whole needs both and
+  no third party can complete it.
 
 ---
 
@@ -492,7 +583,7 @@ Publish a new leasable service.
   Both persistent entries are extended to the same clamped horizon, in the same
   call.
 - **Events:** `service_registered { service_id, provider, rate_per_call, endpoint_hash }`.
-- **Errors:** `InvalidRate`, `RateTooHigh`, `Overflow`.
+- **Errors:** `InvalidRate`, `RateTooHigh`, `InvalidEndpointHash`, `Overflow`.
 - **Notes:** the rate bound is enforced where the price is published, not where
   it is spent, so no consumer can ever be quoted a `rate_per_call` whose
   deposit (`rate × allocated_calls`) is not representable in `i128`. Because
@@ -1005,9 +1096,12 @@ performed one could not be used to price a read.
 | View | Signature | Returns |
 | --- | --- | --- |
 | `get_admin` | `(env) -> Result<Address, Error>` | stored admin, else `NotInitialized` |
+| `get_pending_admin` | `(env) -> Option<PendingAdminTransfer>` | pending hand-over, including an expired one, else `None` |
 | `get_token` | `(env) -> Result<Address, Error>` | escrow token, else `TokenNotSet` |
 | `get_pending_upgrade` | `(env) -> Option<PendingUpgrade>` | queued hash and execution ledger, if any |
 | `version` | `(env) -> String` | version embedded by `contractmeta!` |
+| `schema_version` | `(env) -> Result<u32, Error>` | storage schema of the stored data (`0` = pre-versioning), else `NotInitialized` |
+| `code_schema_version` | `(env) -> u32` | storage schema the running Wasm was built for |
 | `service_count` | `(env) -> u64` | total services ever registered |
 | `lease_count` | `(env) -> u64` | total leases ever created |
 | `get_service` | `(env, service_id: u64) -> Result<Service, Error>` | the `Service`, else `ServiceNotFound` |
@@ -1093,6 +1187,10 @@ because topics are positional and indexers filter on them.
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `schema_migrated` | — | `schema_version`, `admin`, `from_version`, `to_version` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 See [integration.md](./integration.md#event-schema-version) for how to branch on
 the version.
@@ -1128,7 +1226,8 @@ pub struct Lease {
     pub consumer: Address,
     pub allocated_calls: u32,
     pub used_calls: u32,
-    pub expires_at: u64,
+    pub created_at: u64,       // ledger timestamp of create_lease
+    pub expires_at: u64,       // created_at + duration_secs
     pub locked_deposit: i128,
     pub settled: bool,
 }
@@ -1184,6 +1283,13 @@ pub struct LeasePage {
     pub next_start: u64,
     pub done: bool,
 }
+
+pub struct PendingAdminTransfer {
+    pub proposed_by: Address,
+    pub new_admin: Address,
+    pub proposed_at: u64,
+    pub expires_at: u64,
+}
 }
 ```
 
@@ -1192,6 +1298,14 @@ breaks decoding of leases written by an older version. `Revoked` therefore
 derives from a separate `LeaseRevoked(lease_id)` marker rather than a
 `revoked: bool` on the struct, and `ServiceStats` lives under its own key for
 the same reason.
+
+### `created_at` and upgrade compatibility
+
+`created_at` was appended to `Lease` after the type had already been published,
+so a lease written by an earlier release is stored without it. `get_lease` reads
+such an entry through a legacy shape and reports `created_at = 0`, meaning the
+creation time is unknown; everything else about the lease is unchanged, so it
+can still be settled or revoked, and the next write stores the current shape.
 
 ## Storage layout
 
@@ -1208,6 +1322,8 @@ pub enum DataKey {
     ProviderServices(Address), // persistent: service ids, oldest first
     Settlement(u64),           // persistent: proposed split, keyed by lease id
     CancelRequest(u64),        // persistent: pending early-cancellation request
+    SchemaVersion,             // instance, u32: see SCHEMA_VERSION
+    PendingAdmin,              // instance: proposed admin hand-over
 }
 ```
 
@@ -1380,6 +1496,12 @@ recording it there fails `cargo test`. Add a new code by appending it to
 | 35 | `LeaseNotTransferable` | lease already settled or revoked |
 | 36 | `InvalidConsumer` | transfer target is the current consumer |
 | 37 | `RateTooHigh` | published `rate_per_call` above `MAX_RATE_PER_CALL` |
+| 38 | `SchemaMigrationRequired` | stored schema older than this Wasm; admin must run `migrate` |
+| 39 | `SchemaVersionUnsupported` | stored schema newer than this Wasm, or no migration path |
+| 40 | `NoPendingAdminTransfer` | `accept_admin` / `cancel_admin_transfer` with no proposal |
+| 41 | `AdminTransferExpired` | `accept_admin` at or after `expires_at` |
+| 42 | `InvalidAdmin` | `propose_admin` named the current admin |
+| 43 | `InvalidEndpointHash` | `endpoint_hash` is all zeroes and commits to nothing |
 
 ## Invoking with the Stellar CLI
 

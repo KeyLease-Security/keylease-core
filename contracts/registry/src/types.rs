@@ -4,7 +4,9 @@ use soroban_sdk::{contracttype, Address, BytesN, Vec};
 ///
 /// `endpoint_hash` commits to the off-chain endpoint metadata (e.g. a SHA-256
 /// digest of the service descriptor) without publishing the static credential
-/// on-chain. Leases are authorized against this commitment.
+/// on-chain. Leases are authorized against this commitment, so the digest must
+/// be derived from the descriptor itself; an all-zero (placeholder) value is
+/// rejected by `register_service`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Service {
@@ -16,11 +18,17 @@ pub struct Service {
     pub rate_per_call: i128,
     /// Whether new leases may be created for this service.
     pub is_active: bool,
-    /// Commitment to the off-chain endpoint descriptor.
+    /// Commitment to the off-chain endpoint descriptor: a digest over the
+    /// descriptor's actual content, never a placeholder. All-zero is rejected.
     pub endpoint_hash: BytesN<32>,
 }
 
 /// A funded, time-bound authorization for a fixed allotment of metered calls.
+///
+/// `created_at` was **appended** to the persisted shape, so entries written by an
+/// earlier release (which lack the field) are decoded by a legacy fallback in
+/// `crate::storage::get_lease` rather than trapping. Never reorder or remove an
+/// existing field: the field list is the storage key set.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lease {
@@ -40,6 +48,12 @@ pub struct Lease {
     pub locked_deposit: i128,
     /// Whether funds have been released (settled by provider or reclaimed by consumer).
     pub settled: bool,
+    /// Unix timestamp (ledger time) of the `create_lease` call, so a lease's age
+    /// is readable from storage instead of being reconstructed from events.
+    ///
+    /// `0` only ever appears on entries written before this field existed; see
+    /// `crate::storage::get_lease` for how those are read.
+    pub created_at: u64,
 }
 
 /// Lifetime settlement totals for one service, keyed by `service_id`.
@@ -278,4 +292,24 @@ pub struct CancelRequest {
     pub lease_id: u64,
     /// Ledger timestamp at which the consumer requested cancellation.
     pub requested_at: u64,
+}
+
+/// An admin hand-over that the current admin has proposed and the incoming
+/// admin has not yet accepted.
+///
+/// Stored under `DataKey::PendingAdmin` in instance storage, so it lives exactly
+/// as long as the registry configuration it would change. At most one proposal
+/// exists at a time; a new proposal replaces the previous one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminTransfer {
+    /// Admin that proposed the transfer. Must still be the stored admin when
+    /// the proposal is accepted.
+    pub proposed_by: Address,
+    /// Address that must call `accept_admin` to take over.
+    pub new_admin: Address,
+    /// Ledger timestamp at which the proposal was made.
+    pub proposed_at: u64,
+    /// Ledger timestamp from which the proposal can no longer be accepted.
+    pub expires_at: u64,
 }

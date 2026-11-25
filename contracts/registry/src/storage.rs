@@ -13,6 +13,8 @@
 //! | Call | Instance | Service entry | Lease entry |
 //! | --- | --- | --- | --- |
 //! | `init`, `upgrade`, `register_service` | extend | — | — |
+//! | `migrate` (when it migrates) | extend | — | — |
+//! | `propose_admin`, `cancel_admin_transfer`, `accept_admin` | extend | — | — |
 //! | `set_token` | extend, unless the token is unchanged | — | — |
 //! | `set_service_active` | — | extend (save) | — |
 //! | `set_service_attestor` | — | attestor entry extends when set, is removed when cleared | — |
@@ -21,7 +23,7 @@
 //! | `settle_lease`, `revoke_expired_lease` | — | — | extend (save) |
 //! | [`crate::KeyLeaseRegistry::bump_service`] | — | extend | — |
 //! | [`crate::KeyLeaseRegistry::bump_lease`] | — | — | extend |
-//! | `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance`, `services_for_provider` | — | — | — |
+//! | `get_pending_admin`, `get_service`, `get_lease`, `lease_status`, `remaining_calls`, `locked_balance`, `services_for_provider` | — | — | — |
 //! | [`crate::KeyLeaseRegistry::get_services`], [`crate::KeyLeaseRegistry::get_leases`] | — | — | — |
 //!
 //! The last row is the read-only surface: it never extends anything, so a
@@ -34,13 +36,44 @@
 //! rather than the lease one: [`save_service`] extends it beside the record it
 //! indexes, so any write to any of a provider's services keeps that provider's
 //! catalogue alive, and no read extends it.
+//!
+//! # Schema version
+//!
+//! [`SCHEMA_VERSION`] names the `DataKey` layout and stored value shapes this
+//! Wasm reads and writes. `init` stamps it into instance storage, and every
+//! state-changing entry point refuses to run unless the stamp matches (see
+//! [`check_schema`]). After an upgrade to a Wasm with a newer schema the
+//! registry is therefore *stopped* until the admin runs `migrate`; an upgrade
+//! to an older schema (a downgrade) stays stopped until it is rolled back.
+//! `docs/deployment.md` documents how a migration is proposed, reviewed and
+//! executed.
 
-use soroban_sdk::{contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, Symbol, TryFromVal, Val, Vec};
+
+/// Storage schema this Wasm reads and writes.
+///
+/// Bump it in the same change that alters a `DataKey` variant, a stored value
+/// shape or the meaning of a stored value, and add the matching step to
+/// `storage::migrate_step`. Purely additive changes that old entries already satisfy
+/// (a new key that defaults when absent) do not need a bump.
+///
+/// | Version | Layout |
+/// | --- | --- |
+/// | `0` | v0.2.x and earlier: the v1 layout without a `SchemaVersion` entry |
+/// | `1` | `Admin`, `Token`, `ServiceCount`, `LeaseCount`, `Service(u64)`, `Lease(u64)`, `ServiceStats(u64)`, `LeaseRevoked(u64)`, `ServiceAttestor(u64)`, `PendingUpgrade`, `ProviderServices(Address)`, `CancelRequest(u64)`, `Settlement(u64)`, `SchemaVersion`, `PendingAdmin` |
+///
+/// Every key in `1` other than `SchemaVersion` that v0.2.x did not have reads
+/// as absent on legacy data and defaults safely, so `0 -> 1` rewrites nothing.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Version reported for an initialized registry that has no `SchemaVersion`
+/// entry, i.e. one deployed before the schema was versioned.
+pub const LEGACY_SCHEMA_VERSION: u32 = 0;
 
 use crate::errors::Error;
 use crate::types::{
-    CancelRequest, Lease, LeasePage, PendingUpgrade, ProviderServicePage, Service, ServicePage,
-    ServiceStats, Settlement,
+    CancelRequest, Lease, LeasePage, PendingAdminTransfer, PendingUpgrade, ProviderServicePage,
+    Service, ServicePage, ServiceStats, Settlement,
 };
 use crate::SETTLE_GRACE_PERIOD_SECS;
 
@@ -131,6 +164,15 @@ pub enum DataKey {
     CancelRequest(u64),
     /// `Settlement` by lease id (persistent storage).
     Settlement(u64),
+    /// Storage schema version this registry's data was written under
+    /// (instance storage). See [`SCHEMA_VERSION`].
+    SchemaVersion,
+    /// Admin hand-over awaiting acceptance (instance storage).
+    ///
+    /// Kept in instance storage on purpose: it shares the configuration
+    /// entry's TTL, which every admin call extends, and it is bounded to a
+    /// single value, so it adds no new rent policy of its own.
+    PendingAdmin,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +189,79 @@ pub fn set_admin(env: &Env, admin: &Address) {
 
 pub fn get_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::Admin)
+}
+
+// ---------------------------------------------------------------------------
+// Schema version
+// ---------------------------------------------------------------------------
+
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
+}
+
+pub fn has_schema_version(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::SchemaVersion)
+}
+
+/// Schema the stored data conforms to: the stamped version, or
+/// [`LEGACY_SCHEMA_VERSION`] for a registry initialized before stamping
+/// existed. `None` for a registry that holds no configuration yet.
+pub fn stored_schema_version(env: &Env) -> Option<u32> {
+    match env.storage().instance().get(&DataKey::SchemaVersion) {
+        Some(version) => Some(version),
+        None if is_initialized(env) => Some(LEGACY_SCHEMA_VERSION),
+        None => None,
+    }
+}
+
+/// Fail closed unless the stored data matches the schema this Wasm was built
+/// for.
+///
+/// A registry with no configuration has nothing to misread and passes.
+/// Older data needs `migrate` first; newer data means a downgrade, which this
+/// code cannot read safely and must not write over.
+pub fn check_schema(env: &Env) -> Result<(), Error> {
+    match stored_schema_version(env) {
+        None => Ok(()),
+        Some(v) if v == SCHEMA_VERSION => Ok(()),
+        Some(v) if v < SCHEMA_VERSION => Err(Error::SchemaMigrationRequired),
+        Some(_) => Err(Error::SchemaVersionUnsupported),
+    }
+}
+
+/// Apply the migration from schema `from` to `from + 1`.
+///
+/// Each arm must be bounded: it may rewrite instance storage, but it must not
+/// iterate over services or leases. A change to persistent entries is migrated
+/// lazily, by the accessor that reads them, and the arm only records that the
+/// new readers are in place. Unknown versions have no path and are rejected.
+pub fn migrate_step(_env: &Env, from: u32) -> Result<(), Error> {
+    match from {
+        // 0 -> 1: the layout is unchanged; versioning only adds the
+        // `SchemaVersion` stamp, which the caller writes after the last step.
+        0 => Ok(()),
+        _ => Err(Error::SchemaVersionUnsupported),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Admin rotation
+// ---------------------------------------------------------------------------
+
+pub fn set_pending_admin(env: &Env, pending: &PendingAdminTransfer) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingAdmin, pending);
+}
+
+pub fn get_pending_admin(env: &Env) -> Option<PendingAdminTransfer> {
+    env.storage().instance().get(&DataKey::PendingAdmin)
+}
+
+pub fn clear_pending_admin(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingAdmin);
 }
 
 pub fn set_token(env: &Env, token: &Address) {
@@ -418,6 +533,36 @@ fn indexed_service(env: &Env, provider: &Address, service_id: u64) -> bool {
 // ---------------------------------------------------------------------------
 // Leases
 // ---------------------------------------------------------------------------
+//
+// `Lease` gained a `created_at` field, and a `#[contracttype]` struct decodes by
+// unpacking the exact field-name keys it knows: a value written before that field
+// existed cannot be decoded into the current `Lease`, and the host raises (it does
+// not return an error) when the key count differs. `get_lease` therefore inspects
+// the stored map first and reads the pre-`created_at` shape through `LegacyLease`,
+// reporting `created_at = 0` (unknown) instead of trapping. That keeps pre-upgrade
+// leases settleable and revocable, i.e. escrow stays releasable across an upgrade.
+//
+// The change is append-only in every other sense: no `DataKey` variant was added,
+// removed or renumbered, and the new field is last in the struct. Nothing has to
+// be migrated up front, and an entry is rewritten in the current shape the next
+// time it is saved (settlement or revocation).
+
+/// Number of fields in the pre-`created_at` lease encoding.
+const LEGACY_LEASE_FIELDS: u32 = 8;
+
+/// The `Lease` shape stored by releases before `created_at` existed. Used only to
+/// decode existing entries; never written except by tests.
+#[contracttype]
+struct LegacyLease {
+    lease_id: u64,
+    service_id: u64,
+    consumer: Address,
+    allocated_calls: u32,
+    used_calls: u32,
+    expires_at: u64,
+    locked_deposit: i128,
+    settled: bool,
+}
 
 /// Persist a lease and extend its entry for as long as the lease can matter.
 pub fn save_lease(env: &Env, lease: &Lease) {
@@ -475,10 +620,59 @@ pub(crate) fn lease_ttl_extend(env: &Env, lease: &Lease) -> u32 {
 /// A lease that needs to outlive its current horizon is kept alive by
 /// [`crate::KeyLeaseRegistry::bump_lease`], not by looking at it.
 pub fn get_lease(env: &Env, lease_id: u64) -> Result<Lease, Error> {
+    let key = DataKey::Lease(lease_id);
+    let val: Val = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(Error::LeaseNotFound)?;
+
+    // Decide which shape is stored *before* decoding: the derive unpacks an exact
+    // field-name key set and the host escalates a size mismatch instead of
+    // returning a recoverable error.
+    let map = Map::<Symbol, Val>::try_from_val(env, &val).map_err(|_| Error::LeaseNotFound)?;
+    if map.contains_key(Symbol::new(env, "created_at")) {
+        return Lease::try_from_val(env, &val).map_err(|_| Error::LeaseNotFound);
+    }
+    if map.len() != LEGACY_LEASE_FIELDS {
+        // Neither a current nor a pre-`created_at` lease entry.
+        return Err(Error::LeaseNotFound);
+    }
+
+    // A lease written before `created_at` existed. Its creation time is not
+    // recoverable from storage, so report `0` (unknown) rather than failing a
+    // settlement or refund that is still owed.
+    let legacy = LegacyLease::try_from_val(env, &val).map_err(|_| Error::LeaseNotFound)?;
+    Ok(Lease {
+        lease_id: legacy.lease_id,
+        service_id: legacy.service_id,
+        consumer: legacy.consumer,
+        allocated_calls: legacy.allocated_calls,
+        used_calls: legacy.used_calls,
+        created_at: 0,
+        expires_at: legacy.expires_at,
+        locked_deposit: legacy.locked_deposit,
+        settled: legacy.settled,
+    })
+}
+
+/// Test-only: rewrite a lease entry in the pre-`created_at` shape so the legacy
+/// decode path in [`get_lease`] can be exercised.
+#[cfg(test)]
+pub(crate) fn save_legacy_lease_for_test(env: &Env, lease: &Lease) {
+    let legacy = LegacyLease {
+        lease_id: lease.lease_id,
+        service_id: lease.service_id,
+        consumer: lease.consumer.clone(),
+        allocated_calls: lease.allocated_calls,
+        used_calls: lease.used_calls,
+        expires_at: lease.expires_at,
+        locked_deposit: lease.locked_deposit,
+        settled: lease.settled,
+    };
     env.storage()
         .persistent()
-        .get(&DataKey::Lease(lease_id))
-        .ok_or(Error::LeaseNotFound)
+        .set(&DataKey::Lease(lease.lease_id), &legacy);
 }
 
 // ---------------------------------------------------------------------------

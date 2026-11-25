@@ -308,18 +308,108 @@ stellar contract invoke --id $REGISTRY --network testnet -- get_pending_upgrade
 stellar contract invoke --id $REGISTRY --source-account keylease-admin \
   --network testnet --send=yes -- execute_upgrade --admin $ADMIN
 
-# 4. confirm the new version and watch the event
+# 4. lift the post-upgrade stop (a no-op when the storage schema is unchanged)
+stellar contract invoke --id $REGISTRY --source-account keylease-admin \
+  --network testnet --send=yes -- migrate --admin $ADMIN
+
+# 5. confirm the new version and schema, and watch the events
 stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- version
+stellar contract invoke --id $REGISTRY --source-account keylease-admin --network testnet -- schema_version
 stellar events --id $REGISTRY --network testnet --start-ledger <ledger>
 ```
 
-Guard rails for an upgrade: keep the storage layout unchanged, append error
-codes instead of renumbering, and keep event names and payload fields
+Guard rails for an upgrade: keep the storage layout unchanged unless you bump
+the storage schema and ship a migration (see
+[Storage schema migrations](#storage-schema-migrations)), append error codes
+instead of renumbering, and keep event names and payload fields
 backwards-compatible. The `execute_after` timestamp and proposed hash are
 public via `get_pending_upgrade` and `upgrade_proposed`; announce them so clients
 can exit in time. Settle or revoke in-flight leases before changing token
 semantics. See [Security](security.md#known-limitations) and the
 [design note](design/upgrade-timelock.md).
+
+### Storage schema migrations
+
+The registry records which storage schema its data conforms to
+(`schema_version()`, stored under `DataKey::SchemaVersion`), and every Wasm
+knows which schema it was built for (`code_schema_version()`, and the
+`storageSchemaVersion` metadata on the uploaded Wasm). When the two differ, the
+registry is **stopped**: `set_token`, `register_service`, `set_service_active`,
+`create_lease`, `settle_lease` and `revoke_expired_lease` revert, and no value
+can move.
+
+| Stored vs. code | State | Error | Way out |
+| --- | --- | --- | --- |
+| equal | running | — | — |
+| stored older | stopped | `SchemaMigrationRequired` (29) | admin runs `migrate` |
+| stored newer (a downgrade) | stopped | `SchemaVersionUnsupported` (30) | reinstall the newer Wasm; `migrate` refuses |
+
+`propose_upgrade`, `cancel_upgrade`, `execute_upgrade`, `migrate`,
+`bump_service`, `bump_lease` and every read-only view stay available while
+stopped, so a bad install can always be rolled back and entries
+can be kept alive during the window. A registry deployed before versioning
+reports schema `0`. Its layout is identical to schema `1`, and the first
+`migrate` after upgrading to a versioned Wasm only writes the stamp.
+
+#### Proposing a migration
+
+A change that renames or retypes a `DataKey` variant, changes a stored struct's
+fields, or changes the meaning of a stored value must, in the same PR:
+
+1. Bump `SCHEMA_VERSION` in `contracts/registry/src/storage.rs` and the
+   `storageSchemaVersion` metadata in `lib.rs` (a test fails if they diverge),
+   and add a row to the version table in the `SCHEMA_VERSION` docs.
+2. Add the `N-1 => …` arm to `storage::migrate_step`. The arm must be
+   **bounded**. It may rewrite instance storage, but it must never iterate over
+   services or leases. Persistent entries are migrated lazily, by an accessor
+   that reads both the old and the new shape and writes the new one on the
+   next save.
+3. Add a test that seeds state in the old shape, asserts the registry is stopped
+   with `SchemaMigrationRequired`, runs `migrate`, and asserts the old data
+   reads back correctly and the registry runs again.
+4. Add a design note under `docs/design/` and a release note that says the
+   upgrade stops the registry until `migrate` runs.
+
+Changes that old entries already satisfy, such as a new key that defaults when
+absent, do not need a bump.
+
+#### Reviewing a migration
+
+The reviewer checks that the bump and the `migrate_step` arm are in the same
+PR, that the arm is bounded, that every old-shape value has exactly one
+new-shape meaning, and that the test above exists. Before installing, the
+reviewer confirms the uploaded artifact is the reviewed build:
+
+```bash
+stellar contract info meta --wasm target/wasm32v1-none/release/keylease_registry.wasm
+# storageSchemaVersion must equal schema_version() + 1, or equal it when no
+# migration is expected
+```
+
+#### Executing a migration
+
+1. Record the live state (step 2 of the checklist below), including
+   `schema_version`.
+2. `execute_upgrade`, once the 24h delay after `propose_upgrade` has passed.
+   From this transaction on the registry is stopped. Nothing can be created,
+   settled or revoked, and no value moves.
+3. `migrate --admin $ADMIN` in the very next transaction, to keep the stop
+   short. It runs every step from the stored version to the code's version and
+   stamps the new version atomically, then emits `schema_migrated`.
+4. Verify that `schema_version` equals the new version and that pre-upgrade
+   leases and services read back unchanged, then resume traffic.
+
+If `migrate` fails, the registry stays stopped and nothing is written.
+Reinstall the previous Wasm hash with `propose_upgrade` and `execute_upgrade`,
+which is valid until `migrate` succeeds, because the stored data is still in the
+old schema. The upgrade time lock still applies, so a rollback keeps the
+registry stopped for at least 24 hours: rehearse the migration on Testnet first. After a
+successful migration, rolling back to the old Wasm leaves the registry stopped
+with `SchemaVersionUnsupported`, which is the intended outcome. The old code
+cannot read the new data, and it must not write over it.
+
+`scripts/deploy-testnet.sh --execute-upgrade` runs `execute_upgrade` and
+`migrate` back to back and prints the resulting `schema_version`.
 
 ### Upgrading safety checklist
 
@@ -336,7 +426,7 @@ rails above exist; the full layout is in
 | `DataKey` variant names and arities: `Admin`, `Token`, `ServiceCount`, `LeaseCount`, `Service(u64)`, `Lease(u64)` | A `#[contracttype]` enum key encodes as `Vec[Symbol("<variant>"), …]`, so renaming `Lease` to `Leases` orphans every existing entry. The registry then reads `LeaseNotFound` on leases that still hold escrow. |
 | Stored value shapes for `Service` and `Lease` | Entries decode by field name and type. Renaming `used_calls`, retyping `locked_deposit`, or removing `settled` reinterprets or loses live records. |
 | Field presence, not field order, for structs | Old entries are read by key, so adding a field is safe **only** if the accessor tolerates its absence in entries written before the upgrade. |
-| `Error` codes, append-only (1–18 today) | Callers and indexers branch on the number; a reused code changes what a past transaction meant. |
+| `Error` codes, append-only (1–30 today) | Callers and indexers branch on the number; a reused code changes what a past transaction meant. |
 | Event names, topics and payload fields, append-only | They are the indexing ABI. Dropping a `#[topic]` field shifts every subscriber's filter, including the base64 segments in [Topics, payloads and filters](integration.md#topics-payloads-and-filters). |
 | `LeaseStatus` discriminants (`0`/`1`/`2`/`3`) | Returned by `lease_status` and cached by clients. `Revoked = 3` was appended; reusing `2` for a reclaimed lease would rewrite what every cached `Settled` meant. |
 | The `settled`-before-token-call ordering in `settle_lease` and `revoke_expired_lease` | It is the double-payout guard; reordering it behind a transfer reintroduces the re-entrancy bug the suite proves closed. |
@@ -368,7 +458,11 @@ stellar contract invoke --id $REGISTRY --source-account keylease-admin \
   --network testnet --send=yes -- upgrade --admin $ADMIN --new_wasm_hash "$WASM_HASH"
 ```
 
-**4. Compare `version()`.** The embedded metadata must move; a build that did not
+Then run `migrate --admin $ADMIN` (see
+[Storage schema migrations](#storage-schema-migrations)); until it succeeds
+every state-changing call reverts.
+
+**4. Compare `version()` and `schema_version()`.** The embedded metadata must move; a build that did not
 bump the workspace version installed new code that still *reports* the old one.
 
 ```bash
@@ -376,11 +470,12 @@ stellar contract invoke --id $REGISTRY --source-account keylease-admin --network
 stellar contract info meta --id $REGISTRY --network testnet
 ```
 
-`version` must equal the release you intended, and `name` must still be
-`KeyLeaseRegistry`. Then re-read one lease and one service created **before** the
-upgrade and diff the field values against step 2 — identical `expires_at`,
-`allocated_calls`, `locked_deposit` and `settled` is what proves the stored
-shapes were not reinterpreted.
+`version` must equal the release you intended, `name` must still be
+`KeyLeaseRegistry`, and `schema_version` must equal `code_schema_version`.
+Then re-read one lease and one service created **before** the upgrade and diff
+the field values against step 2 — identical `expires_at`, `allocated_calls`,
+`locked_deposit` and `settled` is what proves the stored shapes were not
+reinterpreted.
 
 **5. Replay the events across the boundary.**
 
@@ -389,7 +484,8 @@ stellar events --id $REGISTRY --network testnet --start-ledger <ledger-from-step
 ```
 
 Expect exactly one `contract_upgraded` carrying the `new_wasm_hash` from step 3,
-with nothing else in that transaction; the counters must be unchanged across it
+with nothing else in that transaction, followed by a `schema_migrated` if the
+storage schema moved; the counters must be unchanged across it
 (`service_count` and `lease_count` before equals after — an upgrade mints no
 leases); and every `lease_created` before the upgrade must still have a terminal
 `lease_settled` or `lease_revoked` after it. If a pre-upgrade lease that was
@@ -402,7 +498,9 @@ address to a revision.
 **Rollback.** `upgrade` is symmetric: install the previous Wasm's hash the same
 way. It is only safe while the new build has written nothing the old one cannot
 read, so a new `DataKey` variant or new field is a one-way door the moment it is
-used.
+used. The schema stamp enforces this for versioned changes: once `migrate` has
+run, the old Wasm sees a newer schema and stays stopped
+(`SchemaVersionUnsupported`) instead of misreading the data.
 
 ## Multisig admin deployment and upgrades
 

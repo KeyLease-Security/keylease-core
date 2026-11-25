@@ -4,13 +4,17 @@
 
 | Actor | Address | Can do |
 | --- | --- | --- |
-| **Admin** | one Stellar account | `init` once, `set_token`, `propose_upgrade`/`execute_upgrade`/`cancel_upgrade` (24h delay). Cannot move escrowed funds. |
+| **Admin** | one Stellar account | `init` once, `set_token`, `propose_upgrade`/`execute_upgrade`/`cancel_upgrade` (24h delay), `propose_admin` / `cancel_admin_transfer`. Cannot move escrowed funds. |
 | **Provider** | per service (account or contract address) | Register/pause services, settle leases it owns. |
 | **Consumer** | per lease (account or contract address) | Create leases, revoke expired unsettled leases. |
 | **Delegate** | optional, any account | Sponsor `create_lease_for` for a consumer. Pays the transaction fee only — never the deposit, and holds no claim on the lease. |
 
 The admin is a deployment role. It can point the registry at a token address and
-install a new Wasm, and nothing else. It has no path to user funds.
+install a new Wasm, and nothing else. It has no path to user funds. The role is
+rotated in two steps: the admin proposes a successor with `propose_admin`, and
+the successor takes over by calling `accept_admin` within seven days. Both
+signatures are required, so neither party (nor anyone else) can move the role
+alone.
 
 Because every actor is a Soroban `Address`, the same protocol works for classic
 Stellar accounts (`G…`), multisig accounts and smart contracts (`C…`).
@@ -43,11 +47,18 @@ pub struct Lease {
     pub consumer: Address,
     pub allocated_calls: u32,
     pub used_calls: u32,
-    pub expires_at: u64,       // unix seconds, ledger time
+    pub created_at: u64,       // unix seconds, ledger time of create_lease
+    pub expires_at: u64,       // created_at + duration_secs
     pub locked_deposit: i128,  // rate_per_call * allocated_calls
     pub settled: bool,
 }
 ```
+
+`created_at` and `expires_at` are both ledger timestamps, so a lease's age,
+remaining term and original duration (`expires_at - created_at`) can be derived
+from the stored lease alone. A `created_at` of `0` marks a lease written by a
+release that predates the field; such leases remain settleable and report an
+unknown creation time (see the [contract reference](contract-reference.md#created_at-and-upgrade-compatibility)).
 
 ## Lifecycle
 
@@ -324,6 +335,10 @@ spans a contract upgrade stays decodable (see
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `schema_migrated` | — | `schema_version`, `admin`, `from_version`, `to_version` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 `lease_delegated` follows `lease_created` only for a sponsored lease, so
 indexers that ignore it still see every lease.
@@ -489,7 +504,9 @@ These must hold for every reachable state. They are asserted in tests.
 | Key | Storage | Notes |
 | --- | --- | --- |
 | `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
+| `PendingAdmin` | instance | at most one admin hand-over awaiting acceptance; cleared on accept or cancel |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
+| `SchemaVersion` | instance | storage schema the data conforms to; state-changing calls stop while it differs from the running Wasm's |
 | `Service(u64)` | persistent | TTL extended on save, on `create_lease` and by `bump_service`, never by a read |
 | `Lease(u64)` | persistent | TTL extended on save and by `bump_lease`, never by a read |
 | `ProviderServices(Address)` | persistent | service-id index per provider; extended by `save_service`, never by a read |
