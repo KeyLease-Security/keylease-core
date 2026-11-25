@@ -465,6 +465,12 @@ impl KeyLeaseRegistry {
     /// Activate or deactivate a service. Only the owning provider may call this.
     ///
     /// Existing leases remain valid; deactivation only blocks *new* leases.
+    ///
+    /// Setting the status the service already has is an accepted, idempotent
+    /// write rather than an error, so a client may safely retry after a timeout.
+    /// Each successful call publishes [`ServiceStatusChanged`], including
+    /// a repeat with the same value: the event is the caller's confirmation that
+    /// the write landed, and the payload always states the stored status.
     pub fn set_service_active(
         env: Env,
         provider: Address,

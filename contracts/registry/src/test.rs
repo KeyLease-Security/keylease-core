@@ -303,6 +303,40 @@ fn test_set_service_active_is_provider_only() {
     );
 }
 
+/// Repeating the current status is an idempotent write, not an error: clients
+/// retry after a timeout. Each call still publishes its own
+/// `service_status_changed` — the duplicate event is intentional, because an
+/// indexer that receives two records can order them by ledger and see that the
+/// retry changed nothing, while a client gets confirmation its call landed.
+#[test]
+fn test_set_service_active_is_idempotent_and_announces_every_call() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let registry_id = ctx.registry_id();
+
+    for attempt in 0..2 {
+        ctx.registry
+            .set_service_active(&ctx.provider, &service_id, &false);
+
+        // Check the event before another contract call replaces the buffer.
+        assert_single_event(
+            &env,
+            &registry_id,
+            &ServiceStatusChanged {
+                service_id,
+                schema_version: EVENT_SCHEMA_VERSION,
+                provider: ctx.provider.clone(),
+                is_active: false,
+            },
+        );
+        assert!(
+            !ctx.registry.get_service(&service_id).is_active,
+            "call {attempt} must leave the service inactive"
+        );
+    }
+}
+
 #[test]
 fn test_update_service_is_provider_only() {
     let env = Env::default();
@@ -443,6 +477,49 @@ fn test_create_lease_locks_deposit_and_records_terms() {
     assert_eq!(ctx.token.balance(&ctx.registry_id()), RATE * 10);
     assert_eq!(ctx.registry.remaining_calls(&lease_id), 10);
     assert_eq!(ctx.registry.locked_balance(&lease_id), RATE * 10);
+}
+
+/// `u32::MAX` is the largest allotment a lease can record, so it is the worst
+/// case for the `requested_calls as i128` cast in `create_lease`: the deposit
+/// must be the exact full product, not a truncated or saturated one.
+#[test]
+fn test_lease_with_u32_max_calls_escrows_and_settles_exactly() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let calls = u32::MAX;
+    let deposit = i128::from(calls);
+    let service_id = ctx
+        .registry
+        .register_service(&ctx.provider, &1, &endpoint_hash(&env));
+
+    // The default funding cannot cover the largest legal lease.
+    ctx.token.mint(&ctx.consumer, &deposit);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &calls, &3_600);
+
+    // Stored terms are exact: the allotment keeps all 32 bits and the deposit
+    // is `rate * calls` with no wraparound.
+    let lease = ctx.registry.get_lease(&lease_id);
+    assert_eq!(lease.allocated_calls, calls);
+    assert_eq!(lease.locked_deposit, deposit);
+    assert_eq!(ctx.registry.remaining_calls(&lease_id), calls);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), deposit);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+
+    // A full-allotment settlement is allowed before expiry. It must pay the
+    // deposit in full and refund exactly zero, leaving nothing dusted in escrow.
+    ctx.registry.settle_lease(&ctx.provider, &lease_id, &calls);
+    let settlement = ctx.registry.get_settlement(&lease_id);
+    assert_eq!(settlement.payout, deposit);
+    assert_eq!(settlement.refund, 0);
+    finalize_after_challenge_window(&env, &ctx, &lease_id);
+
+    assert_eq!(ctx.token.balance(&ctx.provider), deposit);
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
 }
 
 /// A failed escrow transfer must roll back the lease counter and storage (#34).
@@ -1354,6 +1431,51 @@ fn test_revoke_during_grace_window_is_rejected() {
             .try_revoke_expired_lease(&ctx.consumer, &lease_id),
         Err(Ok(Error::RevokeWindowNotElapsed))
     );
+}
+
+/// The revoke window is inclusive of `expires_at + SETTLE_GRACE_PERIOD_SECS`:
+/// one second earlier is rejected, and exactly on the boundary revocation
+/// succeeds and refunds the whole `locked_deposit`.
+#[test]
+fn test_revoke_at_the_exact_grace_boundary_succeeds() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+    let deposit = RATE * 10;
+
+    // `expires_at` is 1_100, so the first legal revoke timestamp is 1_100 + GRACE.
+    env.ledger().set_timestamp(1_100 + GRACE - 1);
+    assert_eq!(
+        ctx.registry
+            .try_revoke_expired_lease(&ctx.consumer, &lease_id),
+        Err(Ok(Error::RevokeWindowNotElapsed))
+    );
+    assert_eq!(ctx.registry.locked_balance(&lease_id), deposit);
+    assert!(!ctx.registry.get_lease(&lease_id).settled);
+
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    // Check the event before another contract call replaces the buffer.
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &LeaseRevoked {
+            lease_id,
+            schema_version: EVENT_SCHEMA_VERSION,
+            consumer: ctx.consumer.clone(),
+            refund: deposit,
+        },
+    );
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert_eq!(ctx.registry.locked_balance(&lease_id), 0);
+    assert_eq!(ctx.registry.lease_status(&lease_id), LeaseStatus::Revoked);
 }
 
 #[test]
@@ -3464,6 +3586,87 @@ fn test_schema_version_is_payload_only_topics_stay_put() {
         body.topics.get(1),
         Some(&xdr::ScVal::try_from_val(&env, &id).unwrap())
     );
+}
+
+/// Indexers filter by `lease_created` plus `lease_id`, so the topic order and
+/// every payload key are part of the public interface. Pin both against the
+/// wire XDR: exactly two topics, and exactly the six lease fields plus
+/// `schema_version` in the payload.
+#[test]
+fn test_lease_created_event_topics_and_payload_are_exact() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    let all = env.events().all();
+    let events = all.filter_by_contract(&ctx.registry_id());
+    assert_eq!(
+        events.events().len(),
+        1,
+        "exactly one lease_created event per lease"
+    );
+    let xdr::ContractEventBody::V0(body) = &events.events()[0].body;
+
+    // Topics are positional: index 0 is the event name, index 1 the lease id.
+    assert_eq!(body.topics.len(), 2);
+    let name: Val = Symbol::new(&env, "lease_created").into_val(&env);
+    let id: Val = lease_id.into_val(&env);
+    assert_eq!(
+        body.topics.first(),
+        Some(&xdr::ScVal::try_from_val(&env, &name).unwrap())
+    );
+    assert_eq!(
+        body.topics.get(1),
+        Some(&xdr::ScVal::try_from_val(&env, &id).unwrap())
+    );
+
+    let lease = ctx.registry.get_lease(&lease_id);
+    let data = Val::try_from_val(&env, &body.data).unwrap();
+    let payload = Map::<Symbol, Val>::try_from_val(&env, &data).unwrap();
+
+    // Six lease fields plus the schema version, and nothing else: an indexer
+    // decoding by key must see exactly this map. Reading all seven documented
+    // keys out of a seven-key map also proves no extra field is present.
+    assert_eq!(payload.len(), 7);
+    let field = |name: &str| payload.get(Symbol::new(&env, name)).unwrap();
+    assert_eq!(
+        u32::try_from_val(&env, &field("schema_version")).unwrap(),
+        EVENT_SCHEMA_VERSION
+    );
+    assert_eq!(
+        u64::try_from_val(&env, &field("service_id")).unwrap(),
+        lease.service_id
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &field("consumer")).unwrap(),
+        lease.consumer
+    );
+    assert_eq!(
+        u32::try_from_val(&env, &field("allocated_calls")).unwrap(),
+        lease.allocated_calls
+    );
+    assert_eq!(
+        u64::try_from_val(&env, &field("expires_at")).unwrap(),
+        lease.expires_at
+    );
+    assert_eq!(
+        i128::try_from_val(&env, &field("locked_deposit")).unwrap(),
+        lease.locked_deposit
+    );
+    assert_eq!(
+        i128::try_from_val(&env, &field("rate_per_call")).unwrap(),
+        lease.rate_per_call
+    );
+
+    // The values the map carries are the created lease's terms, not defaults.
+    assert_eq!(lease.allocated_calls, 10);
+    assert_eq!(lease.expires_at, 1_000 + 3_600);
+    assert_eq!(lease.locked_deposit, RATE * 10);
 }
 
 // ---------------------------------------------------------------------------
