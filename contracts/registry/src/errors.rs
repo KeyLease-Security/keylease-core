@@ -105,4 +105,9 @@ pub enum Error {
     AdminTransferExpired = 41,
     /// The proposed admin is the current admin; a transfer must change hands.
     InvalidAdmin = 42,
+    /// `register_service` was called with an all-zero `endpoint_hash`, which
+    /// commits to nothing and is treated as a placeholder. Appended after the
+    /// schema-versioning and admin-transfer codes so every number already
+    /// published keeps its meaning.
+    InvalidEndpointHash = 43,
 }

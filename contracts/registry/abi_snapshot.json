@@ -2052,6 +2052,11 @@
           "doc": "The proposed admin is the current admin; a transfer must change hands.",
           "name": "InvalidAdmin",
           "value": 42
+        },
+        {
+          "doc": "`register_service` was called with an all-zero `endpoint_hash`, which\\ncommits to nothing and is treated as a placeholder. Appended after the\\nschema-versioning and admin-transfer codes so every number already\\npublished keeps its meaning.",
+          "name": "InvalidEndpointHash",
+          "value": 43
         }
       ]
     }

@@ -643,6 +643,12 @@ impl KeyLeaseRegistry {
         if rate_per_call > MAX_RATE_PER_CALL {
             return Err(Error::RateTooHigh);
         }
+        // An all-zero digest commits to nothing, so it cannot be a real
+        // endpoint commitment. Reject it here, where the listing is made, so
+        // no service is ever stored with an unattested descriptor.
+        if endpoint_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEndpointHash);
+        }
 
         let service_id = storage::next_service_id(&env)?;
         let service = Service {

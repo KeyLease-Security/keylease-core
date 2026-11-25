@@ -583,7 +583,7 @@ Publish a new leasable service.
   Both persistent entries are extended to the same clamped horizon, in the same
   call.
 - **Events:** `service_registered { service_id, provider, rate_per_call, endpoint_hash }`.
-- **Errors:** `InvalidRate`, `RateTooHigh`, `Overflow`.
+- **Errors:** `InvalidRate`, `RateTooHigh`, `InvalidEndpointHash`, `Overflow`.
 - **Notes:** the rate bound is enforced where the price is published, not where
   it is spent, so no consumer can ever be quoted a `rate_per_call` whose
   deposit (`rate × allocated_calls`) is not representable in `i128`. Because
@@ -1501,6 +1501,7 @@ recording it there fails `cargo test`. Add a new code by appending it to
 | 40 | `NoPendingAdminTransfer` | `accept_admin` / `cancel_admin_transfer` with no proposal |
 | 41 | `AdminTransferExpired` | `accept_admin` at or after `expires_at` |
 | 42 | `InvalidAdmin` | `propose_admin` named the current admin |
+| 43 | `InvalidEndpointHash` | `endpoint_hash` is all zeroes and commits to nothing |
 
 ## Invoking with the Stellar CLI
 
