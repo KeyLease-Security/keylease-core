@@ -22,8 +22,8 @@ KeyLease turns metered access into a **lease**, and puts the lease on Stellar.
 A consumer locks a SEP-41 micropayment in Soroban escrow and receives an
 on-chain authorization for a fixed allotment of calls. The provider verifies the
 lease against Stellar instead of trusting a password, settles once with a
-verified call count, and is paid from escrow. Unused balance refunds
-automatically.
+verified call count, and is paid from escrow after the consumer's 24-hour
+challenge window. Unused balance refunds automatically.
 
 ```text
 consumer                         registry                        provider
@@ -33,6 +33,10 @@ consumer                         registry                        provider
    |<-- lease_id ------------------ |                                |
    |                                |                                |
    |                                |<-- settle_lease(used_calls) ---|
+   |                                |    (proposal, funds locked)    |
+   |-- challenge_settlement ------->|    (optional, inside 24h)      |
+   |                                |                                |
+   |                                |<-- finalize_settlement --------|
    |<-- refund of unused ---------- |---- payout of used ----------->|
    |                                |                                |
 ```
@@ -57,7 +61,7 @@ primitive:
 | Hold and move the payment | SEP-41 token; the native Stellar Asset Contract (SAC) wraps XLM |
 | Prove who created or settled a lease | `Address` authorization; accounts (`G…`) and contracts (`C…`) both work, including Stellar multisig |
 | Know when a lease expires | Ledger timestamp, not an operator's clock |
-| Prove what happened | Typed Soroban contract events (`lease_created`, `lease_settled`, …) |
+| Prove what happened | Typed Soroban contract events (`lease_created`, `lease_settlement_proposed`, `lease_settled`, …) |
 | Keep escrow claimable | Persistent-storage TTL, extended for the lease's term + grace window on every state change and by the permissionless `bump_lease` |
 | Identify the deployed code | `contractmeta!` (name, version, description, repository) and `version()` |
 | Fix a deployed bug | `propose_upgrade` → 24h delay → `execute_upgrade` through the Soroban deployer |

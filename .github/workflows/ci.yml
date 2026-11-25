@@ -73,6 +73,11 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    # Job-level permissions replace the workflow default, so `contents: read`
+    # is restated. `security-events: write` is only for the SARIF upload below.
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -89,6 +94,27 @@ jobs:
       # "Clippy" required check name in branch protection does not change.
       - name: cargo clippy (wasm32v1-none)
         run: cargo clippy --target wasm32v1-none --release --all -- -D warnings
+      # The two steps above are the gate. These record the same host findings
+      # as SARIF for the repository's code-scanning view, and run even when the
+      # gate failed so the findings that failed it are the ones uploaded.
+      - name: Install clippy-sarif
+        if: ${{ !cancelled() }}
+        run: cargo install clippy-sarif --version 0.8.0 --locked
+      - name: Export clippy findings as SARIF
+        if: ${{ !cancelled() }}
+        run: |
+          # clippy exits non-zero on findings; the gate above already reported
+          # that, so only clippy-sarif's status decides this step.
+          { cargo clippy --all-targets --message-format=json -- -D warnings || true; } \
+            | clippy-sarif > clippy.sarif
+      # A pull request from a fork gets a read-only token and cannot write code
+      # scanning results, so the upload runs only for this repository's branches.
+      - name: Upload clippy SARIF
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: clippy.sarif
+          category: clippy
 
   test:
     name: Test
@@ -267,6 +293,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --document-private-items
+      # Fails on any undocumented public item outside the Soroban contract
+      # macros' generated code; see the script header for why the lint is
+      # enabled through a cfg instead of in the source. jq ships on the runner.
+      - name: Check for missing public docs
+        run: ./scripts/check-missing-docs.sh
 
   spellcheck:
     name: Spell Check
@@ -355,6 +386,11 @@ jobs:
   deny:
     name: Dependency Policy
     runs-on: ubuntu-latest
+    # Job-level permissions replace the workflow default, so `contents: read`
+    # is restated. `security-events: write` is only for the SARIF upload below.
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v7
       # Checks the committed Cargo.lock against deny.toml: RustSec advisories,
@@ -362,6 +398,39 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+      # The action above is the gate and runs inside its own container, so the
+      # SARIF export needs cargo-deny on the runner. The version matches the
+      # one the action ships; the checksum is verified before it is unpacked.
+      - name: Install cargo-deny
+        if: ${{ !cancelled() }}
+        env:
+          CARGO_DENY_VERSION: 0.22.0
+        run: |
+          set -euo pipefail
+          archive="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          base="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}"
+          curl -sSfL -o "/tmp/${archive}" "${base}/${archive}"
+          curl -sSfL -o "/tmp/${archive}.sha256" "${base}/${archive}.sha256"
+          (
+            cd /tmp
+            echo "$(cat "${archive}.sha256")  ${archive}" | sha256sum --check --status
+          )
+          tar -xzf "/tmp/${archive}" -C /tmp --strip-components=1
+          sudo mv /tmp/cargo-deny /usr/local/bin/cargo-deny
+          cargo deny --version
+      - name: Export dependency findings as SARIF
+        if: ${{ !cancelled() }}
+        run: |
+          # cargo deny exits non-zero on findings; the gate above already
+          # reported that. An empty file still fails the upload, so a broken
+          # export is not silently skipped.
+          cargo deny --format sarif check > deny.sarif || true
+      - name: Upload dependency SARIF
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: deny.sarif
+          category: cargo-deny
 
   malware-scan:
     name: Malware Scan

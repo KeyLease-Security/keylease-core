@@ -106,6 +106,17 @@ ignore entry** — so an ignore is a reviewed security decision, not a mute butt
 The malware scan and the build do not replace this check: `Dependency Policy`
 is the only job that inspects the dependency graph.
 
+### Where the findings are shown
+
+The `Clippy` and `Dependency Policy` jobs also export their findings as SARIF
+and upload them to GitHub code scanning (categories `clippy` and `cargo-deny`).
+Maintainers see them under the repository's **Security → Code scanning** tab,
+filtered by tool, and a pull request from a branch of this repository shows new
+alerts as annotations on its diff. Pull requests from forks get a read-only
+token, so their results stay in the job logs; the alerts appear once the change
+reaches `main`. The upload is informational: the jobs still pass or fail on the
+`cargo clippy` and `cargo deny check` steps that run first.
+
 ### Review requirements for any dependency PR
 
 A dependency PR is merged when all of the following hold:
@@ -155,7 +166,7 @@ SDK pin:
 
 ## Text and documentation checks
 
-Five checks run in CI outside the Rust build, and each reads its configuration
+Six checks run in CI outside the Rust build, and each reads its configuration
 from this repository, so the local command below is the same check and fails the
 same way:
 
@@ -165,6 +176,7 @@ same way:
 | Markdown lint | `npx markdownlint-cli2@0.24.0` | [`.markdownlint-cli2.jsonc`](./.markdownlint-cli2.jsonc) | `Markdown Lint` |
 | Workflow lint | `actionlint` | none; it lints every file under `.github/workflows/` | `Action Lint` |
 | Crate documentation | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items` | the doc comments themselves | `Rustdoc` |
+| Missing public docs | `./scripts/check-missing-docs.sh` | `keylease_doc_lint` cfg in each contract `lib.rs` | `Rustdoc` |
 | Nav, anchors, links | `mkdocs build --strict` | [`mkdocs.yml`](./mkdocs.yml) | `Docs → Build preview` (PR), `Build & deploy` (`main`) |
 
 ```bash
@@ -194,6 +206,17 @@ the CI job installs both, and so must you if the local run is to match.
 resolve, or a manifest field cargo calls redundant, into a build failure. It does
 not enable `missing_docs`: the Soroban macros generate items nobody can annotate,
 and silencing them would weaken the check instead of documenting the contract.
+
+`scripts/check-missing-docs.sh` is the missing-docs check instead. Each contract
+crate turns `missing_docs` on only under `--cfg keylease_doc_lint`; the script
+builds with that cfg and fails on every undocumented public item **except** the
+ones a Soroban `#[contract]`, `#[contractimpl]`, `#[contracttype]`,
+`#[contractevent]` or `#[contracterror]` expansion generates (`spec_xdr`, event
+`publish`, and the client's `new`, `env` and `address`). Those are the only
+exceptions, they are filtered by the macro that produced them rather than by
+file or name, and nothing in the source carries `#[allow(missing_docs)]`. So a
+new public function, type, constant, field or enum variant without a `///`
+comment fails the `Rustdoc` job.
 
 The Docs workflow gates a pull request through its `Build preview` job, but only
 when the PR touches `docs/**`, `mkdocs.yml`, `requirements-docs.txt` or the
@@ -245,6 +268,10 @@ verify leases.
   recoverable conditions.
 - **Don't reuse error codes.** Append new variants; codes are part of the ABI.
 - Keep `lib.rs` entry points documented, including their auth and preconditions.
+- Document every public item, including struct fields and enum variants:
+  `scripts/check-missing-docs.sh` fails on any that has no `///` comment. Do
+  not add `#[allow(missing_docs)]`; if an item truly cannot carry docs, extend
+  the macro filter in that script and say why in the PR.
 
 ## Unsafe code and std
 

@@ -1,4 +1,11 @@
 #![no_std]
+// Documentation coverage (CONTRIBUTING.md#text-and-documentation-checks).
+// `missing_docs` cannot simply be on: the Soroban `#[contract*]` macros emit
+// public items (`spec_xdr`, event `publish`, the client's `new`/`env`/`address`)
+// that carry no docs and cannot be given any, and a lint level cannot be scoped
+// to one macro expansion. scripts/check-missing-docs.sh builds with this cfg and
+// fails on every finding outside those expansions; the Rustdoc job runs it.
+#![cfg_attr(keylease_doc_lint, warn(missing_docs))]
 // No unsafe code in contract crates (CONTRIBUTING.md#unsafe-code-and-std).
 // `forbid` on the deployed Wasm. On the host, soroban-sdk's `testutils`
 // feature registers contracts through `ctor`, whose expansion carries its own
@@ -28,12 +35,20 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
+    /// The account allowed to mint; set once by `init`.
     Admin,
+    /// Number of decimal places reported by `decimals`.
     Decimals,
+    /// Human-readable token name reported by `name`.
     Name,
+    /// Ticker symbol reported by `symbol`.
     Symbol,
+    /// Token balance held by an account.
     Balance(Address),
+    /// Amount `spender` (second address) may move on behalf of `from` (first).
     Allowance(Address, Address),
+    /// Last ledger sequence on which the matching `Allowance` applies; `0`
+    /// means it never expires.
     AllowanceExpiry(Address, Address),
 }
 
@@ -60,6 +75,7 @@ pub enum TokenError {
     Overflow = 7,
 }
 
+/// The mock SEP-41 token contract. Test and sandbox use only.
 #[contract]
 pub struct MockToken;
 

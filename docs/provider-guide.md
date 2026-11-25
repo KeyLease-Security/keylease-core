@@ -14,7 +14,9 @@ the Soroban contract.
   expiry. That guarantee is what makes consumers willing to prepay.
 
 You never publish a secret on-chain. `endpoint_hash` is a commitment, not a
-credential.
+credential. It must digest the descriptor's actual content; an all-zero hash is
+rejected with `InvalidEndpointHash`, because a placeholder commits to nothing and
+gives consumers nothing to verify against.
 
 ## 1. Register a service
 
@@ -78,6 +80,8 @@ token to mint.
 2. Read the lease with `get_lease(lease_id)` over Soroban RPC and cache it briefly.
 3. Reject if `settled`, if `now ≥ expires_at`, if the caller is not
    `lease.consumer`, or if your counter has consumed `allocated_calls`.
+   `consumer` is mutable: the owner can transfer the lease, so refresh your cache
+   when the authenticated address does not match instead of rejecting forever.
 4. Count the call, return the response.
 
 ```bash
@@ -116,9 +120,24 @@ stellar contract invoke \
   --id $REGISTRY --source-account provider --network testnet \
   --send=yes -- claim --beneficiary $PROVIDER
 ```
+That call moves no funds. It records `verified_calls × rate_per_call` as your
+payout, records the rest as the consumer's refund, and emits
+`lease_settlement_proposed { lease_id, provider, verified_calls, payout, refund,
+challengeable_until }`. The funds stay in escrow for a 24-hour consumer
+challenge window. After it closes, anyone (including you, or a keeper) can
+release them:
 
-Settle with `verified_calls = 0` to return the entire deposit for a lease you
-could not serve.
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account provider --network testnet \
+  --send=yes -- finalize_settlement --lease_id 1
+```
+
+Finalization emits `lease_settled { lease_id, provider, verified_calls, payout,
+refund }` and transfers the payout to you and the refund to the consumer.
+
+Settle with `verified_calls = 0` to propose a full refund for a lease you could
+not serve.
 
 ### Settle a queue in one transaction
 
@@ -161,8 +180,11 @@ return to unsigned settlement.
 | `verified_calls == allocated_calls`, any time | settle allowed |
 | `now < expires_at` and `verified_calls < allocated_calls` | `LeaseNotSettleable` |
 | `verified_calls > allocated_calls` | `InvalidCalls` |
-| lease already settled | `LeaseAlreadySettled` |
+| lease already settled or proposed | `LeaseAlreadySettled` |
 | you don't own the service | `Unauthorized` |
+| finalize before `challengeable_until` | `ChallengeWindowStillOpen` |
+| finalize while the consumer's challenge is active | `SettlementChallenged` |
+| finalize/resolve after payout | `SettlementFinalized` |
 
 ## 5. Early cancellation requests
 
@@ -204,28 +226,39 @@ amount on your behalf — there is no yield, and no one else can withdraw it.
   published in the `lease_settled` event.
 - **Unused consumer balance:** credited to the consumer at settlement, or via
   `revoke_expired_lease` after the 24h grace window.
+`finalize_settlement` pays you from escrow. Nothing else does. The registry never
+holds funds on your behalf after finalization, and there is no yield or custody
+to manage.
+
+- **Revenue recognised:** `verified_calls × rate_per_call` per settlement,
+  published in the `lease_settled` event at finalization.
 - **Lifetime totals:** `service_stats --service_id <id>` returns
   `settled_leases`, `settled_calls` and `total_payout` for one service without
-  replaying history. It counts every path that pays the provider — plain
+  replaying history. It counts every path that pays the provider — a finalized
   settlement and an approved early cancellation — and nothing else: a lease the
   consumer revoked contributed nothing, so a reclaimed lease never inflates
   reported revenue.
   Treat it as a convenience view and `lease_settled` as the book of record: the
   aggregate is stored with a TTL, so an entry nothing has settled or read for a
   long stretch can age out and read back as zero.
-- **Unused consumer balance:** refunded by you at settlement or on an approved
-  early cancellation, or by the consumer via `revoke_expired_lease` after the
-  24h grace window.
+- **Unused consumer balance:** refunded to the consumer at finalization, on an
+  approved early cancellation, or by the consumer via `revoke_expired_lease`
+  after the 24h grace window if you never settled.
 - **Early cancellation:** `lease_cancelled` publishes `verified_calls`, `payout`
   and `refund`. It is a consented early settlement; the same conservation rule
   holds (`payout + refund == locked_deposit`).
-- **Disputes:** there is no dispute mechanism. The consumer's protection is the
-  refund path; yours is the grace window. Report honestly.
+- **Disputes:** the consumer can challenge your reported count inside the
+  24-hour window with an evidence hash. The registry admin resolves it; an upheld
+  challenge refunds the whole deposit and pays you nothing. Report honestly and
+  keep the evidence that supports your count.
 
 ## Operational notes
 
 - **Watch expiry.** A lease you forget to settle becomes revocable 24 hours after
   it expires. Subscribe to `lease_created` and settle from that queue.
+- **Ownership moves.** A consumer can transfer an unsettled lease; the refund
+  then goes to the new consumer at settlement. Re-read `consumer` rather than
+  caching it for the whole term. Watch `lease_transferred` if you project events.
 - **Changing your rate.** Today you register a new service; an update entry point
   is a `wave-medium` issue. In-flight leases keep their original escrow.
 - **Rotating your key.** A service is bound to the registering address; key

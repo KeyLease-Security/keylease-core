@@ -58,6 +58,10 @@ suitable for Testnet and for limited-value evaluation. Do not escrow mainnet
 value you would be unhappy to lose until an audit is announced in the release
 notes.
 
+Mainnet transactions are prohibited until the
+[maintainer-approved deployment and key-custody runbook](./docs/mainnet-runbook.md)
+audit gate is satisfied and its verification record is published.
+
 ## Deployed addresses
 
 Only trust contract ids published in [`docs/deployments.md`](./docs/deployments.md)

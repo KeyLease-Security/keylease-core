@@ -13,6 +13,8 @@ as authoritative.
 - **Storage TTL:** `LEDGER_BUMP_THRESHOLD = 17_280`, `LEDGER_BUMP_EXTEND = 518_400`;
   leases extend to term + 24h grace + a 1-day buffer
 - **Constants:** eight of them, all tabulated in [Constants](#constants)
+- **Constants:** nine of them, all tabulated in [Constants](#constants), including
+  `SETTLE_GRACE_PERIOD_SECS = 86_400` and `CHALLENGE_WINDOW_SECS = 86_400` (24 hours each)
 - **Storage TTL:** leases extend to term + 24h grace + a 1-day buffer, clamped to
   `MAX_ENTRY_TTL_LEDGERS` and to the network's live `maxEntryTtl` (values in the
   table). Only writes and the two `bump_*` entry points extend a TTL; reads never do.
@@ -113,7 +115,7 @@ the source stays authoritative.
 things. `MAX_LEASE_DURATION_SECS` is compared against a number the caller types;
 `MAX_RATE_PER_CALL` against the single per-call price a provider publishes; and
 `MAX_LEASE_DEPOSIT` against a number two of the caller's arguments produce
-together. Each earns its own code, `DurationTooLong` (16), `RateTooHigh` (28) and
+together. Each earns its own code, `DurationTooLong` (16), `RateTooHigh` (37) and
 `DepositTooLarge` (17), and 17 is deliberately not 15: `Overflow` means the
 product does not fit `i128`, `DepositTooLarge` means it fits and is still more
 than one lease is allowed to lock. Because the rate bound and the deposit cap are
@@ -198,7 +200,7 @@ above `MAX_LEASE_DEPOSIT` also describes a service nobody can rent: its cheapest
 one-call lease is already past the deposit cap.
 
 **Bounded range:** `0 < rate_per_call ≤ 1_000_000_000_000`; above it,
-`RateTooHigh` (28). The value is `MAX_LEASE_DEPOSIT` itself, which buys two
+`RateTooHigh` (37). The value is `MAX_LEASE_DEPOSIT` itself, which buys two
 properties at once — every listed service can fund at least its smallest lease,
 and the worst legal `rate_per_call × requested_calls` is
 `1_000_000_000_000 × u32::MAX` ≈ 4.3 × 10^21, below 2^72 and so inside `i128` by
@@ -384,11 +386,13 @@ Initialize the registry and appoint `admin`.
 - **Caller / auth:** `admin` must authorize.
 - **Trigger:** once, immediately after deploy.
 - **Preconditions:** the registry must not already be initialized.
-- **State:** sets `Admin`; extends instance TTL.
+- **State:** sets `Admin` and `SchemaVersion = SCHEMA_VERSION`; extends instance TTL.
 - **Events:** `registry_initialized { admin }`.
-- **Errors:** `AlreadyInitialized`.
-- **Notes:** the admin can only call `set_token` and manage upgrades through the
-  propose/execute/cancel flow below. It cannot move user funds.
+- **Errors:** `AlreadyInitialized`, also returned when a `SchemaVersion`
+  entry already exists without an admin (state this contract did not write).
+- **Notes:** the admin can only call `set_token`, manage upgrades through the
+  propose/execute/cancel flow below and use the admin-rotation entry points. It
+  cannot move user funds.
 
 ### `set_token`
 
@@ -462,8 +466,97 @@ Install the proposed Wasm through `env.deployer().update_current_contract_wasm`.
 - **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingUpgrade`,
   `UpgradeDelayNotElapsed`.
 - **Notes:** the contract id, storage and balances are preserved, so an upgrade
-  must never change the `DataKey` layout or the meaning of stored values. See
-  [Deployment](deployment.md#upgrading).
+  must never change the `DataKey` layout or the meaning of stored values without
+  bumping the storage schema. See [Deployment](deployment.md#upgrading).
+- **Schema:** not gated on the schema check, so it stays callable while the
+  registry is stopped and a bad upgrade can always be reverted. An upgrade to a
+  Wasm with a higher `storageSchemaVersion` stops every state-changing entry
+  point until `migrate` runs.
+
+### `migrate`
+
+```rust
+pub fn migrate(env: Env, admin: Address) -> Result<u32, Error>
+```
+
+Migrate stored data to the running Wasm's storage schema (`SCHEMA_VERSION`) and
+return the version now in force.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **Trigger:** immediately after every `execute_upgrade`.
+- **Effects:** applies each bounded `storage::migrate_step` from the stored
+  version up to `SCHEMA_VERSION`, writes the new `SchemaVersion` and extends
+  the instance TTL, all atomically. When the schema is already current, nothing
+  is written and no event is published.
+- **Events:** `schema_migrated { admin, from_version, to_version }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `SchemaVersionUnsupported`
+  (the stored schema is newer than this Wasm, or has no migration path).
+- **Notes:** see [Storage schema migrations](deployment.md#storage-schema-migrations)
+  for how a migration is proposed, reviewed and executed.
+
+### Schema gate
+
+Every state-changing entry point other than the ones listed below — `set_token`,
+`propose_admin`, `cancel_admin_transfer`, `accept_admin`,
+`register_service`, `set_service_active`, `update_service`,
+`set_service_attestor`, `create_lease`, `create_lease_for`,
+`request_early_cancel`, `withdraw_early_cancel`, `reject_early_cancel`,
+`approve_early_cancel`, `settle_lease`, `settle_lease_attested` and
+`revoke_expired_lease` — first checks that the stored schema equals
+`SCHEMA_VERSION`. Otherwise it returns `SchemaMigrationRequired` (data older than
+the code) or `SchemaVersionUnsupported` (data newer than the code). `init`,
+`propose_upgrade`, `cancel_upgrade`, `execute_upgrade`, `migrate`,
+`bump_service`, `bump_lease` and every view are not gated.
+
+### `propose_admin`
+
+```rust
+pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<u64, Error>
+```
+
+Start a two-step admin hand-over to `new_admin` and return `expires_at`.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **Preconditions:** `new_admin != admin`.
+- **State:** stores `PendingAdmin { proposed_by, new_admin, proposed_at,
+  expires_at }` with `expires_at = now + ADMIN_TRANSFER_WINDOW_SECS` (7 days),
+  replacing any earlier proposal; extends instance TTL. The admin does **not**
+  change yet.
+- **Events:** `admin_transfer_proposed { admin, new_admin, expires_at }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `InvalidAdmin`, `Overflow`.
+
+### `cancel_admin_transfer`
+
+```rust
+pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), Error>
+```
+
+Withdraw the pending proposal, whether or not it has expired.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **State:** removes `PendingAdmin`; extends instance TTL.
+- **Events:** `admin_transfer_canceled { admin, new_admin }`.
+- **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingAdminTransfer`.
+
+### `accept_admin`
+
+```rust
+pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error>
+```
+
+Complete the hand-over and become the admin.
+
+- **Caller / auth:** `new_admin`, which must be the proposed address.
+- **Preconditions:** a proposal is pending, names `new_admin`, was made by the
+  admin still in office, and `now < expires_at`.
+- **State:** sets `Admin = new_admin`; removes `PendingAdmin`; extends instance
+  TTL. The previous admin loses every admin right in the same transaction.
+- **Events:** `admin_transfer_accepted { previous_admin, new_admin }`.
+- **Errors:** `NotInitialized`, `NoPendingAdminTransfer`, `Unauthorized`,
+  `AdminTransferExpired`.
+- **Notes:** `propose_admin` carries the outgoing admin's authorization and
+  `accept_admin` the incoming one's, so the hand-over as a whole needs both and
+  no third party can complete it.
 
 ---
 
@@ -496,7 +589,7 @@ Publish a new leasable service.
   Both persistent entries are extended to the same clamped horizon, in the same
   call.
 - **Events:** `service_registered { service_id, provider, rate_per_call, endpoint_hash }`.
-- **Errors:** `InvalidRate`, `RateTooHigh`, `Overflow`.
+- **Errors:** `InvalidRate`, `RateTooHigh`, `InvalidEndpointHash`, `Overflow`.
 - **Notes:** the rate bound is enforced where the price is published, not where
   it is spent, so no consumer can ever be quoted a `rate_per_call` whose
   deposit (`rate × allocated_calls`) is not representable in `i128`. Because
@@ -757,6 +850,33 @@ Extend an active lease with more calls and/or more time.
 - **Events:** `lease_topped_up { lease_id, consumer, additional_calls, additional_duration_secs, new_expires_at, added_deposit }`.
 - **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
   `LeaseExpired`, `InvalidTopUp`, `DurationTooLong`, `TokenNotSet`, `Overflow`.
+### `transfer_lease`
+
+```rust
+pub fn transfer_lease(
+    env: Env,
+    consumer: Address,
+    lease_id: u64,
+    new_consumer: Address,
+) -> Result<(), Error>
+```
+
+Hand an unsettled lease to another consumer, moving access and the refund path
+together.
+
+- **Caller / auth:** the current `consumer` must authorize.
+- **Preconditions:** the lease exists, `lease.consumer == consumer`,
+  `!settled`, and `new_consumer != consumer`.
+- **Effects:** sets `lease.consumer = new_consumer` and clears any pending
+  early-cancellation request. The provider check, the refund at settlement and
+  the revoke path all read that field, so ownership moves atomically.
+- **Events:** `lease_transferred { lease_id, from, to }`.
+- **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseNotTransferable`,
+  `InvalidConsumer`.
+- **Notes:** this is a direct assignment; the recipient does not accept or sign.
+  An expired but unsettled lease can be transferred, which moves the refund claim
+  even though access has lapsed. A lease proposed for settlement is already
+  `settled`, so it cannot be transferred during the challenge window.
 
 ### `settle_lease`
 
@@ -770,6 +890,7 @@ pub fn settle_lease(
 ```
 
 Credit the provider for verified calls and credit the remainder to the consumer.
+Propose a settlement and open the consumer challenge window. No funds move yet.
 
 - **Caller / auth:** `provider`, and it must own the lease's service.
 - **Trigger:** at or after expiry, or as soon as every allocated call is consumed.
@@ -865,19 +986,116 @@ Withdraw the pull-payment balance credited by settlements and revocations.
   claims and re-entrant tokens fail with `NothingToClaim`.
   allocated_calls`, the caller owns the service, and the lease has expired **or**
   `verified_calls == allocated_calls`.
-- **Effects:** persists `used_calls` and `settled = true` **first**, then the
-  service's cumulative stats (`ServiceStats(service_id)`), then calls
-  `transfer(contract → provider, verified_calls × rate_per_call)` and
-  `transfer(contract → consumer, locked_deposit − payout)`.
-- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Effects:** persists `used_calls` and `settled = true`, then writes a
+  `Settlement(lease_id)` entry with `state = Pending`,
+  `payout = verified_calls × rate_per_call`, `refund = locked_deposit − payout`
+  and `challengeable_until = now + CHALLENGE_WINDOW_SECS`. No token transfer
+  happens.
+- **Events:** `lease_settlement_proposed { lease_id, provider, verified_calls,
+  payout, refund, challengeable_until }`.
 - **Errors:** `LeaseNotFound`, `LeaseAlreadySettled`, `InvalidCalls`,
-  `Unauthorized`, `LeaseNotSettleable`, `TokenNotSet`, `Overflow`.
-- **Notes:** zero-value transfers are skipped. Settling with
-  `verified_calls = 0` is a legitimate way for a provider to refund an
-  unusable lease. A re-entrant token sees `settled = true` and is rejected.
-  Stats are updated before any transfer, so a re-entrant token cannot inflate
-  them, and an overflow in the running totals aborts the settlement before any
-  funds move.
+  `Unauthorized`, `LeaseNotSettleable`, `Overflow`.
+- **Notes:** the lease can no longer be settled again or revoked once a proposal
+  exists. The payout stays locked until the challenge window closes and
+  `finalize_settlement` (or `resolve_challenge`) releases it. Settling with
+  `verified_calls = 0` proposes a full consumer refund. The service's cumulative
+  totals are written only when funds actually leave escrow, so a challenged or
+  still-pending proposal never inflates reported revenue.
+
+### `finalize_settlement`
+
+```rust
+pub fn finalize_settlement(env: Env, lease_id: u64) -> Result<(), Error>
+```
+
+Release a pending proposal once its challenge window has closed.
+
+- **Caller / auth:** none — permissionless. The provider, consumer or any keeper
+  can finalize.
+- **Preconditions:** a settlement exists, `state == Pending`, and
+  `now ≥ challengeable_until`.
+- **Effects:** persists `state = Finalized`, then calls
+  `transfer(contract → provider, payout)` and
+  `transfer(contract → consumer, refund)` (zero-value transfers are skipped).
+- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `SettlementChallenged`, `ChallengeWindowStillOpen`, `TokenNotSet`.
+- **Notes:** `lease_settled` is emitted only when funds actually move. The
+  finalized split is added to the service's `ServiceStats` before the transfers,
+  so an overflow in the running totals aborts before any funds move.
+
+### `challenge_settlement`
+
+```rust
+pub fn challenge_settlement(
+    env: Env,
+    consumer: Address,
+    lease_id: u64,
+    evidence_hash: BytesN<32>,
+) -> Result<(), Error>
+```
+
+Dispute a proposed settlement inside the challenge window.
+
+- **Caller / auth:** the lease's `consumer` must authorize.
+- **Preconditions:** a settlement exists, is `Pending` (not already challenged
+  or finalized), `now < challengeable_until`, and `evidence_hash` is not all
+  zeroes.
+- **Effects:** stores `challenge_evidence` and `challenged_at`; sets
+  `state = Challenged`. Funds remain locked.
+- **Events:** `lease_challenged { lease_id, consumer, evidence_hash }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `SettlementChallenged`, `ChallengeWindowClosed`, `InvalidEvidence`,
+  `Unauthorized`.
+- **Notes:** the evidence itself stays off chain; only its 32-byte commitment is
+  stored. The admin resolves the dispute.
+
+### `cancel_challenge`
+
+```rust
+pub fn cancel_challenge(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error>
+```
+
+Withdraw an active challenge and return the settlement to `Pending`.
+
+- **Caller / auth:** the lease's `consumer` must authorize.
+- **Preconditions:** a settlement exists, `state == Challenged`.
+- **Effects:** clears the evidence fields and sets `state = Pending`. The
+  original `challengeable_until` is unchanged.
+- **Events:** `lease_challenge_cancelled { lease_id, consumer }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `NoActiveChallenge`, `Unauthorized`.
+- **Notes:** cancellation does not pay out early and does not extend the window.
+  While the window is still open the consumer may challenge again.
+
+### `resolve_challenge`
+
+```rust
+pub fn resolve_challenge(
+    env: Env,
+    admin: Address,
+    lease_id: u64,
+    upheld: bool,
+) -> Result<(), Error>
+```
+
+Decide an active challenge. Admin only.
+
+- **Caller / auth:** the stored `admin` must authorize.
+- **Preconditions:** a settlement exists and `state == Challenged`.
+- **Effects:** persists `state = Finalized`, then pays the outcome:
+  - `upheld = true` — `payout = 0`, `refund = locked_deposit` (full consumer
+    refund),
+  - `upheld = false` — the proposal's payout and refund stand.
+- **Events:** `lease_challenge_resolved { lease_id, admin, upheld }` followed by
+  `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Errors:** `SettlementNotFound`, `SettlementFinalized`,
+  `NoActiveChallenge`, `NotInitialized`, `Unauthorized`, `TokenNotSet`,
+  `Overflow`.
+- **Notes:** resolution may happen before or after the window closes. The admin
+  can only choose between the proposal and a full refund; it cannot redirect
+  funds elsewhere. An upheld challenge pays no revenue, so nothing is added to
+  `ServiceStats`.
 
 ### `revoke_expired_lease`
 
@@ -902,7 +1120,9 @@ Reclaim the **full** deposit when the provider never settled.
 - **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
   `LeaseNotExpired`, `RevokeWindowNotElapsed`, `Overflow`.
 - **Notes:** this is the consumer's escape hatch, and the reason escrow is safe
-  against an unresponsive provider. A revoked lease reports
+  against an unresponsive provider. It is unavailable once a settlement has been
+  proposed: the lease is marked settled at proposal time and the challenge
+  window is the consumer's remedy from then on. A revoked lease reports
   `LeaseStatus::Revoked`, not `Settled`: `used_calls` stays `0`,
   `remaining_calls` and `locked_balance` read `0`, and the service's
   `service_stats` are untouched, so a client can tell "provider earned nothing"
@@ -1034,9 +1254,12 @@ performed one could not be used to price a read.
 | View | Signature | Returns |
 | --- | --- | --- |
 | `get_admin` | `(env) -> Result<Address, Error>` | stored admin, else `NotInitialized` |
+| `get_pending_admin` | `(env) -> Option<PendingAdminTransfer>` | pending hand-over, including an expired one, else `None` |
 | `get_token` | `(env) -> Result<Address, Error>` | escrow token, else `TokenNotSet` |
 | `get_pending_upgrade` | `(env) -> Option<PendingUpgrade>` | queued hash and execution ledger, if any |
 | `version` | `(env) -> String` | version embedded by `contractmeta!` |
+| `schema_version` | `(env) -> Result<u32, Error>` | storage schema of the stored data (`0` = pre-versioning), else `NotInitialized` |
+| `code_schema_version` | `(env) -> u32` | storage schema the running Wasm was built for |
 | `service_count` | `(env) -> u64` | total services ever registered |
 | `lease_count` | `(env) -> u64` | total leases ever created |
 | `get_service` | `(env, service_id: u64) -> Result<Service, Error>` | the `Service`, else `ServiceNotFound` |
@@ -1047,6 +1270,8 @@ performed one could not be used to price a read.
 | `remaining_calls` | `(env, lease_id: u64) -> Result<u32, Error>` | calls left; `0` once settled **or** expired |
 | `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; `0` once settled |
 | `claimable_balance` | `(env, beneficiary: Address) -> i128` | pull-payment balance available to `claim` |
+| `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; stays at `locked_deposit` while a settlement is pending or challenged; `0` once finalized or revoked |
+| `get_settlement` | `(env, lease_id: u64) -> Result<Settlement, Error>` | the `Settlement`, else `SettlementNotFound` |
 | `service_stats` | `(env, service_id: u64) -> Result<ServiceStats, Error>` | cumulative settled leases / calls / payout, else `ServiceNotFound` |
 | `get_services` | `(env, start: u64, limit: u32) -> Result<ServicePage, Error>` | up to `limit` services, ascending from `start` |
 | `get_leases` | `(env, start: u64, limit: u32) -> Result<LeasePage, Error>` | up to `limit` leases, ascending from `start` |
@@ -1120,6 +1345,11 @@ because topics are positional and indexers filter on them.
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
 | `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_transferred` | `lease_id` | `schema_version`, `from`, `to` |
+| `lease_settlement_proposed` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund`, `challengeable_until` |
+| `lease_challenged` | `lease_id` | `schema_version`, `consumer`, `evidence_hash` |
+| `lease_challenge_cancelled` | `lease_id` | `schema_version`, `consumer` |
+| `lease_challenge_resolved` | `lease_id` | `schema_version`, `admin`, `upheld` |
 | `lease_cancellation_requested` | `lease_id` | `schema_version`, `consumer` |
 | `lease_cancellation_rejected` | `lease_id` | `schema_version`, `provider` |
 | `lease_cancellation_withdrawn` | `lease_id` | `schema_version`, `consumer` |
@@ -1128,6 +1358,10 @@ because topics are positional and indexers filter on them.
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `schema_migrated` | — | `schema_version`, `admin`, `from_version`, `to_version` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 See [integration.md](./integration.md#event-schema-version) for how to branch on
 the version.
@@ -1163,11 +1397,14 @@ pub struct Lease {
     pub consumer: Address,
     pub allocated_calls: u32,
     pub used_calls: u32,
-    pub expires_at: u64,
+    pub created_at: u64,       // ledger timestamp of create_lease
+    pub expires_at: u64,       // created_at + duration_secs
     pub locked_deposit: i128,
     pub settled: bool,
 }
 
+// `Settled` means no further lease transition is possible (revoked, or a
+// settlement was proposed); use `get_settlement` for the payout state.
 pub enum LeaseStatus { Active = 0, Expired = 1, Settled = 2 }
 
 /// Returned by `quote_lease`; the two fields mirror the `Lease` they predict.
@@ -1183,6 +1420,22 @@ pub struct ProviderServicePage {
     pub next: u32,
     /// `true` once the index is exhausted.
     pub done: bool,
+}
+
+pub enum SettlementState { Pending = 0, Challenged = 1, Finalized = 2 }
+
+pub struct Settlement {
+    pub lease_id: u64,
+    pub consumer: Address,
+    pub provider: Address,
+    pub verified_calls: u32,
+    pub payout: i128,
+    pub refund: i128,
+    pub proposed_at: u64,
+    pub challengeable_until: u64,
+    pub state: SettlementState,
+    pub challenge_evidence: BytesN<32>, // all zeroes when no challenge is active
+    pub challenged_at: u64,            // 0 when no challenge is active
 }
 
 pub struct CancelRequest {
@@ -1201,6 +1454,13 @@ pub struct LeasePage {
     pub next_start: u64,
     pub done: bool,
 }
+
+pub struct PendingAdminTransfer {
+    pub proposed_by: Address,
+    pub new_admin: Address,
+    pub proposed_at: u64,
+    pub expires_at: u64,
+}
 }
 ```
 
@@ -1209,6 +1469,14 @@ breaks decoding of leases written by an older version. `Revoked` therefore
 derives from a separate `LeaseRevoked(lease_id)` marker rather than a
 `revoked: bool` on the struct, and `ServiceStats` lives under its own key for
 the same reason.
+
+### `created_at` and upgrade compatibility
+
+`created_at` was appended to `Lease` after the type had already been published,
+so a lease written by an earlier release is stored without it. `get_lease` reads
+such an entry through a legacy shape and reports `created_at = 0`, meaning the
+creation time is unknown; everything else about the lease is unchanged, so it
+can still be settled or revoked, and the next write stores the current shape.
 
 ## Storage layout
 
@@ -1231,7 +1499,10 @@ pub enum DataKey {
     ServiceAttestor(u64),      // persistent: optional attestor key per service
     PendingUpgrade,            // instance (appended)
     ProviderServices(Address), // persistent: service ids, oldest first
+    Settlement(u64),           // persistent: proposed split, keyed by lease id
     CancelRequest(u64),        // persistent: pending early-cancellation request
+    SchemaVersion,             // instance, u32: see SCHEMA_VERSION
+    PendingAdmin,              // instance: proposed admin hand-over
 }
 ```
 
@@ -1402,7 +1673,22 @@ recording it there fails `cargo test`. Add a new code by appending it to
 | 25 | `CancellationNotRequested` | no pending early-cancellation request |
 | 26 | `CancellationAlreadyRequested` | a request is already pending |
 | 27 | `LeaseExpired` | early cancellation requires `now < expires_at` |
-| 28 | `RateTooHigh` | published `rate_per_call` above `MAX_RATE_PER_CALL` |
+| 28 | `SettlementNotFound` | no settlement proposed for that lease |
+| 29 | `SettlementFinalized` | settlement already released funds |
+| 30 | `ChallengeWindowClosed` | challenge filed at or after `challengeable_until` |
+| 31 | `SettlementChallenged` | settlement is already under an active challenge |
+| 32 | `NoActiveChallenge` | nothing to cancel or resolve |
+| 33 | `ChallengeWindowStillOpen` | finalize attempted before the window closes |
+| 34 | `InvalidEvidence` | challenge evidence hash is all zeroes |
+| 35 | `LeaseNotTransferable` | lease already settled or revoked |
+| 36 | `InvalidConsumer` | transfer target is the current consumer |
+| 37 | `RateTooHigh` | published `rate_per_call` above `MAX_RATE_PER_CALL` |
+| 38 | `SchemaMigrationRequired` | stored schema older than this Wasm; admin must run `migrate` |
+| 39 | `SchemaVersionUnsupported` | stored schema newer than this Wasm, or no migration path |
+| 40 | `NoPendingAdminTransfer` | `accept_admin` / `cancel_admin_transfer` with no proposal |
+| 41 | `AdminTransferExpired` | `accept_admin` at or after `expires_at` |
+| 42 | `InvalidAdmin` | `propose_admin` named the current admin |
+| 43 | `InvalidEndpointHash` | `endpoint_hash` is all zeroes and commits to nothing |
 
 ## Invoking with the Stellar CLI
 
@@ -1466,7 +1752,7 @@ stellar contract invoke --id $REGISTRY --source-account delegate --network testn
 stellar contract invoke --id $REGISTRY --network testnet \
   -- service_stats --service_id 1
 
-# settle
+# propose a settlement (opens the 24h challenge window)
 stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
   -- settle_lease --provider $PROVIDER --lease_id 1 --verified_calls 320
 
@@ -1479,6 +1765,17 @@ stellar contract invoke --id $REGISTRY --source-account provider --network testn
 # withdraw a pull-payment balance
 stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
   -- claim --beneficiary $PROVIDER
+# finalize after the 24h challenge window (anyone may call this)
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  -- finalize_settlement --lease_id 1
+
+# the consumer can dispute inside the window
+stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
+  -- challenge_settlement --consumer $CONSUMER --lease_id 1 --evidence_hash <64_HEX_CHARS>
+
+# the admin resolves the dispute
+stellar contract invoke --id $REGISTRY --source-account admin --network testnet \
+  -- resolve_challenge --admin $ADMIN --lease_id 1 --upheld true
 
 # upgrade (after `stellar contract upload`)
 stellar contract invoke --id $REGISTRY --source-account admin --network testnet \

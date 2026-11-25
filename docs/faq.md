@@ -12,9 +12,10 @@ Refunds occur under two distinct operational circumstances:
 1. **Partial or Zero Usage upon Settlement:**
    When a provider settles a lease via `settle_lease`, it reports `verified_calls`.
    The provider receives `verified_calls × rate_per_call`, and any unspent
-   remainder of `locked_deposit` is automatically refunded to the consumer's token
-   balance in the same transaction. If `verified_calls == 0`, the consumer is
-   refunded 100% of their deposit.
+   remainder of `locked_deposit` is refunded to the consumer's token balance
+   when the settlement is finalized after the 24-hour challenge window. An
+   upheld challenge refunds 100% of the deposit instead. If `verified_calls ==
+   0` and the proposal stands, the consumer is refunded 100% of their deposit.
    *See [Protocol: Lifecycle](protocol.md#lifecycle) and
    [Contract reference: settle_lease](contract-reference.md#settle_lease).*
 

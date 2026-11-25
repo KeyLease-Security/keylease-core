@@ -103,6 +103,11 @@ Mainnet deployment is intentionally deferred until the contract is audited. See
 [Security](security.md) and
 [SECURITY.md](https://github.com/KeyLease-Security/keylease-core/blob/main/SECURITY.md).
 
+Before any mainnet transaction, follow the maintainer-approved
+[Mainnet deployment and key-custody runbook](mainnet-runbook.md). It defines
+the audit gate, multisig custody, exact deploy/verify/monitor/upgrade commands,
+expected outputs, and rollback procedure.
+
 ## Verifying a listed address
 
 The registry can be checked without trusting this page: the Wasm carries
