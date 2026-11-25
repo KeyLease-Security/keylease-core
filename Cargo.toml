@@ -3,11 +3,12 @@ resolver = "2"
 members = ["contracts/registry", "contracts/mock_token"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/KeyLease-Security/keylease-core"
-homepage = "https://github.com/KeyLease-Security/keylease-core"
+# Deliberately no `homepage`: it would repeat `repository`, and the rustdoc job
+# (`RUSTDOCFLAGS=-D warnings`) fails the workspace on a redundant metadata field.
 documentation = "https://github.com/KeyLease-Security/keylease-core#readme"
 rust-version = "1.84"
 authors = ["KeyLease Security <security@keylease.dev>"]

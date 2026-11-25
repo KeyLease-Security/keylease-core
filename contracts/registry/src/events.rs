@@ -106,22 +106,42 @@ pub struct ServiceStatusChanged {
     pub is_active: bool,
 }
 
-/// Emitted when the owning provider hands a service to a new address.
-///
-/// The payload carries both addresses so an indexer that followed the service
-/// can re-point its settlement signer without replaying `service_registered`.
+/// Emitted when a provider updates the rate_per_call and/or endpoint_hash of a service.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ServiceProviderTransferred {
-    /// Service whose ownership moved.
+pub struct ServiceRateUpdated {
+    /// Service whose rate/endpoint was updated.
     #[topic]
     pub service_id: u64,
     /// Payload schema version; see the module docs.
     pub schema_version: u32,
-    /// Provider that authorized the transfer.
-    pub previous_provider: Address,
-    /// Provider that now owns the service and settles its leases.
-    pub new_provider: Address,
+    /// Provider that owns the service.
+    pub provider: Address,
+    /// New per-call rate in the escrow token's smallest unit.
+    pub rate_per_call: i128,
+    /// New commitment to the off-chain endpoint descriptor.
+    pub endpoint_hash: BytesN<32>,
+}
+
+/// Emitted when a provider opts a service into or out of settlement
+/// attestation.
+///
+/// `attestor` is the ed25519 key a settlement of this service's leases must be
+/// signed with, or `None` when the service opted back out. A new event shape
+/// does not bump `EVENT_SCHEMA_VERSION`: the version tracks fields of an
+/// existing payload, and no existing payload changed here.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceAttestorSet {
+    /// Service whose attestation policy changed.
+    #[topic]
+    pub service_id: u64,
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Provider that owns the service.
+    pub provider: Address,
+    /// The attestor key now required for settlement, or `None` when disabled.
+    pub attestor: Option<BytesN<32>>,
 }
 
 /// Emitted when a consumer escrows a deposit and a lease is minted.
@@ -143,9 +163,180 @@ pub struct LeaseCreated {
     pub expires_at: u64,
     /// Deposit held in escrow: `rate_per_call * allocated_calls`.
     pub locked_deposit: i128,
+    /// Service rate per metered call, in the escrow token's smallest unit.
+    ///
+    /// This is a snapshot taken when the lease is created, so an indexer can
+    /// interpret `locked_deposit` without reading the service at the event's
+    /// ledger. Later changes to the service rate do not affect this value or
+    /// the lease's settlement math.
+    pub rate_per_call: i128,
 }
 
-/// Emitted when a provider settles a lease from escrow.
+/// Emitted when a provider proposes a settlement and the consumer challenge
+/// window opens. No funds move yet.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseSettlementProposed {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease being settled.
+    #[topic]
+    pub lease_id: u64,
+    /// Provider that proposed the settlement.
+    pub provider: Address,
+    /// Calls the provider reported as consumed.
+    pub verified_calls: u32,
+    /// Amount the provider receives if the proposal is finalized.
+    pub payout: i128,
+    /// Amount the consumer receives if the proposal is finalized.
+    pub refund: i128,
+    /// First ledger timestamp at which the proposal may be finalized.
+    pub challengeable_until: u64,
+}
+
+/// Emitted when a consumer disputes a proposed settlement.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseChallenged {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease whose settlement was challenged.
+    #[topic]
+    pub lease_id: u64,
+    /// Consumer that filed the challenge.
+    pub consumer: Address,
+    /// Commitment to the consumer's evidence.
+    pub evidence_hash: BytesN<32>,
+}
+
+/// Emitted when a consumer withdraws their challenge.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseChallengeCancelled {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease whose challenge was withdrawn.
+    #[topic]
+    pub lease_id: u64,
+    /// Consumer that withdrew the challenge.
+    pub consumer: Address,
+}
+
+/// Emitted when the admin resolves a challenge.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseChallengeResolved {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease whose challenge was resolved.
+    #[topic]
+    pub lease_id: u64,
+    /// Admin that resolved the challenge.
+    pub admin: Address,
+    /// `true` if the consumer's dispute was upheld.
+    pub upheld: bool,
+}
+
+/// Emitted in addition to `lease_created` when a delegate minted the lease for
+/// a consumer.
+///
+/// `lease_created` keeps its existing shape so indexers still see one event for
+/// every lease; this one records only who submitted it. The delegate never
+/// holds a claim on the lease: the consumer's balance funded the deposit and the
+/// consumer owns every later refund.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseDelegated {
+    /// Lease created on behalf of `consumer`.
+    #[topic]
+    pub lease_id: u64,
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Address that co-signed the creation and paid the transaction fee.
+    pub delegate: Address,
+    /// Address whose balance was debited and that owns the refund path.
+    pub consumer: Address,
+}
+
+/// Emitted when a consumer asks to end a lease early.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancellationRequested {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease the consumer wants to end.
+    #[topic]
+    pub lease_id: u64,
+    /// Consumer that requested cancellation.
+    pub consumer: Address,
+}
+
+/// Emitted when a provider declines an early-cancellation request.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancellationRejected {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease whose cancellation was declined.
+    #[topic]
+    pub lease_id: u64,
+    /// Provider that declined it.
+    pub provider: Address,
+}
+
+/// Emitted when a consumer withdraws an early-cancellation request.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancellationWithdrawn {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease whose request was withdrawn.
+    #[topic]
+    pub lease_id: u64,
+    /// Consumer that withdrew it.
+    pub consumer: Address,
+}
+
+/// Emitted when an early cancellation is approved and funds are released.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseCancelled {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease that was ended early.
+    #[topic]
+    pub lease_id: u64,
+    /// Provider that consented and received the payout.
+    pub provider: Address,
+    /// Consumer that received the refund.
+    pub consumer: Address,
+    /// Calls the provider reported as served.
+    pub verified_calls: u32,
+    /// Amount paid to the provider.
+    pub payout: i128,
+    /// Unused-call amount refunded to the consumer.
+    pub refund: i128,
+}
+
+/// Emitted when a lease is transferred to a new consumer.
+///
+/// The access right and the refund path move together, so an indexer can follow
+/// who is entitled to use the lease and reclaim its deposit.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseTransferred {
+    /// Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Lease that changed hands.
+    #[topic]
+    pub lease_id: u64,
+    /// Previous consumer, which authorized the transfer.
+    pub from: Address,
+    /// New consumer and owner of the refund path.
+    pub to: Address,
+}
+
+/// Emitted when a settlement is finalized and funds leave escrow.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeaseSettled {
@@ -179,7 +370,51 @@ pub struct LeaseRevoked {
     pub refund: i128,
 }
 
-/// Emitted when the admin upgrades the registry's Wasm.
+/// Emitted when the admin migrates stored data to the running Wasm's schema,
+/// lifting the stop that an upgrade put in place.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaMigrated {
+    /// Payload schema version; see the module docs. (Not the storage schema.)
+    pub schema_version: u32,
+    /// Admin that authorized the migration.
+    pub admin: Address,
+    /// Storage schema the data conformed to before the migration.
+    pub from_version: u32,
+    /// Storage schema the data conforms to now.
+    pub to_version: u32,
+}
+
+/// Emitted when the admin proposes a Wasm upgrade.
+///
+/// `execute_after` is the ledger timestamp at which `execute_upgrade` becomes
+/// legal, giving consumers a window to exit before the rules change.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposed {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Admin that proposed the upgrade.
+    pub admin: Address,
+    /// Hash of the Wasm that will be installed.
+    pub new_wasm_hash: BytesN<32>,
+    /// Ledger timestamp before which execution is rejected.
+    pub execute_after: u64,
+}
+
+/// Emitted when the admin cancels a pending Wasm upgrade.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeCancelled {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Admin that cancelled the upgrade.
+    pub admin: Address,
+    /// Hash of the Wasm that will no longer be installed.
+    pub new_wasm_hash: BytesN<32>,
+}
+
+/// Emitted when the admin executes a proposed upgrade after the delay.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractUpgraded {
@@ -189,4 +424,48 @@ pub struct ContractUpgraded {
     pub admin: Address,
     /// Hash of the new Wasm installed by the Soroban deployer.
     pub new_wasm_hash: BytesN<32>,
+    /// Ledger timestamp that had to be reached before execution was allowed.
+    pub execute_after: u64,
+}
+
+/// Emitted when the admin proposes handing the registry to `new_admin`.
+///
+/// Nothing changes until `new_admin` accepts. A later proposal supersedes this
+/// one, so an indexer should treat the most recent `admin_transfer_proposed`
+/// as the only live proposal.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferProposed {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Current admin that authorized the proposal.
+    pub admin: Address,
+    /// Address that must accept to become admin.
+    pub new_admin: Address,
+    /// Ledger timestamp from which the proposal can no longer be accepted.
+    pub expires_at: u64,
+}
+
+/// Emitted when the admin withdraws a pending transfer before it is accepted.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferCanceled {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Current admin that authorized the cancellation.
+    pub admin: Address,
+    /// Address whose proposal was withdrawn.
+    pub new_admin: Address,
+}
+
+/// Emitted when the proposed admin accepts and the registry changes hands.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferAccepted {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Admin that proposed the transfer and no longer holds the role.
+    pub previous_admin: Address,
+    /// Address that authorized the acceptance and is now the admin.
+    pub new_admin: Address,
 }

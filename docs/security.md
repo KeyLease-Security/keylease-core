@@ -5,13 +5,19 @@ contract guarantees, what it assumes, and what is not yet hardened. For
 reporting a vulnerability, see
 [SECURITY.md](https://github.com/KeyLease-Security/keylease-core/blob/main/SECURITY.md).
 
+No mainnet deployment may begin until the maintainer-approved
+[mainnet runbook](mainnet-runbook.md) audit gate is complete. The runbook
+requires independent audit evidence, an exact release/Wasm hash, multisig
+custody, verification, monitoring, upgrade, and rollback records.
+
 ## Trust assumptions
 
 | Assumption | Consequence if violated |
 | --- | --- |
 | The admin configures a well-behaved SEP-41 token. | A malicious token contract could revert transfers and stall settlement. It cannot be paid twice: `settled` is persisted before the transfer, and a re-entrant token is rejected (`LeaseAlreadySettled`). |
-| The admin does not upgrade to a malicious Wasm. | An upgrade can change the contract logic. The admin key should be cold or multisig; upgrades emit `contract_upgraded`. |
-| The provider reports `verified_calls` honestly. | It can under-report (it gets paid less) but never over-report past `allocated_calls`. |
+| The admin does not upgrade to a malicious Wasm. | An upgrade can change the contract logic. The admin key should be cold or multisig. Upgrades now require a 24h on-ledger delay and emit `upgrade_proposed` with the hash and execution ledger, so consumers can exit; execution emits `contract_upgraded`. |
+| The provider reports `verified_calls` honestly, or the consumer and admin can correct it. | It can under-report (it gets paid less) and can over-report up to `allocated_calls`; the consumer has 24h to challenge the report, and the admin resolves the dispute. |
+| The admin adjudicates challenges honestly. | A compromised admin can zero a legitimate payout by upholding a challenge, or refuse to resolve one. It cannot redirect funds to itself. Use a cold or multisig admin. |
 | Soroban ledger time is monotonic and honest. | Validity windows would be unreliable. |
 | Consumers keep their own key safe. | Anyone with the consumer key can create leases that spend its balance. |
 
@@ -29,27 +35,65 @@ take more than it is owed, and it cannot prevent the consumer's refund.
 3. **Only the consumer can revoke, and only after the grace window.** Combined
    checks for ownership, expiry and elapsed grace (`Unauthorized`,
    `LeaseNotExpired`, `RevokeWindowNotElapsed`).
-4. **A lease releases funds once.** Every money path checks `settled` first,
-   persists `settled = true`, and only then calls the token
-   (`LeaseAlreadySettled`). Checks-effects-interactions is enforced by
-   `test_reentrant_token_cannot_settle_a_lease_twice`.
-5. **Overflow aborts.** Deposit, payout and expiry arithmetic use
+4. **Early cancellation needs the provider's consent.** Only the consumer can
+   request or withdraw, only the owning provider can approve or reject, and only
+   approval moves funds (`Unauthorized`, `CancellationNotRequested`). A request
+   never blocks use, settlement or revocation and expires with the lease.
+5. **A lease releases funds once.** A settlement is proposed once (`settled` is
+   persisted at proposal time), its state is persisted as `Finalized` before any
+   token call, and every payout path rejects an already-finalized settlement
+   (`LeaseAlreadySettled`, `SettlementFinalized`). Checks-effects-interactions is
+   enforced by `test_reentrant_token_cannot_settle_a_lease_twice`; the service's
+   running totals are written before the transfers, so a re-entrant token cannot
+   inflate them either.
+6. **The payout is locked during a dispute.** A pending settlement cannot be
+   finalized before `challengeable_until`, and a challenged one cannot be
+   finalized at all until the admin resolves it (`ChallengeWindowStillOpen`,
+   `SettlementChallenged`).
+7. **Overflow aborts.** Deposit, payout, refund and expiry arithmetic use
    `checked_mul`/`checked_add`/`checked_sub` and revert with `Overflow`.
-6. **Lease durations are storage-safe.** Durations above
+8. **Lease durations are storage-safe.** Durations above
    `MAX_LEASE_DURATION_SECS` (30 days) revert with `DurationTooLong`, and the
    persistent entry is extended for the term plus the grace window, so escrow
    cannot be evicted while it is claimable.
-7. **A single lease cannot escrow an unbounded amount.** A deposit that fits
+9. **A single lease cannot escrow an unbounded amount.** A deposit that fits
    `i128` but exceeds `MAX_LEASE_DEPOSIT` reverts with `DepositTooLarge`, before
    the lease id is allocated and before the token is called. Checked arithmetic
    alone cannot catch this: a product can be perfectly representable and still
    be three orders of magnitude more than the consumer meant to lock.
-8. **The admin cannot touch user funds.** It can only call `set_token` and
-   `upgrade`.
-9. **Every mutation is authenticated.** No state-changing entry point trusts its
-   caller without `require_auth()`.
-10. **Every mutation is observable.** Each transition emits a typed Soroban event
-   with no secret material in it.
+10. **Listed prices are leasable.** `register_service` rejects `rate_per_call`
+    above `MAX_RATE_PER_CALL`, which equals `MAX_LEASE_DEPOSIT`. A service can
+    therefore never be listed at a price that cannot fund even the smallest
+    (one-call) lease, and the worst legal `rate × calls` product stays far inside
+    `i128`, so a consumer's quote is always the amount that moves.
+11. **The admin cannot redirect user funds.** It can call `set_token`, the
+    upgrade entry points, the admin-rotation entry points and
+    `resolve_challenge`. Resolution only chooses between the provider's
+    proposal and a full consumer refund; there is no path that pays an arbitrary
+    recipient.
+12. **Every mutation is authenticated.** No state-changing entry point trusts its
+    caller without `require_auth()`. `finalize_settlement` is permissionless by
+    design: it can only release the exact split already recorded on chain.
+13. **A sponsor cannot spend your balance.** `create_lease_for` calls
+    `require_auth()` on the delegate *and* the consumer, and the deposit is
+    transferred from the consumer; the refund and revoke paths stay bound to the
+    consumer alone. Missing either signature reverts before any state changes.
+14. **Revocation is not settlement.** A reclaimed lease reports
+    `LeaseStatus::Revoked`, keeps `used_calls == 0`, pays the provider nothing,
+    and is excluded from `service_stats`, so revenue reporting cannot be
+    confused with a refund. An approved early cancellation is the opposite case:
+    the provider was paid for served calls, so it is counted like any other
+    settlement.
+15. **Every mutation is observable.** Each transition emits a typed Soroban event
+    with no secret material in it.
+16. **Only the current consumer can transfer, and never after settlement.**
+    `transfer_lease` rewrites the single `Lease.consumer` field, so access and the
+    refund path always belong to the same address (`Unauthorized`,
+    `LeaseNotTransferable`, `InvalidConsumer`). A pending early-cancellation
+    request is cleared so the previous owner cannot trigger a payout.
+17. **The admin role changes hands only with both signatures.** `propose_admin`
+    needs the current admin, `accept_admin` needs the proposed address, and a
+    proposal expires after `ADMIN_TRANSFER_WINDOW_SECS` (7 days).
 
 ## Re-entrancy hardening: checks-effects-interactions
 
@@ -117,170 +161,243 @@ Asserted in `contracts/registry/src/test.rs`. The
 [contract reference](contract-reference.md) lists the exact error code for each
 violation.
 
-- `payout + refund == locked_deposit` for every lease
-  (`test_settlement_conserves_the_locked_deposit`,
-  `test_revocation_conserves_the_locked_deposit`).
-- A settled lease never transitions again
-  (`test_lease_cannot_be_settled_twice`,
-  `test_reentrant_token_cannot_settle_a_lease_twice`,
-  `test_reentrant_token_cannot_revoke_a_lease_twice`).
-- `settled` is true on-chain before any value leaves the contract: the
-  re-entrant callbacks recorded during the payout and refund transfers are
-  rejected (`test_reentrant_token_cannot_settle_a_lease_twice`,
-  `test_reentrant_token_cannot_revoke_a_lease_twice`), and the persisted flag
-  rejects both money paths on a settled lease
-  (`test_persisted_settled_flag_blocks_a_second_release`).
-- No lease can leave more value than was escrowed.
+- `payout + refund == locked_deposit` for every settlement and every approved
+  early cancellation.
+- A settled lease never transitions again.
+- `settled` is true on-chain before any value leaves the contract.
+- A settlement is `Finalized` on-chain before any value leaves the contract.
+- No settlement can release more value than was escrowed.
+- A challenged settlement moves no value until the admin resolves it.
 - Every lease has a consumer path to a full refund, for its entire TTL.
-- The create / settle / revoke state machine and the conservation law are
-  exhaustively model-checked by `contracts/registry/src/model.rs`, and the model
-  is held to the deployed contract by a conformance test (see
-  [Formal escrow model](#formal-escrow-model)).
-
-## Provider key rotation (`transfer_service`)
-
-`transfer_service(provider, service_id, new_provider)` re-points
-`Service.provider`. It is **not** a money path and it is deliberately narrow:
-
-- **Auth.** `provider.require_auth()` only, and the authenticated address must
-  equal the stored owner (`Unauthorized` otherwise). The new address is not
-  asked to co-sign because ownership is handed over by the party that already
-  owns it.
-- **No no-op.** `new_provider == service.provider` returns `ProviderUnchanged`,
-  so an event never claims a transfer that did not happen.
-- **One write, no external call.** Ownership is a single `save_service` write,
-  so there is no intermediate ledger state. Settlement reads the stored provider
-  when it executes, which is why there is no window where neither party can
-  settle: up to the write the old provider settles, from the write onward the new
-  one does.
-- **In-flight leases are unaffected.** A lease references `service_id`, never an
-  address. Leases created before the transfer are settled by the new provider
-  with the same `locked_deposit`, `rate_per_call` and `expires_at`; the old
-  provider is rejected with `Unauthorized` and can no longer pause, settle or
-  transfer the service. The consumer's revoke path is untouched, so a transfer
-  can never be used to strand a deposit.
-- **Not a third-party seizure path.** No admin, consumer or arbitrary caller can
-  call it for a service they do not own.
-
-## Formal escrow model
-
-> Design note for issue #128. **Pending maintainer approval.**
-
-The escrow machine is small enough to check exhaustively, so it is checked in
-CI by an ordinary `cargo test` run. No new tooling is needed:
-
-- `contracts/registry/src/model.rs` is a bounded state machine — the
-  specification below, in Rust.
-- `test_model_explores_the_escrow_state_machine_exhaustively` walks **every**
-  sequence of up to four actions from every create shape, under each of the three
-  time regimes, and panics on the first violating transition.
-- `test_model_matches_the_deployed_contract` drives the **real** registry through
-  the same alphabet and compares the outcome and the resulting balances after
-  every step, which is what keeps the model honest.
-
-### Transitions
-
-Let `L = rate_per_call × allocated_calls`, `verified` the provider's report and
-`g` the 24-hour grace window. `now` is ledger time.
-
-| # | Transition | Guard | Effect |
-| --- | --- | --- | --- |
-| T1 | `create(calls, rate)` | `calls > 0`, `rate > 0`, `rate × calls` fits `i128` and is `≤ MAX_LEASE_DEPOSIT` | `Active`, `locked = rate × calls`, `used = 0` |
-| T2 | `settle(verified)` | `¬settled`, `verified ≤ allocated_calls`, caller is the stored provider, and `(now ≥ expires_at ∨ verified = allocated_calls)`, `payout`/`refund` fit | `Settled`, `used = verified`, `payout = rate × verified`, `refund = locked − payout` |
-| T3 | `revoke()` | caller is the consumer, `¬settled`, `now ≥ expires_at`, `now ≥ expires_at + g` | `Settled`, `refund = locked` |
-| T4 | any action on `Settled` | always false | rejected (`LeaseAlreadySettled`), no state change |
-
-Error order is part of the spec, because clients branch on it: `settle` checks
-`settled`, then the call count, then ownership, then the window; `revoke` checks
-ownership, then `settled`, then expiry, then the grace window. The conformance
-test compares the exact `Error`, so a reordered guard fails CI.
-
-### Invariants
-
-1. **Conservation.** In every reachable state `payout + refund ≤ locked`; on
-   every successful release `payout + refund = locked`. Value is never created
-   and never stranded: a lease is either fully escrowed or fully released.
-2. **No double release.** A lease releases value at most once. Every action from
-   `Settled` is rejected and leaves the state untouched, and the cumulative
-   released amount is monotone and never exceeds `locked`.
-3. **Rejections are no-ops.** A guarded transition that fails changes nothing,
-   so a rejected call cannot be used to move value or rewrite a lease.
-
-### Assumptions the model makes
-
-1. The configured SEP-41 token moves exactly the requested amount or reverts.
-   Token misbehaviour is covered by the re-entrancy tests, not by the model.
-2. Every input except the lease shape is valid: the service exists, is active,
-   has a configured token, `duration_secs` is within `1..=MAX_LEASE_DURATION_SECS`,
-   and ledger time is monotonic. Each of those guards has its own unit test.
-3. The clock is read once per call, as the entry points do.
-4. `rate_per_call` is immutable for a service; a new price is a new service.
-5. Leases are independent accounting units: one lease's escrow never backs
-   another's payout.
-6. `transfer_service` changes which address passes the provider guard, never the
-   escrow arithmetic, so the model parameterises that guard as "is the caller the
-   owner" and the rotation behaviour is pinned by its own tests.
-
-### How the implementation stays in sync
-
-The model does not read the contract's source; it is held to it by
-`test_model_matches_the_deployed_contract`, which runs the real registry against
-the same alphabet and compares, after every transition: the returned `Error`,
-`settled`, `used_calls`, the provider's balance, the consumer's balance and the
-balance left in escrow. Any change to a guard, its order, the payout formula, or
-the field that is persisted first breaks one of those six comparisons.
-
-An optional human-readable TLA+-style sketch is deliberately not committed: a
-spec file CI does not check drifts, and the executable model above is the one
-CI runs.
+- `service_stats` advances only on provider settlement, and only by exactly
+  `verified_calls` and the payout the transfers performed.
+- A revoked lease and a settled lease are distinguishable through
+  `lease_status` alone.
+- Every lease has exactly one consumer, and it owns both access and the refund
+  path for its entire TTL; a proposed settlement freezes that ownership.
 
 ## Threats considered
 
 | Threat | Mitigation |
 | --- | --- |
 | Provider claims more calls than allocated | `InvalidCalls` |
+| Provider over-reports within the allotment | Consumer challenges inside the 24h window; admin can uphold a full refund |
 | Provider settles a lease twice | `settled` flag persisted before transfers + `LeaseAlreadySettled` |
+| Payout released while a challenge is open | `SettlementChallenged`; only the admin can resolve |
+| Finalize races the challenge deadline | `now < challengeable_until` → `ChallengeWindowStillOpen`; at the boundary challenges are closed |
+| Admin upholds every challenge to deny payouts | On-chain `lease_challenge_resolved` events; admin should be cold/multisig; consumer and provider can both observe |
 | Attacker settles someone else's lease | `service.provider == provider` check |
 | Attacker transfers a service they do not own | `transfer_service` owner check → `Unauthorized` |
 | A provider transfer strands in-flight escrow | leases bind to `service_id`; new owner settles, consumer still revokes |
 | Attacker revokes someone else's lease | `lease.consumer == consumer` check |
+| Attacker transfers someone else's lease | `lease.consumer == consumer` check + `require_auth` on the current consumer |
+| Consumer transfers, then revokes as the old owner | Ownership is one field; the revoke/refund path reads the new consumer |
+| Lease changes hands after payout | `settled` check in `transfer_lease` (`LeaseNotTransferable`) |
+| Consumer cancels early without paying for served calls | Provider approval reports `verified_calls`; no unilateral path reduces the payout |
+| Provider approves a cancellation that was never requested | `CancellationNotRequested` |
+| Cancellation bypasses the grace window at expiry | Requests are rejected at/after `expires_at` (`LeaseExpired`) |
 | Re-entrant token pays a lease twice | checks-effects-interactions; adversarial test |
 | Provider strands funds by never settling | 24h grace, then full consumer refund |
 | Consumer races the provider at expiry | 24h grace window reserved for the provider |
-| Rate overflow creates a cheap lease | `checked_mul` → `Overflow` |
+| Rate overflow creates a cheap lease | `checked_mul` → `Overflow`, and `RateTooHigh` blocks the price before it can ever be leased |
 | Typo locks a consumer into an enormous deposit | `MAX_LEASE_DEPOSIT` → `DepositTooLarge` |
 | Escrow token has more decimals than assumed | `MAX_LEASE_DEPOSIT` is in base units, so the ceiling tightens as the scale grows |
+| Provider lists a price no consumer can rent | `MAX_RATE_PER_CALL = MAX_LEASE_DEPOSIT`, so the cheapest lease of any listed service is fundable |
 | Duration overflow wraps expiry | `checked_add` → `Overflow` |
+| Delegate locks a consumer's deposit unilaterally | `create_lease_for` requires the consumer's `require_auth()` as well; no state changes without both |
+| Delegate claims a refund it sponsored | refunds and revocation are keyed to `lease.consumer`, and the delegate is never stored on the lease |
+| Provider inflates reported revenue | revoked leases are excluded from `service_stats`; totals use `checked_add` and revert on overflow |
 | Long lease is evicted from storage | `DurationTooLong` + duration-aware TTL extension |
 | Fake "KeyLease" contract id | Only ids in [Deployments](deployments.md) are ours |
-| Silent logic change on upgrade | Admin-only, emits `contract_upgraded`, `contractmeta!` exposes the version |
+| Third party takes over the admin role | `accept_admin` requires the proposed address's auth and a proposal made by the sitting admin; adversarial tests with real auth |
+| Admin role handed to a mistyped or unreachable address | Two-step hand-over: nothing changes until the successor signs `accept_admin` |
+| Forgotten proposal accepted months later | Proposals expire after 7 days (`AdminTransferExpired`); the admin can cancel at any time |
+| Silent logic change on upgrade | 24h delay + admin-only execution, emits `upgrade_proposed`/`contract_upgraded`, `contractmeta!` exposes the version |
+| Upgrade installs code that misreads the stored layout | Storage schema stamp; state-changing calls stop (`SchemaMigrationRequired`) until an explicit, bounded `migrate` |
+| Downgrade to code that cannot read newer data | Stopped with `SchemaVersionUnsupported`; `migrate` refuses, only re-upgrading resumes |
+
+## Running with a multisig admin
+
+KeyLease stores the admin as a standard Soroban `Address`. In production, operators
+should avoid using a single hot keypair for the admin role. Instead, the admin
+can be a native Stellar multi-signature account (`G...`) or a multisig smart contract.
+
+### Host-enforced authentication
+
+When `admin.require_auth()` is called inside `set_token` or `upgrade`:
+
+- If `admin` is a Stellar account, Soroban's runtime delegates authentication to
+  Stellar's native account signing engine.
+- If the account is configured with multi-signature weights and operation thresholds
+  (e.g., medium threshold for contract invocations), the Stellar host requires
+  signatures that satisfy the threshold before the invocation transaction can execute.
+- The contract does not need special multisig code; multi-signature security is
+  enforced natively at the protocol host layer.
+
+### What the contract can and cannot enforce
+
+| Scope | Contract capability | Details |
+| --- | --- | --- |
+| **Can enforce** | Execution authority (`require_auth`) | Ensures that the admin account legitimately approved the call based on Stellar's consensus rules |
+| **Cannot enforce** | Signer composition | The contract cannot inspect individual signers, public keys, or individual weights |
+| **Cannot enforce** | Minimum threshold | The contract cannot verify whether the admin account is 1-of-1, 2-of-3, or 3-of-5 |
+| **Cannot enforce** | Signer set immutability | Signers and thresholds can be modified on the Stellar account via standard `SetOptions` operations without contract interaction |
+
+## Audit status
+
+**No external audit of this contract has been performed.** As of v0.2.1 no third
+party has reviewed, formally verified or signed off on `contracts/registry`. No
+firm is engaged and no report exists. Everything on this page is the project's own
+claim about its own code: read [Guarantees](#guarantees) as a specification of
+what the authors intended, not as an independent finding.
+
+### Coverage that exists
+
+| What | How much | Where |
+| --- | --- | --- |
+| Contract tests | 63 | `contracts/registry/src/test.rs`, run by `cargo test --all` |
+| Documented guarantees | 10 | [Guarantees](#guarantees) |
+| Invariants asserted in tests | 5 | [Invariants](#invariants) |
+| Threats modelled | 14 | [Threats considered](#threats-considered) |
+| CI gates | 9 | `Format`, `Clippy`, `Test`, `Build (wasm32v1-none)`, `Secret Scan` (gitleaks), `Spell Check`, `Markdown Lint`, `Dependency Policy` (cargo-deny) and `Malware Scan` (ClamAV) in [`.github/workflows/ci.yml`](https://github.com/KeyLease-Security/keylease-core/blob/main/.github/workflows/ci.yml) |
+
+The counts are as of the revision this page is written against; each one is
+mechanically checkable from the file it names.
+
+Two of the 63 tests matter more than the rest, because they attack the contract
+instead of exercising it:
+
+- `test_reentrant_token_cannot_settle_a_lease_twice` registers a hostile token
+  whose `transfer` calls back into `settle_lease` while the first settlement is
+  still paying out. The attack is attempted once, and the test asserts the
+  re-entrant call errored and the lease ended up settled exactly once. This is
+  the only executable proof of the checks-effects-interactions ordering, and it
+  is the property that makes a malicious token non-exploitable rather than merely
+  inconvenient.
+- the full lifecycle test escrowed with the **real Stellar Asset Contract**
+  (`env.register_stellar_asset_contract_v2`) rather than `contracts/mock_token`,
+  so the money paths are checked against a token this project does not control.
+
+### What that coverage does not establish
+
+A green suite is easy to over-read, so the limits are stated explicitly.
+
+- **The threat model may be incomplete.** The 14 rows are the threats the authors
+  thought of. The main value of an audit is the rows it adds, and by definition
+  none of those are here yet.
+- **Arbitrary tokens are out of scope.** `set_token` accepts any SEP-41 address.
+  The suite proves the registry survives a re-entrant token; it cannot prove
+  anything about a token that deviates from the interface in ways the registry
+  does not expect.
+- **Only simulated-ledger behaviour is tested.** The tests run against the
+  `soroban-sdk` `Env`, not a deployed network, so instruction-footprint limits,
+  eviction under real storage pressure, and consensus-timing edges are not
+  covered here. The `soroban-sdk` test host does not enforce `maxEntryTtl` on
+  `extend_ttl` at all, so the TTL clamp is asserted from the policy value rather
+  than demonstrated as a host rejection. Read the TTL rules in the
+  [contract reference](contract-reference.md#storage-classes-and-ttl-policies) as
+  analysis, not as measurement.
+- **State growth is bounded per call, not in aggregate.** `bump_service` and
+  `bump_lease` are permissionless and each one charges its rent to the caller,
+  which is what makes them safe to expose — but nothing here bounds how many
+  entries may be kept alive or by whom. Persistent state that outlives its
+  usefulness is an operational cost, and the suite does not price it.
+- **Client code and provider middleware are not this contract.** Anything
+  integrating per [Integration](integration.md) is outside the audited surface,
+  and outside the surface these guarantees describe.
+- **The documentation itself is unaudited.** A page that describes behaviour the
+  code does not have is precisely the defect an audit catches and a test suite
+  cannot.
+
+### What a mainnet deployment would require
+
+[Deployments](deployments.md#mainnet) records Mainnet as ⛔ not deployed, and
+[Deployment → Mainnet](deployment.md#mainnet) gives the reason: deployment is
+deferred until the contract is audited. Audited is a process, not a badge, so the
+gate list a mainnet launch would have to clear first is:
+
+1. **An independent audit** by a contract-security firm, with the report
+   published and linked from the release notes and
+   [SECURITY.md](https://github.com/KeyLease-Security/keylease-core/blob/main/SECURITY.md).
+   A private report that stays private does not count as clearing this.
+2. **Findings fixed and re-proved.** Every High and Medium with a code fix and a
+   test in `contracts/registry/src/test.rs` that fails without the fix. Per
+   [the developer guide](developer-guide.md), each security-sensitive change gets
+   an adversarial case, not just a happy path.
+3. **Upgrade trust bounded.** Today a single admin key can swap the Wasm and
+   rewrite the escrow rules. Before mainnet value is in range, that key should be
+   multisig or timelocked, and the timelock itself reviewed (see
+   [Known limitations](#known-limitations)).
+4. **A live operation path.** Someone watching the event stream, a named owner
+   for the deployment, and a written response procedure. There is no
+   protocol-wide pause: `set_service_active(provider, service_id, false)` blocks
+   *new* leases on one service and leaves in-flight leases valid, and `upgrade` is
+   admin-only. That is a throttle, not a kill switch.
+5. **A staged value ramp.** Deploy, cap total escrow to something you would
+   accept losing, run real lease cycles against the cap, and only then raise it.
+6. **A verifiable record.** The mainnet contract id, Wasm hash and version in
+   [`docs/deployments.md`](deployments.md), each confirmed on-chain through
+   `version()`, `get_admin()` and `get_token()` rather than taken from the page.
+
+Until 1 through 4 are done, this contract is for Testnet and for limited-value
+evaluation. On Testnet every failure mode above costs an afternoon of redeploying
+fake XLM; on Mainnet it costs someone's deposit.
 
 ## Known limitations
 
 These are real and tracked as Drips Wave issues rather than hidden.
 
-- **Upgrade trust.** The admin can replace the contract Wasm. This is a
-  deliberate operational capability, but it means a compromised admin key can
-  change protocol rules. A timelock or multisig requirement is future work.
-- **Provider key rotation requires the old key.** `transfer_service` moves a
-  service — and the right to settle its in-flight leases — to a new address, but
-  only the address that owns it can authorize the hand-over, and the new address
-  is not asked to accept it. A lost provider key therefore cannot be recovered
-  by the protocol; the admin cannot reassign a service, by design, because that
-  would be a path by which a third party seizes a service.
+- **Upgrade trust.** The admin can replace the contract Wasm. While using a multisig
+  admin prevents a single compromised key from executing an unauthorized upgrade,
+  adding an on-chain timelock to upgrades remains future work.
+- **No provider key rotation.** A service is bound to the address that registered
+  it. Transferring a service is a `wave-medium` issue.
 - **No rate updates.** Changing `rate_per_call` requires registering a new
   service; in-flight leases keep their original escrow.
+- **Settlement disputes are adjudicated, not proven.** The contract trusts the
+  provider's `verified_calls` unless the consumer challenges it. The challenge is
+  a 32-byte evidence commitment, and the admin decides off chain; the contract
+  cannot verify usage or evidence. Consumers are still protected by the fixed
+  allotment and the refund path.
+- **Resolution depends on the admin.** A challenged settlement stays locked until
+  the admin acts. Settlement entries live for the standard ~30-day persistent TTL,
+  so disputes should be resolved well inside that horizon.
+- **Early cancellation depends on the provider.** A consumer cannot exit early
+  unilaterally; if the provider never approves or rejects, the lease runs to
+  expiry and the normal revoke path applies. There is no penalty scheme yet.
+- **Transfers are final.** `transfer_lease` is a direct assignment: the recipient
+  does not accept, and there is no protocol-level reversal. A mistyped address
+  hands the lease (and its refund right) to an unreachable account.
 - **Settlement is a single report.** The contract trusts the provider's
   `verified_calls`; it cannot independently observe HTTP usage. Consumers are
   protected by the fixed allotment and the refund path, not by proof of
   non-delivery.
-- **Not audited.** Do not escrow mainnet value you would be unhappy to lose.
+- **Not audited, and nothing on this page substitutes for it.** See
+  [Audit status](#audit-status).
+
+## Secret scanning
+
+Pull requests are scanned for committed secrets with
+[gitleaks](https://github.com/gitleaks/gitleaks) in CI (`Secret Scan` job). The
+scan uses a pinned gitleaks version, fails on findings, and reads allowlist
+entries only from `.gitleaks.toml`. Add allowlist entries only for documented
+false positives and include a comment explaining why the match is not a secret.
+
+Run locally before opening a PR:
+
+```bash
+gitleaks detect --source . --redact --verbose --config .gitleaks.toml
+```
 
 ## Deployment hygiene
 
 - Only trust contract ids in [`docs/deployments.md`](deployments.md).
 - The admin key should be a cold or multisig Stellar account. It can change the
-  escrow token and upgrade the contract.
+  escrow token and propose/cancel upgrades, but execution waits 24h on-ledger.
+  Rotate it with `propose_admin` followed by `accept_admin` from the new
+  account; a key that is already lost cannot propose, so rotate *before*
+  retiring a key, and prefer a multisig admin whose signers can be replaced at
+  the account level.
 - Verify the deployed metadata and configuration after deploy:
 
 ```bash

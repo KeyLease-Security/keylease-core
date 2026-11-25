@@ -5,7 +5,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -18,7 +17,13 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-keylease-mock-token = { path = "../mock_token", version = "0.2.1" }
+stellar-xdr = { version = "=26.0.1", default-features = false, features = ["curr", "std", "serde"] }
+serde_json = "1"
+keylease-mock-token = { path = "../mock_token", version = "0.3.0" }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+
+# `keylease_doc_lint` is set only by scripts/check-missing-docs.sh.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(keylease_doc_lint)"] }

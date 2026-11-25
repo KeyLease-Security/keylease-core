@@ -18,6 +18,7 @@ the Stellar ledger holds the truth about every lease.
 | understand what KeyLease is and why it is on Stellar | [Introduction](introduction.md) |
 | see how the contract, storage and events fit together | [Architecture](architecture.md) |
 | understand the state machine, events and the economics | [How the protocol works](protocol.md) |
+| look up a protocol term | [Glossary](glossary.md) |
 | look up an entry point, event or error code | [Contract reference](contract-reference.md) |
 | verify leases from my own service | [Integration](integration.md) |
 | find RPC endpoints, passphrases and SAC addresses | [Networks](networks.md) |
@@ -45,6 +46,12 @@ sequenceDiagram
     P->>R: get_lease(lease_id) / read the event stream
     P-->>P: verify expiry + quota, serve the call
     P->>R: settle_lease(provider, lease_id, verified_calls)
+    R-->>I: lease_settlement_proposed (funds still locked)
+    opt consumer disputes the reported count
+        C->>R: challenge_settlement(consumer, lease_id, evidence_hash)
+        R-->>I: lease_challenged
+    end
+    P->>R: finalize_settlement(lease_id) (after the 24h window)
     R->>T: payout used × rate → provider
     R->>T: refund the remainder → consumer
     R-->>I: lease_settled

@@ -5,7 +5,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 documentation.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -21,3 +20,7 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+
+# `keylease_doc_lint` is set only by scripts/check-missing-docs.sh.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(keylease_doc_lint)"] }

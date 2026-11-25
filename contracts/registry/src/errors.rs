@@ -1,8 +1,10 @@
 use soroban_sdk::contracterror;
 
-/// Contract-level error codes returned by [`crate::KeyLeaseRegistry`].
-///
-/// Codes are stable and start at 1 (`0` is reserved by the host for success).
+/** Contract-level error codes returned by [`crate::KeyLeaseRegistry`].
+ * Codes are stable and start at 1 (`0` is reserved by the host for success).
+ * New codes must be appended; codes are part of the ABI.
+ * The full mapping is pinned by `ERROR_ABI` in `test.rs`; extend it on append.
+ */
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -44,7 +46,68 @@ pub enum Error {
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.
     DepositTooLarge = 17,
-    /// `transfer_service` was called with the address that already owns the
-    /// service.
-    ProviderUnchanged = 18,
+    /// The service has no attestor configured, so `settle_lease_attested` is the
+    /// wrong entry point for it. Plain `settle_lease` is.
+    AttestorNotConfigured = 18,
+    /// The service requires an attestation, and plain `settle_lease` cannot
+    /// supply one.
+    AttestationRequired = 19,
+    /// The attestation is for a different lease, service or call count than the
+    /// settlement it is presented with.
+    AttestationMismatch = 20,
+    /// The attestation's `valid_until` has already passed.
+    AttestationStale = 21,
+    /// There is no pending upgrade to execute or cancel.
+    NoPendingUpgrade = 22,
+    /// The proposed upgrade is still inside its mandatory delay window.
+    UpgradeDelayNotElapsed = 23,
+    /// A page size outside `1..=MAX_PAGE_SIZE`, so serving it would read an
+    /// unbounded number of ledger entries in one transaction.
+    InvalidLimit = 24,
+    /// No early-cancellation request exists for the lease.
+    CancellationNotRequested = 25,
+    /// The lease already has a pending early-cancellation request.
+    CancellationAlreadyRequested = 26,
+    /// Early cancellation is only available before the lease expires.
+    LeaseExpired = 27,
+    /// No settlement has been proposed for the given `lease_id`.
+    SettlementNotFound = 28,
+    /// The settlement has already been finalized; funds have been released.
+    SettlementFinalized = 29,
+    /// The consumer challenge window has closed (or was never open).
+    ChallengeWindowClosed = 30,
+    /// The settlement is already under an active consumer challenge.
+    SettlementChallenged = 31,
+    /// There is no active challenge to cancel or resolve.
+    NoActiveChallenge = 32,
+    /// The challenge window has not closed yet, so the payout stays locked.
+    ChallengeWindowStillOpen = 33,
+    /// The challenge evidence hash is all zeroes.
+    InvalidEvidence = 34,
+    /// The lease is already settled or revoked and cannot change hands.
+    LeaseNotTransferable = 35,
+    /// The transfer target is the current consumer.
+    InvalidConsumer = 36,
+    /// Published `rate_per_call` exceeds `MAX_RATE_PER_CALL`. Appended after the
+    /// challenge-window and transfer codes so every number already published
+    /// keeps its meaning.
+    RateTooHigh = 37,
+    /// Stored data predates the schema this Wasm was built for. The registry
+    /// is stopped until the admin runs `migrate`.
+    SchemaMigrationRequired = 38,
+    /// Stored data was written by a newer schema than this Wasm understands
+    /// (a downgrade), or no migration path exists. Roll the upgrade back.
+    SchemaVersionUnsupported = 39,
+    /// No admin transfer is pending, so there is nothing to accept or cancel.
+    NoPendingAdminTransfer = 40,
+    /// The pending admin transfer is past its `expires_at` and can no longer
+    /// be accepted. The current admin must propose again.
+    AdminTransferExpired = 41,
+    /// The proposed admin is the current admin; a transfer must change hands.
+    InvalidAdmin = 42,
+    /// `register_service` was called with an all-zero `endpoint_hash`, which
+    /// commits to nothing and is treated as a placeholder. Appended after the
+    /// schema-versioning and admin-transfer codes so every number already
+    /// published keeps its meaning.
+    InvalidEndpointHash = 43,
 }

@@ -1,0 +1,87 @@
+# Dependency updates for keylease-core.
+#
+# The policy these PRs follow — timing, reviewers and the upgrade checklist —
+# is in CONTRIBUTING.md ("Dependency updates"). Every Dependabot PR must pass
+# the required checks, including the "Dependency Policy" advisory scan that
+# runs `cargo deny check` against deny.toml.
+
+version: 2
+
+updates:
+  # Soroban SDK and all transitive crates, resolved through Cargo.lock.
+  # soroban-sdk is workspace-pinned in Cargo.toml; a major bump is never a
+  # routine merge, so it is grouped separately and reviewed under the
+  # "major soroban-sdk upgrade" rules.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    versioning-strategy: "lockfile-only"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+    groups:
+      # Security and patch-level updates: applied fastest, reviewed by one
+      # maintainer, and never bundled with a Soroban SDK major bump.
+      cargo-patch:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        exclude-patterns:
+          # Keep the SDK out of the groups: its major bumps are ignored below,
+          # and an ignore rule must be evaluated on its own, ungrouped update.
+          - "soroban-*"
+        update-types:
+          - "patch"
+      cargo-minor:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "soroban-*"
+        update-types:
+          - "minor"
+    ignore:
+      # soroban-sdk is pinned to the v26 line for the deployed Wasm. A major
+      # upgrade changes the contract ABI and the artifact hash, so it is
+      # opened deliberately by a maintainer, not landed by Dependabot. See
+      # CONTRIBUTING.md for the upgrade and Wasm-hash procedure.
+      - dependency-name: "soroban-sdk"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "soroban-env-guest"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "soroban-env-host"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "soroban-spec"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "soroban-spec-rust"
+        update-types:
+          - "version-update:semver-major"
+
+  # Keep the CI actions themselves current; they run with repository access.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

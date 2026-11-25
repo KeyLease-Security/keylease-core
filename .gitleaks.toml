@@ -1,0 +1,7 @@
+title = "KeyLease gitleaks config"
+
+[extend]
+# Use the built-in gitleaks rules. Add repo-specific false positives as a
+# [[allowlists]] entry with a description and at least one matching rule
+# (commits, paths, regexes or stopwords); gitleaks rejects an empty allowlist.
+useDefault = true
