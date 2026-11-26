@@ -23,3 +23,7 @@ keylease-mock-token = { path = "../mock_token", version = "0.3.0" }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+
+# `keylease_doc_lint` is set only by scripts/check-missing-docs.sh.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(keylease_doc_lint)"] }

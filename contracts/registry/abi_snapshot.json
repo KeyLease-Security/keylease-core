@@ -1,7 +1,7 @@
 [
   {
     "function_v0": {
-      "doc": "Initialize the registry and appoint `admin`.\\n\\nCan only be called once. The admin is the only account allowed to\\nconfigure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via\\n[`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and\\n[`KeyLeaseRegistry::cancel_upgrade`].",
+      "doc": "Initialize the registry and appoint `admin`.\\n\\nCan only be called once. The admin is the only account allowed to\\nconfigure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via\\n[`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and\\n[`KeyLeaseRegistry::cancel_upgrade`].\\nThe role can later be handed over with [`KeyLeaseRegistry::propose_admin`]\\nand [`KeyLeaseRegistry::accept_admin`].",
       "name": "init",
       "inputs": [
         {
@@ -48,7 +48,7 @@
   },
   {
     "function_v0": {
-      "doc": "Queue a Wasm upgrade behind the mandatory [`UPGRADE_DELAY_SECS`] delay.\\n\\nAdmin only. `new_wasm_hash` is the hash produced by\\n`stellar contract upload`. A new proposal replaces a pending one and\\nrestarts the delay, so the exit window can never be shortened. The hash\\nand the execution ledger timestamp are stored and reported by\\n[`UpgradeProposed`]; clients can read them with\\n[`KeyLeaseRegistry::get_pending_upgrade`].",
+      "doc": "Queue a Wasm upgrade behind the mandatory [`UPGRADE_DELAY_SECS`] delay.\\n\\nAdmin only. `new_wasm_hash` is the hash produced by\\n`stellar contract upload`. A new proposal replaces a pending one and\\nrestarts the delay, so the exit window can never be shortened. The hash\\nand the execution ledger timestamp are stored and reported by\\n[`UpgradeProposed`]; clients can read them with\\n[`KeyLeaseRegistry::get_pending_upgrade`].\\n\\nThe upgrade entry points are deliberately **not** gated on the schema\\ncheck: if an upgrade installs the wrong Wasm (for example an older\\nschema, which stops the registry with `SchemaVersionUnsupported`), the\\nadmin must still be able to propose and execute the right one. After an\\nupgrade that raises the schema, every state-changing entry point returns\\n`SchemaMigrationRequired` until [`KeyLeaseRegistry::migrate`] runs.",
       "name": "propose_upgrade",
       "inputs": [
         {
@@ -99,12 +99,101 @@
   },
   {
     "function_v0": {
-      "doc": "Install the pending Wasm, but only once the delay has elapsed. Admin only.\\n\\nBefore execution, `ledger.timestamp()` must have reached the\\n`execute_after` recorded at proposal time; an early call fails with\\n[`Error::UpgradeDelayNotElapsed`]. The proposal is consumed atomically\\nwith the install and [`ContractUpgraded`] reports both the installed hash\\nand the ledger timestamp that had to be reached.\\n\\nThe contract id stays the same; storage, balances and in-flight leases\\nare preserved, which is why upgrades must never change the storage layout.",
+      "doc": "Install the pending Wasm, but only once the delay has elapsed. Admin only.\\n\\nBefore execution, `ledger.timestamp()` must have reached the\\n`execute_after` recorded at proposal time; an early call fails with\\n[`Error::UpgradeDelayNotElapsed`]. The proposal is consumed atomically\\nwith the install and [`ContractUpgraded`] reports both the installed hash\\nand the ledger timestamp that had to be reached.\\n\\nThe contract id stays the same; storage, balances and in-flight leases\\nare preserved, which is why a layout change must bump [`SCHEMA_VERSION`]\\nand ship a migration.",
       "name": "execute_upgrade",
       "inputs": [
         {
           "doc": "",
           "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Migrate stored data to [`SCHEMA_VERSION`] and lift the post-upgrade\\nstop. Admin only. Returns the schema version now in force.\\n\\nRuns every step from the stored version up to the code's version, then\\nstamps the new version, all in one transaction: either the whole path\\napplies or nothing does. Steps are bounded (see `storage::migrate_step`),\\nso a migration never iterates over leases or services.\\n\\n- **Auth:** `admin`, which must be the stored admin.\\n- **Already current:** no-op; nothing is written and no event is\\npublished, so it is safe to call after every upgrade.\\n- **Stored schema newer than this Wasm:** `SchemaVersionUnsupported`;\\nthe upgrade was a downgrade and must be rolled back, not migrated.\\n- **Events:** `schema_migrated { admin, from_version, to_version }`.\\n- **Errors:** `NotInitialized`, `Unauthorized`,\\n`SchemaVersionUnsupported`.",
+      "name": "migrate",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u32",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Propose `new_admin` as the next registry admin and return the ledger\\ntimestamp at which the proposal expires.\\n\\nThis is the first half of a two-step hand-over; nothing changes until\\n`new_admin` calls [`KeyLeaseRegistry::accept_admin`] before `expires_at`\\n(`now + ADMIN_TRANSFER_WINDOW_SECS`). Splitting the hand-over means the\\ncurrent admin's authorization alone can never move the role, and the\\nsuccessor's authorization alone can never claim it.\\n\\n- **Auth:** `admin`, which must be the stored admin.\\n- **Preconditions:** `new_admin` differs from the current admin.\\n- **Effects:** stores (or replaces) the single pending proposal and\\nextends the instance TTL.\\n- **Events:** `admin_transfer_proposed`.\\n- **Errors:** `NotInitialized`, `Unauthorized`, `InvalidAdmin`, `Overflow`,\\n`SchemaMigrationRequired`, `SchemaVersionUnsupported`.",
+      "name": "propose_admin",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "new_admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u64",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Withdraw the pending admin transfer. Admin only.\\n\\nWorks whether or not the proposal has expired, so a stale proposal can\\nalways be cleared explicitly.\\n\\n- **Auth:** `admin`, which must be the stored admin.\\n- **Preconditions:** a proposal is pending.\\n- **Effects:** removes the proposal and extends the instance TTL.\\n- **Events:** `admin_transfer_canceled`.\\n- **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingAdminTransfer`,\\n`SchemaMigrationRequired`, `SchemaVersionUnsupported`.",
+      "name": "cancel_admin_transfer",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Accept a pending admin transfer and become the registry admin.\\n\\nThe second half of the hand-over started by [`KeyLeaseRegistry::propose_admin`].\\nTogether the two calls require authorization from both the outgoing and\\nthe incoming admin, so no third party can take over the registry, and a\\nmistyped or unreachable successor simply never accepts.\\n\\n- **Auth:** `new_admin`, which must be the proposed address.\\n- **Preconditions:** a proposal is pending, it names `new_admin`, it was\\nmade by the admin still in office, and `now < expires_at`.\\n- **Effects:** stores `new_admin` as admin, clears the proposal and\\nextends the instance TTL. The previous admin loses every admin right in\\nthe same transaction.\\n- **Events:** `admin_transfer_accepted`.\\n- **Errors:** `NotInitialized`, `NoPendingAdminTransfer`, `Unauthorized`,\\n`AdminTransferExpired`, `SchemaMigrationRequired`, `SchemaVersionUnsupported`.",
+      "name": "accept_admin",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "new_admin",
           "type_": "address"
         }
       ],
@@ -155,7 +244,7 @@
   },
   {
     "function_v0": {
-      "doc": "Activate or deactivate a service. Only the owning provider may call this.\\n\\nExisting leases remain valid; deactivation only blocks *new* leases.",
+      "doc": "Activate or deactivate a service. Only the owning provider may call this.\\n\\nExisting leases remain valid; deactivation only blocks *new* leases.\\n\\nSetting the status the service already has is an accepted, idempotent\\nwrite rather than an error, so a client may safely retry after a timeout.\\nEach successful call publishes [`ServiceStatusChanged`], including\\na repeat with the same value: the event is the caller's confirmation that\\nthe write landed, and the payload always states the stored status.",
       "name": "set_service_active",
       "inputs": [
         {
@@ -301,7 +390,38 @@
   },
   {
     "function_v0": {
-      "doc": "Settle a lease, paying the provider for `verified_calls` consumed calls\\nand refunding the remainder to the consumer. Requires provider auth.\\n\\nA lease may only be settled when it has **expired** or when\\n`verified_calls == allocated_calls` (the consumer got everything it\\npaid for, so there is no reason to wait). Settling pays out\\n`verified_calls * rate_per_call` and returns\\n`locked_deposit - payout` to the consumer. A lease can be settled once.\\nThe settlement is added to the service's cumulative totals, which\\n[`KeyLeaseRegistry::service_stats`] reports.",
+      "doc": "Transfer a lease to a new consumer, moving the access right and the\\nrefund path together. Requires the current consumer's auth.\\n\\nThe transfer is a direct assignment: the new consumer does not have to\\naccept it. Because the provider and every settlement path read\\n`lease.consumer`, a later settlement refunds `new_consumer` and the old\\nconsumer loses both the access right and any claim on the deposit.\\n\\nOnly an unsettled, unrevoked lease can change hands. A settled lease has\\nno rights left to transfer, and a settled lease is exactly what a\\nproposed settlement produces, so a lease inside a challenge window cannot\\nbe moved out from under its dispute.",
+      "name": "transfer_lease",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "consumer",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "new_consumer",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Propose a settlement and open the consumer challenge window. Requires\\nprovider auth.\\n\\nA lease may only be settled when it has **expired** or when\\n`verified_calls == allocated_calls` (the consumer got everything it\\npaid for, so there is no reason to wait). The proposal records\\n`verified_calls * rate_per_call` as the provider's payout and\\n`locked_deposit - payout` as the consumer's refund, but moves no funds.\\n\\nThe lease can no longer be settled again or revoked from this point. The\\npayout stays locked in escrow for [`CHALLENGE_WINDOW_SECS`] (24 hours),\\nduring which the consumer may call\\n[`crate::KeyLeaseRegistry::challenge_settlement`]. Once the window closes,\\nanyone may call [`crate::KeyLeaseRegistry::finalize_settlement`] to release\\nthe funds. A raised challenge is decided by the admin through\\n[`crate::KeyLeaseRegistry::resolve_challenge`]. The finalized split is\\nadded to the service's cumulative totals, which\\n[`KeyLeaseRegistry::service_stats`] reports.",
       "name": "settle_lease",
       "inputs": [
         {
@@ -372,6 +492,119 @@
   },
   {
     "function_v0": {
+      "doc": "Release a proposed settlement after its challenge window has closed.\\n\\nPermissionless: the provider, the consumer or any keeper can call it once\\n`now >= challengeable_until` and no challenge is active. Funds move to\\nthe provider and consumer exactly as proposed by the provider.",
+      "name": "finalize_settlement",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Dispute a proposed settlement with an evidence hash. Requires consumer\\nauth and must happen inside the challenge window.\\n\\nThe settlement is frozen until the admin resolves the challenge; the\\npayout cannot be finalized while it is active. A consumer may withdraw\\nthe challenge with\\n[`crate::KeyLeaseRegistry::cancel_challenge`].",
+      "name": "challenge_settlement",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "consumer",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "evidence_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Withdraw an active challenge, returning the settlement to `Pending`.\\nRequires consumer auth.\\n\\nCancelling does not pay out immediately: the original challenge window\\nstill has to close before\\n[`crate::KeyLeaseRegistry::finalize_settlement`] can release the funds.\\nWhile the window remains open the consumer may challenge again.",
+      "name": "cancel_challenge",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "consumer",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Resolve an active challenge. Admin only.\\n\\n`upheld = true` refunds the entire deposit to the consumer and pays the\\nprovider nothing. `upheld = false` releases the proposal unchanged. The\\nadmin may resolve before or after the challenge window closes.",
+      "name": "resolve_challenge",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        },
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        },
+        {
+          "doc": "",
+          "name": "upheld",
+          "type_": "bool"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
       "doc": "Reclaim the full deposit for a lease the provider never settled.\\n\\nThe lease must be expired and at least [`SETTLE_GRACE_PERIOD_SECS`]\\n(24 hours) must have elapsed since expiry. Requires `consumer` auth.\\nThis is the consumer's escape hatch: a provider that goes offline cannot\\nstrand escrowed funds.\\n\\nThe lease ends as [`LeaseStatus::Revoked`], distinct from a provider\\nsettlement, and `used_calls` stays `0` because the provider earned\\nnothing. Revocation leaves the service's revenue totals untouched.",
       "name": "revoke_expired_lease",
       "inputs": [
@@ -398,7 +631,7 @@
   },
   {
     "function_v0": {
-      "doc": "Extend the storage entry of a registered service to its standard\\nhorizon. Permissionless.\\n\\nReads stopped extending TTLs (a view that writes the ledger charges the\\ncaller rent and cannot run read-only), so a service that is neither\\ncreated nor updated for 30 days would otherwise be evicted and start\\nanswering `ServiceNotFound` while its leases are still live. This is the\\nexplicit way to prevent that. `create_lease` bumps the service it leases\\nfrom, so an actively-used service never needs this call.\\n\\nThere is no authorisation: the caller pays for the extension out of\\ntheir own transaction fee, the horizon is fixed by the storage policy\\nrather than by the caller, and no lease or balance changes. Bumping a\\nservice you do not own is a donation of rent, not an attack.",
+      "doc": "Extend the storage entry of a registered service to its standard\\nhorizon. Permissionless.\\n\\nReads stopped extending TTLs (a view that writes the ledger charges the\\ncaller rent and cannot run read-only), so a service that is neither\\ncreated nor updated for 30 days would otherwise be evicted and start\\nanswering `ServiceNotFound` while its leases are still live. This is the\\nexplicit way to prevent that. `create_lease` bumps the service it leases\\nfrom, so an actively-used service never needs this call.\\n\\nThere is no authorisation: the caller pays for the extension out of\\ntheir own transaction fee, the horizon is fixed by the storage policy\\nrather than by the caller, and no lease or balance changes. Bumping a\\nservice you do not own is a donation of rent, not an attack.\\n\\nNot gated on the schema check: it changes no stored value, and keeping\\nentries alive is exactly what a stopped registry awaiting `migrate`\\nneeds.",
       "name": "bump_service",
       "inputs": [
         {
@@ -488,11 +721,54 @@
   },
   {
     "function_v0": {
+      "doc": "The pending admin transfer, if any. Pure read.\\n\\nAn expired proposal is still returned (compare `expires_at` with the\\nledger time) until the admin cancels or replaces it; it can no longer be\\naccepted.",
+      "name": "get_pending_admin",
+      "inputs": [],
+      "outputs": [
+        {
+          "option": {
+            "value_type": {
+              "udt": {
+                "name": "PendingAdminTransfer"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
       "doc": "Version string embedded in the Wasm by `contractmeta!`.",
       "name": "version",
       "inputs": [],
       "outputs": [
         "string"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Storage schema the stored data conforms to. Pure read.\\n\\n`0` for a registry deployed before the schema was versioned. When this\\ndiffers from [`KeyLeaseRegistry::code_schema_version`], state-changing calls are\\nstopped until the admin runs [`KeyLeaseRegistry::migrate`]. `NotInitialized` before\\n`init`.",
+      "name": "schema_version",
+      "inputs": [],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "u32",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Storage schema the running Wasm was built for ([`SCHEMA_VERSION`]).\\nPure read.",
+      "name": "code_schema_version",
+      "inputs": [],
+      "outputs": [
+        "u32"
       ]
     }
   },
@@ -684,7 +960,7 @@
   },
   {
     "function_v0": {
-      "doc": "Escrow balance owed to a lease, in token stroops, at the current ledger\\ntime. Pure read.",
+      "doc": "Escrow balance owed to a lease, in token stroops, at the current ledger\\ntime. Includes a proposed settlement's payout and refund until it is\\nfinalized.",
       "name": "locked_balance",
       "inputs": [
         {
@@ -697,6 +973,31 @@
         {
           "result": {
             "ok_type": "i128",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Fetch the settlement proposed for a lease.",
+      "name": "get_settlement",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "lease_id",
+          "type_": "u64"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": {
+              "udt": {
+                "name": "Settlement"
+              }
+            },
             "error_type": "error"
           }
         }
@@ -998,7 +1299,208 @@
   },
   {
     "event_v0": {
-      "doc": "Emitted when a provider settles a lease from escrow.",
+      "doc": "Emitted when a lease is transferred to a new consumer.\\n\\nThe access right and the refund path move together, so an indexer can follow\\nwho is entitled to use the lease and reclaim its deposit.",
+      "lib": "",
+      "name": "LeaseTransferred",
+      "prefix_topics": [
+        "lease_transferred"
+      ],
+      "params": [
+        {
+          "doc": "Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Lease that changed hands.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Previous consumer, which authorized the transfer.",
+          "name": "from",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "New consumer and owner of the refund path.",
+          "name": "to",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a provider proposes a settlement and the consumer challenge\\nwindow opens. No funds move yet.",
+      "lib": "",
+      "name": "LeaseSettlementProposed",
+      "prefix_topics": [
+        "lease_settlement_proposed"
+      ],
+      "params": [
+        {
+          "doc": "Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Lease being settled.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Provider that proposed the settlement.",
+          "name": "provider",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Calls the provider reported as consumed.",
+          "name": "verified_calls",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Amount the provider receives if the proposal is finalized.",
+          "name": "payout",
+          "type_": "i128",
+          "location": "data"
+        },
+        {
+          "doc": "Amount the consumer receives if the proposal is finalized.",
+          "name": "refund",
+          "type_": "i128",
+          "location": "data"
+        },
+        {
+          "doc": "First ledger timestamp at which the proposal may be finalized.",
+          "name": "challengeable_until",
+          "type_": "u64",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a consumer disputes a proposed settlement.",
+      "lib": "",
+      "name": "LeaseChallenged",
+      "prefix_topics": [
+        "lease_challenged"
+      ],
+      "params": [
+        {
+          "doc": "Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Lease whose settlement was challenged.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Consumer that filed the challenge.",
+          "name": "consumer",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Commitment to the consumer's evidence.",
+          "name": "evidence_hash",
+          "type_": {
+            "bytes_n": {
+              "n": 32
+            }
+          },
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a consumer withdraws their challenge.",
+      "lib": "",
+      "name": "LeaseChallengeCancelled",
+      "prefix_topics": [
+        "lease_challenge_cancelled"
+      ],
+      "params": [
+        {
+          "doc": "Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Lease whose challenge was withdrawn.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Consumer that withdrew the challenge.",
+          "name": "consumer",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin resolves a challenge.",
+      "lib": "",
+      "name": "LeaseChallengeResolved",
+      "prefix_topics": [
+        "lease_challenge_resolved"
+      ],
+      "params": [
+        {
+          "doc": "Schema version of this payload; see [`EVENT_SCHEMA_VERSION`].",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Lease whose challenge was resolved.",
+          "name": "lease_id",
+          "type_": "u64",
+          "location": "topic_list"
+        },
+        {
+          "doc": "Admin that resolved the challenge.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "`true` if the consumer's dispute was upheld.",
+          "name": "upheld",
+          "type_": "bool",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when a settlement is finalized and funds leave escrow.",
       "lib": "",
       "name": "LeaseSettled",
       "prefix_topics": [
@@ -1200,6 +1702,142 @@
     }
   },
   {
+    "event_v0": {
+      "doc": "Emitted when the admin migrates stored data to the running Wasm's schema,\\nlifting the stop that an upgrade put in place.",
+      "lib": "",
+      "name": "SchemaMigrated",
+      "prefix_topics": [
+        "schema_migrated"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs. (Not the storage schema.)",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that authorized the migration.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Storage schema the data conformed to before the migration.",
+          "name": "from_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Storage schema the data conforms to now.",
+          "name": "to_version",
+          "type_": "u32",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin proposes handing the registry to `new_admin`.\\n\\nNothing changes until `new_admin` accepts. A later proposal supersedes this\\none, so an indexer should treat the most recent `admin_transfer_proposed`\\nas the only live proposal.",
+      "lib": "",
+      "name": "AdminTransferProposed",
+      "prefix_topics": [
+        "admin_transfer_proposed"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Current admin that authorized the proposal.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Address that must accept to become admin.",
+          "name": "new_admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Ledger timestamp from which the proposal can no longer be accepted.",
+          "name": "expires_at",
+          "type_": "u64",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin withdraws a pending transfer before it is accepted.",
+      "lib": "",
+      "name": "AdminTransferCanceled",
+      "prefix_topics": [
+        "admin_transfer_canceled"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Current admin that authorized the cancellation.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Address whose proposal was withdrawn.",
+          "name": "new_admin",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the proposed admin accepts and the registry changes hands.",
+      "lib": "",
+      "name": "AdminTransferAccepted",
+      "prefix_topics": [
+        "admin_transfer_accepted"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that proposed the transfer and no longer holds the role.",
+          "name": "previous_admin",
+          "type_": "address",
+          "location": "data"
+        },
+        {
+          "doc": "Address that authorized the acceptance and is now the admin.",
+          "name": "new_admin",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
     "udt_error_enum_v0": {
       "doc": "Contract-level error codes returned by [`crate::KeyLeaseRegistry`].\\n * Codes are stable and start at 1 (`0` is reserved by the host for success).\\n * New codes must be appended; codes are part of the ABI.\\n * The full mapping is pinned by `ERROR_ABI` in `test.rs`; extend it on append.",
       "lib": "",
@@ -1341,9 +1979,84 @@
           "value": 27
         },
         {
-          "doc": "Published `rate_per_call` exceeds `MAX_RATE_PER_CALL`. Appended after the\\nearly-cancellation codes, so every number already published keeps its\\nmeaning.",
-          "name": "RateTooHigh",
+          "doc": "No settlement has been proposed for the given `lease_id`.",
+          "name": "SettlementNotFound",
           "value": 28
+        },
+        {
+          "doc": "The settlement has already been finalized; funds have been released.",
+          "name": "SettlementFinalized",
+          "value": 29
+        },
+        {
+          "doc": "The consumer challenge window has closed (or was never open).",
+          "name": "ChallengeWindowClosed",
+          "value": 30
+        },
+        {
+          "doc": "The settlement is already under an active consumer challenge.",
+          "name": "SettlementChallenged",
+          "value": 31
+        },
+        {
+          "doc": "There is no active challenge to cancel or resolve.",
+          "name": "NoActiveChallenge",
+          "value": 32
+        },
+        {
+          "doc": "The challenge window has not closed yet, so the payout stays locked.",
+          "name": "ChallengeWindowStillOpen",
+          "value": 33
+        },
+        {
+          "doc": "The challenge evidence hash is all zeroes.",
+          "name": "InvalidEvidence",
+          "value": 34
+        },
+        {
+          "doc": "The lease is already settled or revoked and cannot change hands.",
+          "name": "LeaseNotTransferable",
+          "value": 35
+        },
+        {
+          "doc": "The transfer target is the current consumer.",
+          "name": "InvalidConsumer",
+          "value": 36
+        },
+        {
+          "doc": "Published `rate_per_call` exceeds `MAX_RATE_PER_CALL`. Appended after the\\nchallenge-window and transfer codes so every number already published\\nkeeps its meaning.",
+          "name": "RateTooHigh",
+          "value": 37
+        },
+        {
+          "doc": "Stored data predates the schema this Wasm was built for. The registry\\nis stopped until the admin runs `migrate`.",
+          "name": "SchemaMigrationRequired",
+          "value": 38
+        },
+        {
+          "doc": "Stored data was written by a newer schema than this Wasm understands\\n(a downgrade), or no migration path exists. Roll the upgrade back.",
+          "name": "SchemaVersionUnsupported",
+          "value": 39
+        },
+        {
+          "doc": "No admin transfer is pending, so there is nothing to accept or cancel.",
+          "name": "NoPendingAdminTransfer",
+          "value": 40
+        },
+        {
+          "doc": "The pending admin transfer is past its `expires_at` and can no longer\\nbe accepted. The current admin must propose again.",
+          "name": "AdminTransferExpired",
+          "value": 41
+        },
+        {
+          "doc": "The proposed admin is the current admin; a transfer must change hands.",
+          "name": "InvalidAdmin",
+          "value": 42
+        },
+        {
+          "doc": "`register_service` was called with an all-zero `endpoint_hash`, which\\ncommits to nothing and is treated as a placeholder. Appended after the\\nschema-versioning and admin-transfer codes so every number already\\npublished keeps its meaning.",
+          "name": "InvalidEndpointHash",
+          "value": 43
         }
       ]
     }

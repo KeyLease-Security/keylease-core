@@ -361,6 +361,13 @@ stellar contract invoke --id $REGISTRY --source-account admin --network testnet 
 Rules for upgrades:
 
 - Never change the `DataKey` layout or the meaning of stored values.
+- Append fields to a `#[contracttype]` struct; never reorder, rename or remove
+  one. A struct decodes by unpacking the field names it declares, so a missing
+  field makes existing entries undecodable. `Lease.created_at` is the worked
+  example: it was appended, and `storage::get_lease` keeps a legacy fallback that
+  reads pre-`created_at` entries and reports `created_at = 0` (unknown) so
+  settlement and refunds still work across the upgrade. Add the same fallback, or
+  drain the affected entries, whenever you extend a stored type.
 - Never renumber or reuse an error code.
 - Keep event names and payload fields compatible; add new events for new
   transitions.
@@ -385,6 +392,7 @@ If you must read storage directly, `#[contracttype]` enums encode as an
 | `DataKey::Admin` | `Symbol("Admin")` |
 | `DataKey::Lease(7)` | `Vec[Symbol("Lease"), u64(7)]` |
 | `DataKey::Service(3)` | `Vec[Symbol("Service"), u64(3)]` |
+| `DataKey::Settlement(7)` | `Vec[Symbol("Settlement"), u64(7)]` |
 | `DataKey::CancelRequest(7)` | `Vec[Symbol("CancelRequest"), u64(7)]` |
 
 With `@stellar/stellar-sdk`:
@@ -401,9 +409,11 @@ xdr.ScVal.scvVec([
 
 `getContractData` returns a `scvMap` of the `Lease` struct fields. Decode it as
 `{ lease_id, service_id, consumer, allocated_calls, used_calls, expires_at,
-locked_deposit, settled }`. Full details are in the
-[contract reference](contract-reference.md#storage-layout), and the supported
-way to verify leases is described in [Integration](integration.md).
+locked_deposit, settled }`. A proposed settlement is a separate
+`Settlement(u64)` entry; prefer the `get_settlement` view over raw storage. Full
+details are in the [contract reference](contract-reference.md#storage-layout),
+and the supported way to verify leases is described in
+[Integration](integration.md).
 
 ## Deploying
 
@@ -568,9 +578,11 @@ terminal; a day-long lease is not a sandbox demo.
 
 ### 6. Settle it
 
-`settle_lease` runs when the lease has **expired**, or when the provider reports
-full consumption — whichever comes first. Reporting everything immediately is the
-fastest path through the happy case:
+`settle_lease` proposes a payout when the lease has **expired**, or when the
+provider reports full consumption — whichever comes first. It does not move funds:
+the consumer has a 24-hour challenge window, after which `finalize_settlement`
+releases them. Reporting everything immediately is the fastest path through the
+happy case:
 
 ```bash
 stellar contract invoke --id "$REGISTRY" --source-account kl-provider \
@@ -580,7 +592,8 @@ stellar contract invoke --id "$REGISTRY" --source-account kl-provider \
 ```
 
 Payout and refund must sum to the deposit, so 100 verified of 100 allocated pays
-the provider 10 XLM and refunds 0. Create a second lease and settle it
+the provider 10 XLM and refunds 0 once the challenge window closes and anyone
+calls `finalize_settlement --lease_id "$LEASE_ID"`. Create a second lease and settle it
 *partially* before it expires to see the guard refuse:
 
 ```bash

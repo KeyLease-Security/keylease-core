@@ -45,7 +45,7 @@ step()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 info()  { printf '    %s\n' "$*"; }
 die()   { printf '\n\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-need_value() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"; }
+need_value() { if [ $# -lt 2 ] || [ -z "${2:-}" ]; then die "$1 requires a value"; fi; }
 
 while [ $# -gt 0 ]; do
   case "$1" in

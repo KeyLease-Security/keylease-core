@@ -18,7 +18,7 @@ flowchart TB
     subgraph "Stellar ledger"
         REG[["KeyLeaseRegistry<br/>services · leases · escrow"]]
         TOK[["SEP-41 token<br/>native SAC or custom"]]
-        EV[["Contract events<br/>lease_created · lease_cancelled · lease_settled · lease_revoked"]]
+        EV[["Contract events<br/>lease_created · lease_transferred · settlement_proposed · challenged · lease_settled · lease_revoked"]]
     end
 
     DEV -- "create_lease (auth: consumer)" --> REG
@@ -36,14 +36,15 @@ A pure Rust Soroban contract. It is the only component that can move value.
 | Module | Role |
 | --- | --- |
 | `lib.rs` | Entry points, `contractmeta!`, upgrade, lifecycle documentation. |
-| `types.rs` | `Service`, `Lease`, `ServiceStats`, `LeaseStatus`. |
+| `types.rs` | `Service`, `Lease`, `ServiceStats`, `LeaseStatus`, `Settlement`, `SettlementState`. |
 | `storage.rs` | `DataKey` layout, instance/persistent split, duration-aware TTL policy. |
 | `events.rs` | Typed `#[contractevent]` payloads for every transition. |
 | `errors.rs` | Stable error codes (part of the ABI). |
 
 The registry is deliberately small. It does not know what an HTTP request is,
 what the endpoint does, or who is calling it. It knows `service_id`,
-`allocated_calls`, `expires_at` and `locked_deposit`.
+`allocated_calls`, `expires_at`, `locked_deposit` and — once a provider settles —
+the proposed payout/refund split and any consumer challenge against it.
 
 ### SEP-41 token
 
@@ -65,7 +66,7 @@ standard Stellar tooling:
 | Consumer | How it reads the protocol |
 | --- | --- |
 | Provider request path | `get_lease` over Soroban RPC (cached for a short TTL), or a local projection built from the event stream. |
-| Accounting / dashboards | `stellar events`, Horizon or an indexer subscribing to `lease_created` / `lease_cancelled` / `lease_settled` / `lease_revoked`. |
+| Accounting / dashboards | `stellar events`, Horizon or an indexer subscribing to `lease_created` / `lease_transferred` / `lease_settlement_proposed` / `lease_challenged` / `lease_cancelled` / `lease_settled` / `lease_revoked`. |
 | CLI tooling | `stellar contract invoke` for writes and reads (reads need any funded `--source-account`). |
 
 See [Integration](integration.md) for the concrete verification pipeline.
@@ -94,6 +95,15 @@ sequenceDiagram
         P-->>C: 401 / 403 / 429
     end
     P->>R: settle_lease(provider, lease_id, verified_calls)
+    R-->>P: lease_settlement_proposed event (funds still locked)
+    Note over C,R: 24h consumer challenge window
+    C->>R: challenge_settlement(consumer, lease_id, evidence_hash)  (optional)
+    R-->>P: lease_challenged event (payout frozen)  (optional)
+    alt no challenge, or consumer cancelled
+        P->>R: finalize_settlement(lease_id)
+    else challenge active
+        R->>R: resolve_challenge(admin, lease_id, upheld)
+    end
     R->>T: payout + refund
     R-->>P: lease_settled event
 ```
@@ -136,7 +146,7 @@ and the lease record are the same transaction, so either both are visible
 on-chain or neither is. A consumer that cannot fund the deposit never gets a
 lease id.
 
-### 2. `settle_lease` — two transfers, out of escrow
+### 2. `settle_lease` → `finalize_settlement` — two transfers, out of escrow
 
 ```mermaid
 sequenceDiagram
@@ -149,10 +159,14 @@ sequenceDiagram
     P->>R: settle_lease(provider, lease_id, verified_calls)
     Note over P,R: AUTH — provider.require_auth()
     Note over R: CHECKS — lease not settled, verified_calls ≤ allocated_calls,<br/>caller owns the service, and (expired OR verified_calls == allocated_calls)
-    Note over R: STATE WRITE — Lease(lease_id).used_calls = verified_calls and<br/>settled = true, persisted BEFORE any token call
-    R->>T: TRANSFER OUT 1 — transfer(registry → provider, verified_calls × rate_per_call)
+    Note over R: STATE WRITE — Lease(lease_id).used_calls = verified_calls and<br/>settled = true, plus Settlement(lease_id) = Pending
+    Note over R: EVENT — lease_settlement_proposed, topic lease_id, payload includes<br/>payout, refund and challengeable_until. No token call yet.
+    Note over C,R: 24h consumer challenge window; an admin may resolve a challenge
+    R->>R: finalize_settlement(lease_id) (permissionless, after the window)
+    Note over R: STATE WRITE — Settlement.state = Finalized and ServiceStats updated,<br/>persisted BEFORE any token call
+    R->>T: TRANSFER OUT 1 — transfer(registry → provider, payout)
     T-->>P: payout
-    R->>T: TRANSFER OUT 2 — transfer(registry → consumer, locked_deposit − payout)
+    R->>T: TRANSFER OUT 2 — transfer(registry → consumer, refund)
     T-->>C: refund
     Note over R: EVENT — lease_settled, topic lease_id, payload { schema_version,<br/>provider, verified_calls, payout, refund }
     R-->>P: ok
@@ -160,10 +174,11 @@ sequenceDiagram
 
 `payout + refund == locked_deposit` always, and a leg of zero is skipped rather
 than emitted as a transfer. The `STATE WRITE` above the two arrows is what makes
-the pair atomic against a malicious token: after a re-entrant call the lease
-already reads `settled`, so the second settlement attempt fails with
-`LeaseAlreadySettled` (7) instead of paying twice.
-`test_reentrant_token_cannot_settle_a_lease_twice` holds that line.
+the pair atomic against a malicious token: after a re-entrant call the settlement
+already reads `Finalized`, so a second payout fails with `SettlementFinalized`
+(29) instead of paying twice. `test_reentrant_token_cannot_settle_a_lease_twice`
+holds that line. A challenged settlement is frozen until the admin resolves it;
+an upheld challenge pays the consumer the full deposit instead.
 
 ### 3. `revoke_expired_lease` — one transfer, after the grace window
 
@@ -197,7 +212,8 @@ was never paid for.
 | Path | Who authenticates | State written first | Token transfers out |
 | --- | --- | --- | --- |
 | `create_lease` | consumer | `Lease(lease_id)`, `LeaseCount` | — (one transfer **in**) |
-| `settle_lease` | provider (must own the service) | `used_calls`, `settled = true` | payout + refund |
+| `transfer_lease` | current consumer | `Lease.consumer`, pending cancel request cleared | — |
+| `settle_lease` → `finalize_settlement` | provider, then anyone after the challenge window | `used_calls`, `settled = true`, then `Settlement.state = Finalized` | payout + refund |
 | `revoke_expired_lease` | consumer (must be the lease's) | `settled = true` | full `locked_deposit` |
 
 Read the deadlines and the worked numbers in
@@ -225,9 +241,12 @@ claims to represent, and the consumer always has an exit.
 | Key | Storage | TTL policy |
 | --- | --- | --- |
 | `Admin`, `Token` | instance | extended on every state change (≈30 days) |
+| `SchemaVersion` | instance | stamped by `init`, rewritten by `migrate`; see [Storage schema migrations](deployment.md#storage-schema-migrations) |
+| `PendingAdmin` | instance | single admin hand-over awaiting acceptance; shares the instance TTL |
 | `ServiceCount`, `LeaseCount` | instance | same as instance |
 | `Service(u64)` | persistent | extended on save and by `bump_service` (≈30 days) |
 | `Lease(u64)` | persistent | extended for the lease's remaining term **plus** the 24h grace window and a one-day read buffer, or by `bump_lease` |
+| `Settlement(u64)` | persistent | extended on save and read to the standard ~30-day horizon; keyed by lease id |
 | `ServiceStats(u64)` | persistent | extended on settlement only (≈30 days); derived data, so aging out loses a convenience counter, not money |
 | `LeaseRevoked(u64)` | persistent | written when a consumer reclaims, given the same horizon as its lease in that transaction, so a readable lease always has a readable marker |
 | `CancelRequest(u64)` | persistent | pending early-cancellation request; standard ~30-day TTL, removed on withdraw/reject/approve |

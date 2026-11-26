@@ -4,13 +4,17 @@
 
 | Actor | Address | Can do |
 | --- | --- | --- |
-| **Admin** | one Stellar account | `init` once, `set_token`, `propose_upgrade`/`execute_upgrade`/`cancel_upgrade` (24h delay). Cannot move escrowed funds. |
+| **Admin** | one Stellar account | `init` once, `set_token`, `propose_upgrade`/`execute_upgrade`/`cancel_upgrade` (24h delay), `propose_admin` / `cancel_admin_transfer`. Cannot move escrowed funds. |
 | **Provider** | per service (account or contract address) | Register/pause services, settle leases it owns. |
 | **Consumer** | per lease (account or contract address) | Create leases, revoke expired unsettled leases. |
 | **Delegate** | optional, any account | Sponsor `create_lease_for` for a consumer. Pays the transaction fee only — never the deposit, and holds no claim on the lease. |
 
 The admin is a deployment role. It can point the registry at a token address and
-install a new Wasm, and nothing else. It has no path to user funds.
+install a new Wasm, and nothing else. It has no path to user funds. The role is
+rotated in two steps: the admin proposes a successor with `propose_admin`, and
+the successor takes over by calling `accept_admin` within seven days. Both
+signatures are required, so neither party (nor anyone else) can move the role
+alone.
 
 Because every actor is a Soroban `Address`, the same protocol works for classic
 Stellar accounts (`G…`), multisig accounts and smart contracts (`C…`).
@@ -43,11 +47,18 @@ pub struct Lease {
     pub consumer: Address,
     pub allocated_calls: u32,
     pub used_calls: u32,
-    pub expires_at: u64,       // unix seconds, ledger time
+    pub created_at: u64,       // unix seconds, ledger time of create_lease
+    pub expires_at: u64,       // created_at + duration_secs
     pub locked_deposit: i128,  // rate_per_call * allocated_calls
     pub settled: bool,
 }
 ```
+
+`created_at` and `expires_at` are both ledger timestamps, so a lease's age,
+remaining term and original duration (`expires_at - created_at`) can be derived
+from the stored lease alone. A `created_at` of `0` marks a lease written by a
+release that predates the field; such leases remain settleable and report an
+unknown creation time (see the [contract reference](contract-reference.md#created_at-and-upgrade-compatibility)).
 
 ## Lifecycle
 
@@ -55,12 +66,23 @@ pub struct Lease {
 stateDiagram-v2
     [*] --> Active: create_lease / create_lease_for<br/>(escrow rate × calls)
     Active --> Expired: now ≥ expires_at
-    Active --> Settled: settle_lease<br/>(verified_calls == allocated_calls)
-    Expired --> Settled: settle_lease<br/>(provider, within grace)
+    Active --> SettlementPending: settle_lease<br/>(verified_calls == allocated_calls)
+    Expired --> SettlementPending: settle_lease<br/>(provider, within grace)
     Expired --> Revoked: revoke_expired_lease<br/>(consumer, after 24h grace)
+    SettlementPending --> Challenged: challenge_settlement<br/>(consumer, inside 24h)
+    Challenged --> SettlementPending: cancel_challenge
+    SettlementPending --> Settled: finalize_settlement<br/>(window closed)
+    Challenged --> Settled: resolve_challenge<br/>(admin)
     Settled --> [*]
     Revoked --> [*]
 ```
+
+A settlement is a **two-phase** flow. `settle_lease` proposes a payout and
+refund but moves nothing; the consumer has 24 hours to dispute the reported call
+count; only after that window closes do the funds leave escrow. A raised
+dispute is decided by the registry admin. A lease the provider never settles
+can be reclaimed after the 24-hour expiry grace, ending as `Revoked` instead of
+`Settled`.
 
 `lease_status` derives the state from `settled`, `expires_at` and the lease's
 revocation marker:
@@ -69,7 +91,7 @@ revocation marker:
 | --- | --- | --- |
 | `Active` | `0` | not settled, `now < expires_at` |
 | `Expired` | `1` | not settled, `now ≥ expires_at` |
-| `Settled` | `2` | `settled == true`, provider was paid |
+| `Settled` | `2` | `settled == true`, provider was paid or a settlement is committed |
 | `Revoked` | `3` | `settled == true`, consumer reclaimed the deposit |
 
 Discriminants are **stable on the wire**. They will never be renumbered, and
@@ -112,6 +134,11 @@ The full state-by-event table, including `remaining_calls` and
 and how to consume the two events is in
 [Following the event stream](integration.md#following-the-event-stream).
 
+`lease_status` reports `Settled` as soon as a settlement is proposed, because the
+lease itself can no longer change. Read `get_settlement` to distinguish a pending
+or challenged settlement from funds that have actually been released
+(`SettlementState::Finalized`).
+
 ### When can a lease be settled?
 
 `settle_lease` reverts with `LeaseNotSettleable` unless **either**:
@@ -122,6 +149,54 @@ and how to consume the two events is in
 The second clause is the "consumer got what it paid for" fast path: if every
 allocated call was consumed, the provider should not have to wait for expiry to
 be paid.
+
+Settlement itself does not pay out. It writes a `Settlement` entry with
+`state = Pending` and `challengeable_until = now + CHALLENGE_WINDOW_SECS`
+(24 hours). During that window the consumer may challenge the reported call
+count with an evidence commitment; otherwise anyone can call
+`finalize_settlement` once the window closes.
+
+### The consumer challenge window
+
+| Timestamp | `challenge_settlement` | `finalize_settlement` |
+| --- | --- | --- |
+| `now < challengeable_until` | allowed | `ChallengeWindowStillOpen` |
+| `now ≥ challengeable_until` | `ChallengeWindowClosed` | allowed if `Pending` |
+
+- A **challenge** stores a 32-byte evidence hash and freezes the settlement.
+  While it is active, `finalize_settlement` returns `SettlementChallenged`.
+- The consumer may **cancel** a challenge. The settlement returns to `Pending`;
+  the original deadline is unchanged and cancellation never pays early.
+- The **admin resolves** an active challenge. Upholding it refunds the entire
+  deposit to the consumer and pays the provider nothing; rejecting it releases
+  the original proposal. Resolution may happen before or after the window closes.
+- Once finalized, the settlement is immutable and the lease can never be settled
+  or revoked again.
+
+The lease is marked settled at proposal time, so the consumer cannot revoke while
+a proposal is pending. The challenge window, not the revoke path, is the
+consumer's remedy from that point.
+
+### Transferring a lease
+
+The current consumer may hand a lease to another address with
+`transfer_lease(consumer, lease_id, new_consumer)`. The transfer is an assignment
+— the recipient does not accept — and it moves both the access right and the
+refund path, because every path reads the single `Lease.consumer` field.
+
+- Only an unsettled, unrevoked lease can be transferred (`LeaseNotTransferable`).
+- Self-transfers are rejected (`InvalidConsumer`).
+- An expired but unsettled lease may be transferred: access has lapsed, but the
+  refund claim still belongs to the consumer and can change hands until the
+  provider settles or the consumer revokes.
+- A transfer emits `lease_transferred { lease_id, from, to }`, which indexers use
+  to keep an ownership projection current.
+- Providers must treat `lease.consumer` as mutable: a stale cache can keep
+  admitting the previous owner, so re-read on an ownership mismatch.
+
+A proposed settlement sets `settled`, so ownership freezes when the provider
+proposes a split: the new consumer of record is the one who can challenge and
+receive the refund.
 
 ### Early cancellation with provider consent
 
@@ -247,6 +322,11 @@ spans a contract upgrade stays decodable (see
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
 | `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_transferred` | `lease_id` | `schema_version`, `from`, `to` |
+| `lease_settlement_proposed` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund`, `challengeable_until` |
+| `lease_challenged` | `lease_id` | `schema_version`, `consumer`, `evidence_hash` |
+| `lease_challenge_cancelled` | `lease_id` | `schema_version`, `consumer` |
+| `lease_challenge_resolved` | `lease_id` | `schema_version`, `admin`, `upheld` |
 | `lease_cancellation_requested` | `lease_id` | `schema_version`, `consumer` |
 | `lease_cancellation_rejected` | `lease_id` | `schema_version`, `provider` |
 | `lease_cancellation_withdrawn` | `lease_id` | `schema_version`, `consumer` |
@@ -255,6 +335,10 @@ spans a contract upgrade stays decodable (see
 | `lease_settled` | `lease_id` | `schema_version`, `provider`, `verified_calls`, `payout`, `refund` |
 | `lease_revoked` | `lease_id` | `schema_version`, `consumer`, `refund` |
 | `contract_upgraded` | — | `schema_version`, `admin`, `new_wasm_hash` |
+| `schema_migrated` | — | `schema_version`, `admin`, `from_version`, `to_version` |
+| `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
+| `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
+| `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
 
 `lease_delegated` follows `lease_created` only for a sponsored lease, so
 indexers that ignore it still see every lease.
@@ -290,6 +374,11 @@ payout = 1_000_000 × 320 = 320_000_000   (32 XLM to the provider)
 refund = 500_000_000 − 320_000_000
        = 180_000_000                     (18 XLM back to the consumer)
 ```
+
+Those amounts stay in escrow for the 24-hour challenge window. If the consumer
+does not dispute them, `finalize_settlement` releases 32 XLM to the provider and
+18 XLM to the consumer. If the admin upholds a challenge, the provider receives
+0 and the consumer receives the full 50 XLM.
 
 **2b. Provider goes dark; consumer calls `revoke_expired_lease` after 24h**
 
@@ -375,42 +464,53 @@ provider — before quoting a per-call price.
 
 These must hold for every reachable state. They are asserted in tests.
 
-1. **Conservation.** For every lease, `payout + refund == locked_deposit`.
+1. **Conservation.** For every settlement, `payout + refund == locked_deposit`.
 2. **Single release.** A settled lease can never be settled or revoked again
-   (`LeaseAlreadySettled`), and `settled` is persisted before any token call.
+   (`LeaseAlreadySettled`), and a finalized settlement is persisted before any
+   token call.
 3. **Bounded claim.** A provider can never receive more than
    `allocated_calls × rate_per_call`, and only for a service it owns.
-4. **Guaranteed exit.** Every lease has a consumer path to a full refund.
-5. **Checked math.** Deposit, payout, refund and timestamp arithmetic abort on
-   overflow rather than truncating.
-6. **Consented early exit.** An early cancellation releases `rate × served_calls`
+4. **Locked while disputed.** No payout leaves escrow while a challenge is
+   active; only the admin can resolve it.
+5. **Consented early exit.** An early cancellation releases `rate × served_calls`
    to the provider and `rate × unused_calls` to the consumer, with
    `payout + refund == locked_deposit`, and only after the provider approves.
-7. **Claimable storage.** A lease's persistent entry outlives its term plus the
-   grace window (`MAX_LEASE_DURATION_SECS = 30 days`), and so does the
-   revocation marker recorded against it.
-8. **Funded, computable prices.** `register_service` rejects `rate_per_call`
+6. **Guaranteed exit.** Every lease has a consumer path to a full refund, through
+   the revoke path, the challenge path or an approved early cancellation.
+7. **Checked math.** Deposit, payout and timestamp arithmetic abort on overflow
+   rather than truncating.
+8. **Claimable storage.** A lease's persistent entry outlives its term plus the
+   grace window (`MAX_LEASE_DURATION_SECS = 30 days`), so does the revocation
+   marker recorded against it, and settlement entries are kept for the standard
+   persistent horizon.
+9. **Funded, computable prices.** `register_service` rejects `rate_per_call`
    above `MAX_RATE_PER_CALL`, and `create_lease` rejects a
    `rate_per_call × requested_calls` above `MAX_LEASE_DEPOSIT`. The two bounds
    are the same number, so every listed price can fund at least a one-call lease
    and no accepted lease can quote a deposit `i128` cannot hold.
-9. **Refund ownership.** Whoever created a lease — consumer or delegate — the
-   **consumer** is debited, is the refund recipient, and is the only address
-   that can revoke.
-10. **Distinct closure.** A lease closed by the provider reads `Settled`; one
+10. **Refund ownership.** Whoever created a lease — consumer or delegate — the
+    **consumer** is debited, is the refund recipient, and is the only address
+    that can revoke.
+11. **Distinct closure.** A lease closed by the provider reads `Settled`; one
     reclaimed by the consumer or ended by a cancellation the provider declined
-    reads differently from revenue. Only leases that paid the provider enter
-    `service_stats`.
+    reads differently from revenue. Only finalized settlements that paid the
+    provider enter `service_stats`.
+12. **Single owner.** `Lease.consumer` is the only ownership record, so a
+    transfer moves access and the refund path in one save. A proposed settlement
+    freezes that field until the dispute is resolved.
 
 ## Storage and lifetime
 
 | Key | Storage | Notes |
 | --- | --- | --- |
 | `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
+| `PendingAdmin` | instance | at most one admin hand-over awaiting acceptance; cleared on accept or cancel |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
+| `SchemaVersion` | instance | storage schema the data conforms to; state-changing calls stop while it differs from the running Wasm's |
 | `Service(u64)` | persistent | TTL extended on save, on `create_lease` and by `bump_service`, never by a read |
 | `Lease(u64)` | persistent | TTL extended on save and by `bump_lease`, never by a read |
 | `ProviderServices(Address)` | persistent | service-id index per provider; extended by `save_service`, never by a read |
+| `Settlement(u64)` | persistent | keyed by lease id; extended on save to the ~30-day horizon |
 | `CancelRequest(u64)` | persistent | pending early-cancellation request; cleared on withdraw/reject/approve |
 
 `LEDGER_BUMP_THRESHOLD = 17_280` ledgers (~1 day at 5s ledgers) and

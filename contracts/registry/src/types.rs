@@ -4,7 +4,9 @@ use soroban_sdk::{contracttype, Address, BytesN, Vec};
 ///
 /// `endpoint_hash` commits to the off-chain endpoint metadata (e.g. a SHA-256
 /// digest of the service descriptor) without publishing the static credential
-/// on-chain. Leases are authorized against this commitment.
+/// on-chain. Leases are authorized against this commitment, so the digest must
+/// be derived from the descriptor itself; an all-zero (placeholder) value is
+/// rejected by `register_service`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Service {
@@ -16,11 +18,17 @@ pub struct Service {
     pub rate_per_call: i128,
     /// Whether new leases may be created for this service.
     pub is_active: bool,
-    /// Commitment to the off-chain endpoint descriptor.
+    /// Commitment to the off-chain endpoint descriptor: a digest over the
+    /// descriptor's actual content, never a placeholder. All-zero is rejected.
     pub endpoint_hash: BytesN<32>,
 }
 
 /// A funded, time-bound authorization for a fixed allotment of metered calls.
+///
+/// `created_at` was **appended** to the persisted shape, so entries written by an
+/// earlier release (which lack the field) are decoded by a legacy fallback in
+/// `crate::storage::get_lease` rather than trapping. Never reorder or remove an
+/// existing field: the field list is the storage key set.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lease {
@@ -40,6 +48,12 @@ pub struct Lease {
     pub locked_deposit: i128,
     /// Whether funds have been released (settled by provider or reclaimed by consumer).
     pub settled: bool,
+    /// Unix timestamp (ledger time) of the `create_lease` call, so a lease's age
+    /// is readable from storage instead of being reconstructed from events.
+    ///
+    /// `0` only ever appears on entries written before this field existed; see
+    /// `crate::storage::get_lease` for how those are read.
+    pub created_at: u64,
 }
 
 /// Lifetime settlement totals for one service, keyed by `service_id`.
@@ -147,7 +161,9 @@ pub enum LeaseStatus {
     Active = 0,
     /// Past `expires_at` but not yet settled or revoked.
     Expired = 1,
-    /// Funds have been released; no further state transitions are possible.
+    /// No further lease transitions are possible: the lease was settled,
+    /// revoked, or committed to a proposed settlement. Check `get_settlement`
+    /// to see whether the escrow has actually been released.
     Settled = 2,
     /// Funds were reclaimed by the consumer after the provider failed to
     /// settle. Final, like [`LeaseStatus::Settled`], but economically the
@@ -218,6 +234,52 @@ pub struct UsageAttestation {
     pub signature: BytesN<64>,
 }
 
+/// Lifecycle of a settlement inside the consumer challenge window.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettlementState {
+    /// Proposed and waiting for `challengeable_until`; funds are still locked.
+    Pending = 0,
+    /// The consumer disputed the reported call count; the admin must resolve it.
+    Challenged = 1,
+    /// Funds have been released (paid out or refunded) and nothing can change.
+    Finalized = 2,
+}
+
+/// A provider's proposed split of a lease's escrow, held until the challenge
+/// window closes.
+///
+/// Kept in its own storage entry so the [`Lease`] layout is unchanged by the
+/// challenge-window upgrade.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Settlement {
+    /// Lease being settled.
+    pub lease_id: u64,
+    /// Service the lease belongs to, used to attribute finalized revenue.
+    pub service_id: u64,
+    /// Consumer that receives `refund` and may challenge the proposal.
+    pub consumer: Address,
+    /// Provider that receives `payout`.
+    pub provider: Address,
+    /// Calls the provider reported as consumed.
+    pub verified_calls: u32,
+    /// Amount the provider would receive when finalized.
+    pub payout: i128,
+    /// Amount the consumer would receive when finalized.
+    pub refund: i128,
+    /// Ledger timestamp at which the settlement was proposed.
+    pub proposed_at: u64,
+    /// First ledger timestamp at which the proposal may be finalized.
+    pub challengeable_until: u64,
+    /// Current state of the settlement.
+    pub state: SettlementState,
+    /// Commitment to the active challenge's evidence (all zeroes when none).
+    pub challenge_evidence: BytesN<32>,
+    /// Ledger timestamp at which the active challenge was filed (0 when none).
+    pub challenged_at: u64,
+}
+
 /// A consumer's request to end a lease early with the provider's consent.
 ///
 /// The request carries no refund amount: the provider approves it by reporting
@@ -230,4 +292,24 @@ pub struct CancelRequest {
     pub lease_id: u64,
     /// Ledger timestamp at which the consumer requested cancellation.
     pub requested_at: u64,
+}
+
+/// An admin hand-over that the current admin has proposed and the incoming
+/// admin has not yet accepted.
+///
+/// Stored under `DataKey::PendingAdmin` in instance storage, so it lives exactly
+/// as long as the registry configuration it would change. At most one proposal
+/// exists at a time; a new proposal replaces the previous one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminTransfer {
+    /// Admin that proposed the transfer. Must still be the stored admin when
+    /// the proposal is accepted.
+    pub proposed_by: Address,
+    /// Address that must call `accept_admin` to take over.
+    pub new_admin: Address,
+    /// Ledger timestamp at which the proposal was made.
+    pub proposed_at: u64,
+    /// Ledger timestamp from which the proposal can no longer be accepted.
+    pub expires_at: u64,
 }

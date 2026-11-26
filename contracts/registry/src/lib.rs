@@ -1,4 +1,11 @@
 #![no_std]
+// Documentation coverage (CONTRIBUTING.md#text-and-documentation-checks).
+// `missing_docs` cannot simply be on: the Soroban `#[contract*]` macros emit
+// public items (`spec_xdr`, event `publish`, the client's `new`/`env`/`address`)
+// that carry no docs and cannot be given any, and a lint level cannot be scoped
+// to one macro expansion. scripts/check-missing-docs.sh builds with this cfg and
+// fails on every finding outside those expansions; the Rustdoc job runs it.
+#![cfg_attr(keylease_doc_lint, warn(missing_docs))]
 // No unsafe code in contract crates (CONTRIBUTING.md#unsafe-code-and-std).
 // `forbid` on the deployed Wasm. On the host, soroban-sdk's `testutils`
 // feature registers contracts through `ctor`, whose expansion carries its own
@@ -23,7 +30,11 @@
 //!     |                            |<-- create_lease(calls, secs) --|
 //!     |                            |    (escrow = rate * calls)     |
 //!     |                            |                                |
-//!     |-- settle_lease(used) ----->|  pay provider, refund rest --->|
+//!     |-- settle_lease(used) ----->|  propose payout + refund       |
+//!     |                            |  (24h challenge window opens)  |
+//!                                  |<-- challenge_settlement ------ |
+//!                                  |-- resolve_challenge (admin) -->|
+//!     |                            |  finalize after window         |
 //!                                  |<-- request_early_cancel ------- |
 //!     |-- approve/reject --------->|  consent releases unused funds |
 //!     |                            |                                |
@@ -40,6 +51,9 @@
 //! * A consumer can always reclaim the full deposit if the provider fails to
 //!   settle within [`SETTLE_GRACE_PERIOD_SECS`] of expiry. A reclaimed lease
 //!   ends as `LeaseStatus::Revoked`, so a refund is never mistaken for revenue.
+//! * A settlement does not pay out immediately: the consumer has
+//!   [`CHALLENGE_WINDOW_SECS`] to dispute the reported call count, and the
+//!   admin resolves a raised challenge.
 //! * A published price is bounded by [`MAX_RATE_PER_CALL`], which equals the
 //!   per-lease deposit cap, so the deposit a consumer is quoted can always be
 //!   computed and the cheapest lease of any listed service can always be funded.
@@ -65,9 +79,14 @@
 //!   duration plus the grace period whenever it is written, so escrow cannot
 //!   fall off the ledger. Reads never extend: `bump_lease` and `bump_service`
 //!   keep an entry alive on their own terms (see `storage`).
+//! * **Two-step admin rotation** — the admin role moves only when the current
+//!   admin proposes a successor and that successor authorizes acceptance, so a
+//!   typo or an unreachable address can never strand upgrade and token control.
 //! * **Wasm upgrades** — the admin proposes a new Wasm through the Soroban
 //!   deployer and may only execute it after a 24-hour on-ledger delay, giving
 //!   consumers time to exit; `contractmeta!` identifies the running version.
+//!   The storage schema is versioned: state-changing calls stop until the
+//!   admin runs `migrate` after an upgrade, and a downgrade is rejected.
 
 mod errors;
 mod events;
@@ -85,18 +104,21 @@ mod test_wasm;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String};
 
-use crate::types::CancelRequest;
-
 pub use crate::errors::Error;
 pub use crate::events::{
-    ContractUpgraded, EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
-    LeaseCancellationWithdrawn, LeaseCancelled, LeaseCreated, LeaseDelegated, LeaseRevoked,
-    LeaseSettled, RegistryInitialized, ServiceAttestorSet, ServiceRateUpdated, ServiceRegistered,
-    ServiceStatusChanged, UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
+    AdminTransferAccepted, AdminTransferCanceled, AdminTransferProposed, ContractUpgraded,
+    EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
+    LeaseCancellationWithdrawn, LeaseCancelled, LeaseChallengeCancelled, LeaseChallengeResolved,
+    LeaseChallenged, LeaseCreated, LeaseDelegated, LeaseRevoked, LeaseSettled,
+    LeaseSettlementProposed, LeaseTransferred, RegistryInitialized, SchemaMigrated,
+    ServiceAttestorSet, ServiceRateUpdated, ServiceRegistered, ServiceStatusChanged,
+    UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
 };
+pub use crate::storage::SCHEMA_VERSION;
 pub use crate::types::{
-    Lease, LeasePage, LeaseQuote, LeaseStatus, PendingUpgrade, ProviderServicePage, Service,
-    ServicePage, ServiceStats, UsageAttestation,
+    CancelRequest, Lease, LeasePage, LeaseQuote, LeaseStatus, PendingAdminTransfer, PendingUpgrade,
+    ProviderServicePage, Service, ServicePage, ServiceStats, Settlement, SettlementState,
+    UsageAttestation,
 };
 
 // On-chain contract metadata, readable from the ledger without the source.
@@ -105,6 +127,10 @@ soroban_sdk::contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
 // The event payload schema is versioned independently of the release: `version`
 // moves on every deploy, this only when an event gains or loses a field.
 soroban_sdk::contractmeta!(key = "eventSchemaVersion", val = "1");
+// The storage schema this Wasm reads and writes (`storage::SCHEMA_VERSION`),
+// readable before the Wasm is installed, so a reviewer can tell from the
+// uploaded artifact whether an upgrade will need `migrate`.
+soroban_sdk::contractmeta!(key = "storageSchemaVersion", val = "1");
 soroban_sdk::contractmeta!(
     key = "description",
     val = "Time-bound micro-leases for API/RPC access, escrowed with SEP-41 tokens on Stellar."
@@ -124,6 +150,10 @@ pub const SETTLE_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60;
 /// on-ledger before any new rules can take effect, so a lease created under the
 /// current code can be settled before the contract changes underneath it.
 pub const UPGRADE_DELAY_SECS: u64 = 24 * 60 * 60;
+
+/// Window after a settlement is proposed during which the consumer may dispute
+/// the provider's reported call count. The payout stays locked until it closes.
+pub const CHALLENGE_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 /// Longest lease the TTL policy is guaranteed to keep alive.
 ///
@@ -210,10 +240,10 @@ pub const ATTESTATION_MESSAGE_LEN: usize = ATTESTATION_DOMAIN.len() + 8 + 8 + 4 
 /// signature, which is what makes a mismatched or stale payload detectable
 /// on-chain instead of being a matter of trusting the caller.
 ///
-/// The attestor signs the SHA-256 digest of these bytes; that prehash rule is
-/// Soroban's, not this contract's (`Crypto::ed25519_verify` hashes the message it
-/// is given). Exposed so an attestor service and its callers build the message
-/// with the same code the contract verifies against.
+/// The attestor signs these bytes directly using Ed25519. Soroban's
+/// `Crypto::ed25519_verify` verifies the supplied message as-is, so callers
+/// must not pre-hash it. Exposed so an attestor service and its callers build
+/// the message with the same code the contract verifies against.
 pub fn usage_attestation_message(
     env: &Env,
     lease_id: u64,
@@ -235,6 +265,15 @@ pub fn usage_attestation_message(
     Bytes::from_slice(env, &buf)
 }
 
+/// How long a proposed admin transfer stays acceptable.
+///
+/// Long enough for a multisig successor to collect signatures across time zones,
+/// short enough that a forgotten proposal does not sit around as a latent
+/// hand-over to an address whose key may since have leaked. After the window the
+/// proposal can only be cancelled or replaced, never accepted.
+pub const ADMIN_TRANSFER_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// The KeyLease registry contract: services, escrowed leases and settlement.
 #[contract]
 pub struct KeyLeaseRegistry;
 
@@ -250,12 +289,17 @@ impl KeyLeaseRegistry {
     /// configure the escrow token via [`KeyLeaseRegistry::set_token`] or manage upgrades via
     /// [`KeyLeaseRegistry::propose_upgrade`], [`KeyLeaseRegistry::execute_upgrade`] and
     /// [`KeyLeaseRegistry::cancel_upgrade`].
+    /// The role can later be handed over with [`KeyLeaseRegistry::propose_admin`]
+    /// and [`KeyLeaseRegistry::accept_admin`].
     pub fn init(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
-        if storage::is_initialized(&env) {
+        // A stamped schema without an admin can only come from foreign or
+        // corrupted state; refuse it rather than adopt data we did not write.
+        if storage::is_initialized(&env) || storage::has_schema_version(&env) {
             return Err(Error::AlreadyInitialized);
         }
         storage::set_admin(&env, &admin);
+        storage::set_schema_version(&env, SCHEMA_VERSION);
         storage::extend_instance_ttl(&env);
         RegistryInitialized {
             schema_version: EVENT_SCHEMA_VERSION,
@@ -280,6 +324,7 @@ impl KeyLeaseRegistry {
     pub fn set_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
+        storage::check_schema(&env)?;
 
         // Guard the early return with the authorization above: an unauthorized
         // caller must still get `Unauthorized`, never a silent `Ok(())`.
@@ -306,6 +351,13 @@ impl KeyLeaseRegistry {
     /// and the execution ledger timestamp are stored and reported by
     /// [`UpgradeProposed`]; clients can read them with
     /// [`KeyLeaseRegistry::get_pending_upgrade`].
+    ///
+    /// The upgrade entry points are deliberately **not** gated on the schema
+    /// check: if an upgrade installs the wrong Wasm (for example an older
+    /// schema, which stops the registry with `SchemaVersionUnsupported`), the
+    /// admin must still be able to propose and execute the right one. After an
+    /// upgrade that raises the schema, every state-changing entry point returns
+    /// `SchemaMigrationRequired` until [`KeyLeaseRegistry::migrate`] runs.
     pub fn propose_upgrade(
         env: Env,
         admin: Address,
@@ -366,7 +418,8 @@ impl KeyLeaseRegistry {
     /// and the ledger timestamp that had to be reached.
     ///
     /// The contract id stays the same; storage, balances and in-flight leases
-    /// are preserved, which is why upgrades must never change the storage layout.
+    /// are preserved, which is why a layout change must bump [`SCHEMA_VERSION`]
+    /// and ship a migration.
     pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
@@ -393,26 +446,172 @@ impl KeyLeaseRegistry {
         Ok(())
     }
 
-    /// Trigger an emergency pause. Admin only.
+    /// Migrate stored data to [`SCHEMA_VERSION`] and lift the post-upgrade
+    /// stop. Admin only. Returns the schema version now in force.
     ///
-    /// Blocks `register_service`, `set_service_active`, and `create_lease`.
-    /// Does NOT block `settle_lease` or `revoke_expired_lease`.
-    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+    /// Runs every step from the stored version up to the code's version, then
+    /// stamps the new version, all in one transaction: either the whole path
+    /// applies or nothing does. Steps are bounded (see `storage::migrate_step`),
+    /// so a migration never iterates over leases or services.
+    ///
+    /// - **Auth:** `admin`, which must be the stored admin.
+    /// - **Already current:** no-op; nothing is written and no event is
+    ///   published, so it is safe to call after every upgrade.
+    /// - **Stored schema newer than this Wasm:** `SchemaVersionUnsupported`;
+    ///   the upgrade was a downgrade and must be rolled back, not migrated.
+    /// - **Events:** `schema_migrated { admin, from_version, to_version }`.
+    /// - **Errors:** `NotInitialized`, `Unauthorized`,
+    ///   `SchemaVersionUnsupported`.
+    pub fn migrate(env: Env, admin: Address) -> Result<u32, Error> {
         admin.require_auth();
         require_admin(&env, &admin)?;
-        storage::set_paused(&env, true);
+        let from = storage::stored_schema_version(&env).ok_or(Error::NotInitialized)?;
+        if from == SCHEMA_VERSION {
+            return Ok(SCHEMA_VERSION);
+        }
+        if from > SCHEMA_VERSION {
+            return Err(Error::SchemaVersionUnsupported);
+        }
+
+        // Bounded by the compile-time distance between two schema versions.
+        for version in from..SCHEMA_VERSION {
+            storage::migrate_step(&env, version)?;
+        }
+        storage::set_schema_version(&env, SCHEMA_VERSION);
         storage::extend_instance_ttl(&env);
-        EmergencyPaused { admin }.publish(&env);
+        SchemaMigrated {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            from_version: from,
+            to_version: SCHEMA_VERSION,
+        }
+        .publish(&env);
+        Ok(SCHEMA_VERSION)
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin rotation
+    // -----------------------------------------------------------------------
+
+    /// Propose `new_admin` as the next registry admin and return the ledger
+    /// timestamp at which the proposal expires.
+    ///
+    /// This is the first half of a two-step hand-over; nothing changes until
+    /// `new_admin` calls [`KeyLeaseRegistry::accept_admin`] before `expires_at`
+    /// (`now + ADMIN_TRANSFER_WINDOW_SECS`). Splitting the hand-over means the
+    /// current admin's authorization alone can never move the role, and the
+    /// successor's authorization alone can never claim it.
+    ///
+    /// - **Auth:** `admin`, which must be the stored admin.
+    /// - **Preconditions:** `new_admin` differs from the current admin.
+    /// - **Effects:** stores (or replaces) the single pending proposal and
+    ///   extends the instance TTL.
+    /// - **Events:** `admin_transfer_proposed`.
+    /// - **Errors:** `NotInitialized`, `Unauthorized`, `InvalidAdmin`, `Overflow`,
+    ///   `SchemaMigrationRequired`, `SchemaVersionUnsupported`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<u64, Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::check_schema(&env)?;
+        if new_admin == admin {
+            return Err(Error::InvalidAdmin);
+        }
+
+        let now = env.ledger().timestamp();
+        let expires_at = now
+            .checked_add(ADMIN_TRANSFER_WINDOW_SECS)
+            .ok_or(Error::Overflow)?;
+        storage::set_pending_admin(
+            &env,
+            &PendingAdminTransfer {
+                proposed_by: admin.clone(),
+                new_admin: new_admin.clone(),
+                proposed_at: now,
+                expires_at,
+            },
+        );
+        storage::extend_instance_ttl(&env);
+        AdminTransferProposed {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            new_admin,
+            expires_at,
+        }
+        .publish(&env);
+        Ok(expires_at)
+    }
+
+    /// Withdraw the pending admin transfer. Admin only.
+    ///
+    /// Works whether or not the proposal has expired, so a stale proposal can
+    /// always be cleared explicitly.
+    ///
+    /// - **Auth:** `admin`, which must be the stored admin.
+    /// - **Preconditions:** a proposal is pending.
+    /// - **Effects:** removes the proposal and extends the instance TTL.
+    /// - **Events:** `admin_transfer_canceled`.
+    /// - **Errors:** `NotInitialized`, `Unauthorized`, `NoPendingAdminTransfer`,
+    ///   `SchemaMigrationRequired`, `SchemaVersionUnsupported`.
+    pub fn cancel_admin_transfer(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::check_schema(&env)?;
+        let pending = storage::get_pending_admin(&env).ok_or(Error::NoPendingAdminTransfer)?;
+
+        storage::clear_pending_admin(&env);
+        storage::extend_instance_ttl(&env);
+        AdminTransferCanceled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin,
+            new_admin: pending.new_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
-    /// Resume normal operations after an emergency pause. Admin only.
-    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
-        admin.require_auth();
-        require_admin(&env, &admin)?;
-        storage::set_paused(&env, false);
+    /// Accept a pending admin transfer and become the registry admin.
+    ///
+    /// The second half of the hand-over started by [`KeyLeaseRegistry::propose_admin`].
+    /// Together the two calls require authorization from both the outgoing and
+    /// the incoming admin, so no third party can take over the registry, and a
+    /// mistyped or unreachable successor simply never accepts.
+    ///
+    /// - **Auth:** `new_admin`, which must be the proposed address.
+    /// - **Preconditions:** a proposal is pending, it names `new_admin`, it was
+    ///   made by the admin still in office, and `now < expires_at`.
+    /// - **Effects:** stores `new_admin` as admin, clears the proposal and
+    ///   extends the instance TTL. The previous admin loses every admin right in
+    ///   the same transaction.
+    /// - **Events:** `admin_transfer_accepted`.
+    /// - **Errors:** `NotInitialized`, `NoPendingAdminTransfer`, `Unauthorized`,
+    ///   `AdminTransferExpired`, `SchemaMigrationRequired`, `SchemaVersionUnsupported`.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        new_admin.require_auth();
+        let current = storage::get_admin(&env).ok_or(Error::NotInitialized)?;
+        storage::check_schema(&env)?;
+        let pending = storage::get_pending_admin(&env).ok_or(Error::NoPendingAdminTransfer)?;
+
+        // Only the named successor may accept, and only a proposal made by the
+        // admin still in office counts. The second check cannot fail through
+        // this contract's own entry points (acceptance clears the proposal),
+        // but it keeps a proposal carried across an upgrade from outliving the
+        // admin that made it.
+        if pending.new_admin != new_admin || pending.proposed_by != current {
+            return Err(Error::Unauthorized);
+        }
+        if env.ledger().timestamp() >= pending.expires_at {
+            return Err(Error::AdminTransferExpired);
+        }
+
+        storage::set_admin(&env, &new_admin);
+        storage::clear_pending_admin(&env);
         storage::extend_instance_ttl(&env);
-        EmergencyUnpaused { admin }.publish(&env);
+        AdminTransferAccepted {
+            schema_version: EVENT_SCHEMA_VERSION,
+            previous_admin: current,
+            new_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -432,6 +631,7 @@ impl KeyLeaseRegistry {
         endpoint_hash: BytesN<32>,
     ) -> Result<u64, Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         if storage::is_paused(&env) {
             return Err(Error::ContractPaused);
@@ -446,6 +646,12 @@ impl KeyLeaseRegistry {
         // advertise a service no lease can fund.
         if rate_per_call > MAX_RATE_PER_CALL {
             return Err(Error::RateTooHigh);
+        }
+        // An all-zero digest commits to nothing, so it cannot be a real
+        // endpoint commitment. Reject it here, where the listing is made, so
+        // no service is ever stored with an unattested descriptor.
+        if endpoint_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEndpointHash);
         }
 
         let service_id = storage::next_service_id(&env)?;
@@ -473,6 +679,12 @@ impl KeyLeaseRegistry {
     /// Activate or deactivate a service. Only the owning provider may call this.
     ///
     /// Existing leases remain valid; deactivation only blocks *new* leases.
+    ///
+    /// Setting the status the service already has is an accepted, idempotent
+    /// write rather than an error, so a client may safely retry after a timeout.
+    /// Each successful call publishes [`ServiceStatusChanged`], including
+    /// a repeat with the same value: the event is the caller's confirmation that
+    /// the write landed, and the payload always states the stored status.
     pub fn set_service_active(
         env: Env,
         provider: Address,
@@ -480,6 +692,7 @@ impl KeyLeaseRegistry {
         is_active: bool,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         if storage::is_paused(&env) {
             return Err(Error::ContractPaused);
@@ -519,6 +732,7 @@ impl KeyLeaseRegistry {
         endpoint_hash: BytesN<32>,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let mut service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -573,6 +787,7 @@ impl KeyLeaseRegistry {
         attestor: Option<BytesN<32>>,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -618,6 +833,7 @@ impl KeyLeaseRegistry {
         duration_secs: u64,
     ) -> Result<u64, Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         mint_lease(&env, &consumer, service_id, requested_calls, duration_secs)
     }
@@ -658,6 +874,7 @@ impl KeyLeaseRegistry {
     ) -> Result<u64, Error> {
         delegate.require_auth();
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let lease_id = mint_lease(&env, &consumer, service_id, requested_calls, duration_secs)?;
 
@@ -684,6 +901,7 @@ impl KeyLeaseRegistry {
     /// request with [`KeyLeaseRegistry::withdraw_early_cancel`].
     pub fn request_early_cancel(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         if lease.consumer != consumer {
@@ -722,6 +940,7 @@ impl KeyLeaseRegistry {
     /// Withdraw a pending early-cancellation request. Requires consumer auth.
     pub fn withdraw_early_cancel(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         if lease.consumer != consumer {
@@ -747,6 +966,7 @@ impl KeyLeaseRegistry {
     /// provider's auth; the lease stays active and unchanged.
     pub fn reject_early_cancel(env: Env, provider: Address, lease_id: u64) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         require_lease_provider(&env, &lease, &provider)?;
@@ -783,6 +1003,7 @@ impl KeyLeaseRegistry {
         verified_calls: u32,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let mut lease = storage::get_lease(&env, lease_id)?;
         require_lease_provider(&env, &lease, &provider)?;
@@ -853,15 +1074,70 @@ impl KeyLeaseRegistry {
         Ok(())
     }
 
-    /// Settle a lease, paying the provider for `verified_calls` consumed calls
-    /// and refunding the remainder to the consumer. Requires provider auth.
+    /// Transfer a lease to a new consumer, moving the access right and the
+    /// refund path together. Requires the current consumer's auth.
+    ///
+    /// The transfer is a direct assignment: the new consumer does not have to
+    /// accept it. Because the provider and every settlement path read
+    /// `lease.consumer`, a later settlement refunds `new_consumer` and the old
+    /// consumer loses both the access right and any claim on the deposit.
+    ///
+    /// Only an unsettled, unrevoked lease can change hands. A settled lease has
+    /// no rights left to transfer, and a settled lease is exactly what a
+    /// proposed settlement produces, so a lease inside a challenge window cannot
+    /// be moved out from under its dispute.
+    pub fn transfer_lease(
+        env: Env,
+        consumer: Address,
+        lease_id: u64,
+        new_consumer: Address,
+    ) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let mut lease = storage::get_lease(&env, lease_id)?;
+        if lease.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        if lease.settled {
+            return Err(Error::LeaseNotTransferable);
+        }
+        if lease.consumer == new_consumer {
+            return Err(Error::InvalidConsumer);
+        }
+
+        let previous = lease.consumer.clone();
+        lease.consumer = new_consumer.clone();
+        storage::save_lease(&env, &lease);
+        storage::remove_cancel_request(&env, lease.lease_id);
+
+        LeaseTransferred {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            from: previous,
+            to: new_consumer,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Propose a settlement and open the consumer challenge window. Requires
+    /// provider auth.
     ///
     /// A lease may only be settled when it has **expired** or when
     /// `verified_calls == allocated_calls` (the consumer got everything it
-    /// paid for, so there is no reason to wait). Settling pays out
-    /// `verified_calls * rate_per_call` and returns
-    /// `locked_deposit - payout` to the consumer. A lease can be settled once.
-    /// The settlement is added to the service's cumulative totals, which
+    /// paid for, so there is no reason to wait). The proposal records
+    /// `verified_calls * rate_per_call` as the provider's payout and
+    /// `locked_deposit - payout` as the consumer's refund, but moves no funds.
+    ///
+    /// The lease can no longer be settled again or revoked from this point. The
+    /// payout stays locked in escrow for [`CHALLENGE_WINDOW_SECS`] (24 hours),
+    /// during which the consumer may call
+    /// [`crate::KeyLeaseRegistry::challenge_settlement`]. Once the window closes,
+    /// anyone may call [`crate::KeyLeaseRegistry::finalize_settlement`] to release
+    /// the funds. A raised challenge is decided by the admin through
+    /// [`crate::KeyLeaseRegistry::resolve_challenge`]. The finalized split is
+    /// added to the service's cumulative totals, which
     /// [`KeyLeaseRegistry::service_stats`] reports.
     pub fn settle_lease(
         env: Env,
@@ -870,6 +1146,7 @@ impl KeyLeaseRegistry {
         verified_calls: u32,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         if storage::get_service_attestor(&env, lease.service_id).is_some() {
@@ -900,6 +1177,7 @@ impl KeyLeaseRegistry {
         attestation: UsageAttestation,
     ) -> Result<(), Error> {
         provider.require_auth();
+        storage::check_schema(&env)?;
 
         let lease = storage::get_lease(&env, lease_id)?;
         verify_attestation(&env, &lease, verified_calls, &attestation)?;
@@ -940,42 +1218,197 @@ impl KeyLeaseRegistry {
             .locked_deposit
             .checked_sub(payout)
             .ok_or(Error::Overflow)?;
+        let challengeable_until = now
+            .checked_add(CHALLENGE_WINDOW_SECS)
+            .ok_or(Error::Overflow)?;
 
-        // checks-effects-interactions: persist the settlement before any token
-        // transfer, so a re-entrant token sees a settled lease and reverts.
+        // The lease is committed to this settlement: it can no longer be settled
+        // again or revoked, even though the funds stay in escrow.
         lease.used_calls = verified_calls;
         lease.settled = true;
         storage::save_lease(&env, &lease);
         // A pending early-cancellation request is moot once the lease settles.
         storage::remove_cancel_request(&env, lease.lease_id);
 
-        // The cumulative totals are part of the settlement, not a report about
-        // it: they are written with the lease and before the payout, so no
-        // path can move tokens without counting them.
-        storage::record_settlement(&env, service.service_id, verified_calls, payout)?;
+        storage::save_settlement(
+            &env,
+            &Settlement {
+                lease_id: lease.lease_id,
+                service_id: lease.service_id,
+                consumer: lease.consumer.clone(),
+                provider: service.provider.clone(),
+                verified_calls,
+                payout,
+                refund,
+                proposed_at: now,
+                challengeable_until,
+                state: SettlementState::Pending,
+                challenge_evidence: BytesN::from_array(&env, &[0u8; 32]),
+                challenged_at: 0,
+            },
+        );
 
-        let token_addr = storage::get_token(&env).ok_or(Error::TokenNotSet)?;
-        let client = token::Client::new(&env, &token_addr);
-        let contract = env.current_contract_address();
-
-        if payout > 0 {
-            client.transfer(&contract, &service.provider, &payout);
-        }
-        if refund > 0 {
-            client.transfer(&contract, &lease.consumer, &refund);
-        }
-
-        LeaseSettled {
-            lease_id: lease.lease_id,
+        LeaseSettlementProposed {
             schema_version: EVENT_SCHEMA_VERSION,
-            provider,
+            lease_id: lease.lease_id,
+            provider: service.provider,
             verified_calls,
             payout,
             refund,
+            challengeable_until,
         }
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Release a proposed settlement after its challenge window has closed.
+    ///
+    /// Permissionless: the provider, the consumer or any keeper can call it once
+    /// `now >= challengeable_until` and no challenge is active. Funds move to
+    /// the provider and consumer exactly as proposed by the provider.
+    pub fn finalize_settlement(env: Env, lease_id: u64) -> Result<(), Error> {
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Challenged => return Err(Error::SettlementChallenged),
+            SettlementState::Pending => {}
+        }
+
+        if env.ledger().timestamp() < settlement.challengeable_until {
+            return Err(Error::ChallengeWindowStillOpen);
+        }
+
+        let (payout, refund) = (settlement.payout, settlement.refund);
+        pay_settlement(&env, &mut settlement, payout, refund)
+    }
+
+    /// Dispute a proposed settlement with an evidence hash. Requires consumer
+    /// auth and must happen inside the challenge window.
+    ///
+    /// The settlement is frozen until the admin resolves the challenge; the
+    /// payout cannot be finalized while it is active. A consumer may withdraw
+    /// the challenge with
+    /// [`crate::KeyLeaseRegistry::cancel_challenge`].
+    pub fn challenge_settlement(
+        env: Env,
+        consumer: Address,
+        lease_id: u64,
+        evidence_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        if settlement.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Challenged => return Err(Error::SettlementChallenged),
+            SettlementState::Pending => {}
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= settlement.challengeable_until {
+            return Err(Error::ChallengeWindowClosed);
+        }
+        if evidence_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(Error::InvalidEvidence);
+        }
+
+        settlement.challenge_evidence = evidence_hash.clone();
+        settlement.challenged_at = now;
+        settlement.state = SettlementState::Challenged;
+        storage::save_settlement(&env, &settlement);
+
+        LeaseChallenged {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer,
+            evidence_hash,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Withdraw an active challenge, returning the settlement to `Pending`.
+    /// Requires consumer auth.
+    ///
+    /// Cancelling does not pay out immediately: the original challenge window
+    /// still has to close before
+    /// [`crate::KeyLeaseRegistry::finalize_settlement`] can release the funds.
+    /// While the window remains open the consumer may challenge again.
+    pub fn cancel_challenge(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
+        consumer.require_auth();
+
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        if settlement.consumer != consumer {
+            return Err(Error::Unauthorized);
+        }
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Pending => return Err(Error::NoActiveChallenge),
+            SettlementState::Challenged => {}
+        }
+
+        settlement.challenge_evidence = BytesN::from_array(&env, &[0u8; 32]);
+        settlement.challenged_at = 0;
+        settlement.state = SettlementState::Pending;
+        storage::save_settlement(&env, &settlement);
+
+        LeaseChallengeCancelled {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            consumer,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Resolve an active challenge. Admin only.
+    ///
+    /// `upheld = true` refunds the entire deposit to the consumer and pays the
+    /// provider nothing. `upheld = false` releases the proposal unchanged. The
+    /// admin may resolve before or after the challenge window closes.
+    pub fn resolve_challenge(
+        env: Env,
+        admin: Address,
+        lease_id: u64,
+        upheld: bool,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        let mut settlement = storage::get_settlement(&env, lease_id)?;
+        match settlement.state {
+            SettlementState::Finalized => return Err(Error::SettlementFinalized),
+            SettlementState::Pending => return Err(Error::NoActiveChallenge),
+            SettlementState::Challenged => {}
+        }
+
+        let (payout, refund) = if upheld {
+            (
+                0,
+                settlement
+                    .payout
+                    .checked_add(settlement.refund)
+                    .ok_or(Error::Overflow)?,
+            )
+        } else {
+            (settlement.payout, settlement.refund)
+        };
+
+        LeaseChallengeResolved {
+            schema_version: EVENT_SCHEMA_VERSION,
+            lease_id,
+            admin: admin.clone(),
+            upheld,
+        }
+        .publish(&env);
+
+        pay_settlement(&env, &mut settlement, payout, refund)
     }
 
     /// Reclaim the full deposit for a lease the provider never settled.
@@ -990,6 +1423,7 @@ impl KeyLeaseRegistry {
     /// nothing. Revocation leaves the service's revenue totals untouched.
     pub fn revoke_expired_lease(env: Env, consumer: Address, lease_id: u64) -> Result<(), Error> {
         consumer.require_auth();
+        storage::check_schema(&env)?;
 
         let mut lease = storage::get_lease(&env, lease_id)?;
         if lease.consumer != consumer {
@@ -1065,6 +1499,10 @@ impl KeyLeaseRegistry {
     /// their own transaction fee, the horizon is fixed by the storage policy
     /// rather than by the caller, and no lease or balance changes. Bumping a
     /// service you do not own is a donation of rent, not an attack.
+    ///
+    /// Not gated on the schema check: it changes no stored value, and keeping
+    /// entries alive is exactly what a stopped registry awaiting `migrate`
+    /// needs.
     pub fn bump_service(env: Env, service_id: u64) -> Result<(), Error> {
         // A miss must be an error rather than a silent no-op: `extend_ttl` on a
         // non-existent key would otherwise leave the caller paying for nothing.
@@ -1111,6 +1549,15 @@ impl KeyLeaseRegistry {
     /// Return the configured admin, or `NotInitialized` before `init`.
     pub fn get_admin(env: Env) -> Result<Address, Error> {
         storage::get_admin(&env).ok_or(Error::NotInitialized)
+    }
+
+    /// The pending admin transfer, if any. Pure read.
+    ///
+    /// An expired proposal is still returned (compare `expires_at` with the
+    /// ledger time) until the admin cancels or replaces it; it can no longer be
+    /// accepted.
+    pub fn get_pending_admin(env: Env) -> Option<PendingAdminTransfer> {
+        storage::get_pending_admin(&env)
     }
 
     /// Return the configured escrow token, or `TokenNotSet`.
@@ -1272,6 +1719,22 @@ impl KeyLeaseRegistry {
         Ok(storage::get_service_stats(&env, service_id))
     }
 
+    /// Storage schema the stored data conforms to. Pure read.
+    ///
+    /// `0` for a registry deployed before the schema was versioned. When this
+    /// differs from [`KeyLeaseRegistry::code_schema_version`], state-changing calls are
+    /// stopped until the admin runs [`KeyLeaseRegistry::migrate`]. `NotInitialized` before
+    /// `init`.
+    pub fn schema_version(env: Env) -> Result<u32, Error> {
+        storage::stored_schema_version(&env).ok_or(Error::NotInitialized)
+    }
+
+    /// Storage schema the running Wasm was built for ([`SCHEMA_VERSION`]).
+    /// Pure read.
+    pub fn code_schema_version(_env: Env) -> u32 {
+        SCHEMA_VERSION
+    }
+
     /// Number of calls still available on a lease (zero once settled/expired).
     /// Number of calls still available on a lease (zero once settled/expired).
     /// Pure read.
@@ -1289,14 +1752,27 @@ impl KeyLeaseRegistry {
         Ok(lease.allocated_calls.saturating_sub(lease.used_calls))
     }
 
+    /// Fetch the settlement proposed for a lease.
+    pub fn get_settlement(env: Env, lease_id: u64) -> Result<Settlement, Error> {
+        storage::get_settlement(&env, lease_id)
+    }
+
     /// Escrow balance owed to a lease, in token stroops, at the current ledger
-    /// time. Pure read.
+    /// time. Includes a proposed settlement's payout and refund until it is
+    /// finalized.
     pub fn locked_balance(env: Env, lease_id: u64) -> Result<i128, Error> {
         let lease = storage::get_lease(&env, lease_id)?;
-        if lease.settled {
-            return Ok(0);
+        if !lease.settled {
+            return Ok(lease.locked_deposit);
         }
-        Ok(lease.locked_deposit)
+        match storage::get_settlement(&env, lease_id) {
+            Ok(settlement) if settlement.state != SettlementState::Finalized => settlement
+                .payout
+                .checked_add(settlement.refund)
+                .ok_or(Error::Overflow),
+            // Revoked leases never have a settlement, and finalized ones hold nothing.
+            _ => Ok(0),
+        }
     }
 
     /// One bounded page of the service catalogue, ascending by id.
@@ -1335,6 +1811,53 @@ impl KeyLeaseRegistry {
         }
         Ok(storage::leases_page(&env, start, limit))
     }
+}
+
+/// Release the funds recorded in `settlement` and mark it finalized.
+///
+/// checks-effects-interactions: the finalized state is persisted before any
+/// token transfer, so a re-entrant token cannot release the same funds twice.
+fn pay_settlement(
+    env: &Env,
+    settlement: &mut Settlement,
+    payout: i128,
+    refund: i128,
+) -> Result<(), Error> {
+    let token_addr = storage::get_token(env).ok_or(Error::TokenNotSet)?;
+
+    // Revenue is counted once funds actually leave escrow, not when the
+    // proposal is made: a challenged settlement can still be overturned.
+    let paid_calls = if payout == 0 {
+        0
+    } else {
+        settlement.verified_calls
+    };
+    storage::record_settlement(env, settlement.service_id, paid_calls, payout)?;
+
+    settlement.payout = payout;
+    settlement.refund = refund;
+    settlement.state = SettlementState::Finalized;
+    storage::save_settlement(env, settlement);
+
+    let client = token::Client::new(env, &token_addr);
+    let contract = env.current_contract_address();
+    if payout > 0 {
+        client.transfer(&contract, &settlement.provider, &payout);
+    }
+    if refund > 0 {
+        client.transfer(&contract, &settlement.consumer, &refund);
+    }
+
+    LeaseSettled {
+        schema_version: EVENT_SCHEMA_VERSION,
+        lease_id: settlement.lease_id,
+        provider: settlement.provider.clone(),
+        verified_calls: settlement.verified_calls,
+        payout,
+        refund,
+    }
+    .publish(env);
+    Ok(())
 }
 
 /// Ensure `caller` is the provider that owns the lease's service.
@@ -1404,11 +1927,8 @@ fn mint_lease(
     // fail before mutating state.
     let token_addr = storage::get_token(env).ok_or(Error::TokenNotSet)?;
 
-    let expires_at = env
-        .ledger()
-        .timestamp()
-        .checked_add(duration_secs)
-        .ok_or(Error::Overflow)?;
+    let now = env.ledger().timestamp();
+    let expires_at = now.checked_add(duration_secs).ok_or(Error::Overflow)?;
 
     let lease_id = storage::next_lease_id(env)?;
     let lease = Lease {
@@ -1420,6 +1940,7 @@ fn mint_lease(
         expires_at,
         locked_deposit: required_deposit,
         settled: false,
+        created_at: now,
     };
 
     // checks-effects-interactions: the lease exists before the token is
@@ -1480,11 +2001,21 @@ fn verify_attestation(
 
     // Check that the service has an attestor configured.
     #[allow(clippy::needless_borrow)]
-    let _attestor = storage::get_service_attestor(&env, lease.service_id)
+    let attestor = storage::get_service_attestor(&env, lease.service_id)
         .ok_or(Error::AttestorNotConfigured)?;
 
-    // TODO: full ed25519 signature verification can be added here when
-    // the attestor service is integrated. For now, the structural checks
-    // above prevent replay and stale attacks.
+    // Bind the structural checks above to the configured public key. The host
+    // crypto primitive aborts the invocation when the signature is invalid,
+    // before settlement writes or token transfers are reached.
+    let message = usage_attestation_message(
+        env,
+        attestation.lease_id,
+        attestation.service_id,
+        attestation.verified_calls,
+        attestation.valid_until,
+    );
+    env.crypto()
+        .ed25519_verify(&attestor, &message, &attestation.signature);
+
     Ok(())
 }
