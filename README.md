@@ -153,6 +153,7 @@ consumer of the stream should branch on it.
 | `escrow_token_set` | — | `schema_version`, `admin`, `token` |
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
 | `service_status_changed` | `service_id` | `schema_version`, `provider`, `is_active` |
+| `service_provider_transferred` | `service_id` | `schema_version`, `previous_provider`, `new_provider` |
 | `lease_created` | `lease_id` | `schema_version`, `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
 | `lease_delegated` | `lease_id` | `schema_version`, `delegate`, `consumer` |
 | `lease_transferred` | `lease_id` | `schema_version`, `from`, `to` |
@@ -235,6 +236,20 @@ cargo clippy --target wasm32v1-none --release --all -- -D warnings
 cargo build --target wasm32v1-none --release --all
 # → target/wasm32v1-none/release/keylease_registry.wasm
 # → target/wasm32v1-none/release/keylease_mock_token.wasm
+```
+
+### Wasm size budget
+
+The `Build (wasm32v1-none)` CI job fails if
+`target/wasm32v1-none/release/keylease_registry.wasm` grows past **48,576
+bytes**. That budget is the current artifact (46,262 bytes) plus a 5% margin, so
+routine changes have room and a real code-size regression is caught before
+deploy. The check prints the measured size and the budget, and can be reproduced
+locally after the release build:
+
+```bash
+size=$(wc -c < target/wasm32v1-none/release/keylease_registry.wasm)
+echo "${size} bytes (budget 48576)"
 ```
 
 ---

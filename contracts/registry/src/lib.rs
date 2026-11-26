@@ -94,6 +94,8 @@ mod storage;
 mod types;
 
 #[cfg(test)]
+mod model;
+#[cfg(test)]
 mod test;
 
 #[cfg(test)]

@@ -504,6 +504,187 @@ fn test_update_service_emits_event() {
 }
 
 // ---------------------------------------------------------------------------
+// Provider key rotation (transfer_service)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_transfer_service_moves_ownership_and_emits_event() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // Auths and events describe the last invocation, so read them before any
+    // other contract call replaces them.
+    let auths = env.auths();
+    assert_eq!(
+        auths.len(),
+        1,
+        "only the current provider authorizes a hand-over"
+    );
+    assert_eq!(auths[0].0, ctx.provider);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &ServiceProviderTransferred {
+            schema_version: EVENT_SCHEMA_VERSION,
+            service_id,
+            previous_provider: ctx.provider.clone(),
+            new_provider: new_provider.clone(),
+        },
+    );
+
+    assert_eq!(ctx.registry.get_service(&service_id).provider, new_provider);
+    // Everything except the owner is untouched.
+    let service = ctx.registry.get_service(&service_id);
+    assert_eq!(service.rate_per_call, RATE);
+    assert!(service.is_active);
+    assert_eq!(service.endpoint_hash, endpoint_hash(&env));
+}
+
+#[test]
+fn test_transfer_service_is_rejected_for_a_non_owner() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let impostor = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&impostor, &service_id, &new_provider),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.registry.get_service(&service_id).provider, ctx.provider);
+}
+
+#[test]
+fn test_transfer_service_rejects_the_address_that_already_owns_it() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&ctx.provider, &service_id, &ctx.provider),
+        Err(Ok(Error::ProviderUnchanged))
+    );
+    assert_eq!(env.events().all(), Vec::new(&env));
+}
+
+#[test]
+fn test_transfer_service_rejects_an_unknown_service() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let new_provider = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&ctx.provider, &404, &new_provider),
+        Err(Ok(Error::ServiceNotFound))
+    );
+}
+
+#[test]
+fn test_old_provider_cannot_settle_after_the_transfer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // The old key is no longer a party to the service: it cannot settle the
+    // lease it used to own, and it cannot deactivate or re-transfer the service.
+    assert_eq!(
+        ctx.registry.try_settle_lease(&ctx.provider, &lease_id, &10),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_set_service_active(&ctx.provider, &service_id, &false),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_transfer_service(&ctx.provider, &service_id, &ctx.consumer),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert!(!ctx.registry.get_lease(&lease_id).settled);
+}
+
+#[test]
+fn test_new_provider_settles_a_lease_created_before_the_transfer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // An in-flight lease refers to the service, not to the old address, so the
+    // new provider settles it under the same escrow terms as before.
+    env.ledger().set_timestamp(4_601);
+    ctx.registry.settle_lease(&new_provider, &lease_id, &6);
+
+    assert_eq!(ctx.token.balance(&new_provider), RATE * 6);
+    assert_eq!(ctx.token.balance(&ctx.provider), 0);
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        FUNDING - RATE * 10 + RATE * 4
+    );
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+    assert!(ctx.registry.get_lease(&lease_id).settled);
+
+    // The new owner can also pause new leases.
+    ctx.registry
+        .set_service_active(&new_provider, &service_id, &false);
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &10, &3_600),
+        Err(Ok(Error::ServiceInactive))
+    );
+}
+
+#[test]
+fn test_consumer_refund_path_survives_a_provider_transfer() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let new_provider = Address::generate(&env);
+    let lease_id = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &100);
+
+    ctx.registry
+        .transfer_service(&ctx.provider, &service_id, &new_provider);
+
+    // A transfer cannot be used to trap a consumer's deposit: if the new key
+    // never settles, the refund path still works exactly as before.
+    env.ledger().set_timestamp(1_100 + GRACE);
+    ctx.registry.revoke_expired_lease(&ctx.consumer, &lease_id);
+
+    assert_eq!(ctx.token.balance(&ctx.consumer), FUNDING);
+    assert_eq!(ctx.token.balance(&new_provider), 0);
+    assert_eq!(ctx.token.balance(&ctx.registry_id()), 0);
+}
+
+// ---------------------------------------------------------------------------
 // Lease creation
 // ---------------------------------------------------------------------------
 

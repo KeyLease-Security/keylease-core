@@ -257,8 +257,8 @@ An extension moves the entry's `liveUntilLedgerSeq`, which the host books as a
 rent bump and bills the caller for across the whole extended horizon. Only these
 calls extend anything:
 `init`, `set_token`, `upgrade`, `register_service`, `set_service_active`,
-`create_lease`, `settle_lease`, `revoke_expired_lease`, `bump_service` and
-`bump_lease` — and, since PR #152, `set_token` only when it actually changes the
+`transfer_service`, `create_lease`, `settle_lease`, `revoke_expired_lease`,
+`bump_service` and `bump_lease` — and, since PR #152, `set_token` only when it actually changes the
 configured token. Every read-only view — `get_service`, `get_lease`,
 `lease_status`, `remaining_calls`, `locked_balance`, `service_stats` — is pure,
 so a simulation of a view costs instructions and no rent. In particular

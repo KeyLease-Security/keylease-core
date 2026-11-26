@@ -95,6 +95,66 @@ take more than it is owed, and it cannot prevent the consumer's refund.
     needs the current admin, `accept_admin` needs the proposed address, and a
     proposal expires after `ADMIN_TRANSFER_WINDOW_SECS` (7 days).
 
+## Re-entrancy hardening: checks-effects-interactions
+
+> Design note for issue #7. **Pending maintainer approval.**
+
+The escrow token is a cross-contract call, so every money path is written as
+**checks → effects → interactions**, and the ordering is the security property,
+not a style preference:
+
+1. **Checks.** Authenticate the actor, then validate ownership, lease state,
+timestamps and arithmetic. Nothing has been written and no external contract has
+been called, so a rejected call moves no value.
+2. **Effects.** Persist the complete post-state in one write: for a settlement
+`used_calls` and `settled`, for a revocation `settled`, and for a creation the
+lease row itself (with `used_calls = 0` and the locked deposit already recorded)
+before the id counter and TTLs are bumped. A re-entrant call re-reads this
+committed state.
+3. **Interactions.** Only then call `transfer` on the SEP-41 token.
+
+| Entry point | Checks | Effects persisted first | Interaction |
+| --- | --- | --- | --- |
+| `create_lease` | auth, calls ≠ 0, duration bounds, service active, checked deposit, `MAX_LEASE_DEPOSIT`, token configured, checked expiry | `Lease { used_calls: 0, settled: false, locked_deposit }` | `transfer(consumer → registry)` |
+| `settle_lease` | auth, not settled, `verified_calls ≤ allocated_calls`, stored provider, expired or fully consumed, checked payout/refund | `used_calls = verified_calls`, `settled = true` | `transfer(registry → provider)` then `transfer(registry → consumer)` |
+| `revoke_expired_lease` | auth, consumer owns lease, not settled, expired, grace elapsed | `settled = true` | `transfer(registry → consumer)` |
+
+**What a hostile token can and cannot do.**
+
+- It cannot reach the registry while the registry is still executing: Soroban
+  rejects a call into a contract that is already on the call stack. The two
+  adversarial tokens
+  (`test_reentrant_token_cannot_settle_a_lease_twice`,
+  `test_reentrant_token_cannot_revoke_a_lease_twice`) attempt exactly that from
+  inside `transfer`, and the attempt is rejected. That is a host guarantee this
+  contract does not control, which is why it is not the only layer.
+- The layer the ordering *does* guarantee: the `settled` flag is already
+  persisted when the token runs. If a callback does arrive — on a host that
+  permits re-entry — `settle_lease` and `revoke_expired_lease` read `settled`
+  first and return `LeaseAlreadySettled` before any token call, so the second
+  release is rejected and the outer call still completes once. That is pinned
+  directly by `test_persisted_settled_flag_blocks_a_second_release`, which shows
+  a settled lease rejecting both money paths and a revoked lease rejecting a
+  later settlement.
+- It can re-enter `create_lease` and mint an additional, separately funded
+  lease. That is not a double spend: each lease has its own deposit and its own
+  single release, and the re-entrant creation must fund itself through the same
+  token.
+- It can revert its own transfer, which reverts the whole registry call and every
+  state write with it, including the lease id it had already allocated —
+  `test_failed_escrow_transfer_rolls_back_the_creation` pins that. That is a
+  liveness stall, not a theft: the lease stays unsettled and the consumer's
+  revoke path remains open. It is why the admin is trusted to configure a
+  well-behaved token.
+- Value is released by two transfers in `settle_lease` (payout, then refund).
+  The state effect is written before the first one, and the second transfer runs
+  after the first has already moved value out of an escrow this contract reports
+  as released, so no transfer can run before the lease is settled.
+
+No new storage key, no lock and no unbounded loop is involved: the ordering adds
+a single storage write per money path that was already written to, so
+per-ledger work stays constant.
+
 ## Invariants
 
 Asserted in `contracts/registry/src/test.rs`. The
@@ -127,6 +187,8 @@ violation.
 | Finalize races the challenge deadline | `now < challengeable_until` → `ChallengeWindowStillOpen`; at the boundary challenges are closed |
 | Admin upholds every challenge to deny payouts | On-chain `lease_challenge_resolved` events; admin should be cold/multisig; consumer and provider can both observe |
 | Attacker settles someone else's lease | `service.provider == provider` check |
+| Attacker transfers a service they do not own | `transfer_service` owner check → `Unauthorized` |
+| A provider transfer strands in-flight escrow | leases bind to `service_id`; new owner settles, consumer still revokes |
 | Attacker revokes someone else's lease | `lease.consumer == consumer` check |
 | Attacker transfers someone else's lease | `lease.consumer == consumer` check + `require_auth` on the current consumer |
 | Consumer transfers, then revokes as the old owner | Ownership is one field; the revoke/refund path reads the new consumer |

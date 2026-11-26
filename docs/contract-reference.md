@@ -614,6 +614,30 @@ Pause or resume **new** leases for a service.
 - **Notes:** existing leases stay valid and settleable. Deactivation only blocks
   `create_lease`.
 
+### `transfer_service`
+
+```rust
+pub fn transfer_service(
+    env: Env,
+    provider: Address,
+    service_id: u64,
+    new_provider: Address,
+) -> Result<(), Error>
+```
+
+Hand a service to a new provider address (key rotation).
+
+- **Caller / auth:** `provider`, and it must be the service's current owner. The
+  new address is not asked to authorize.
+- **Trigger:** rotating a provider key, or retiring an address.
+- **State:** updates `Service(service_id).provider`; nothing else changes.
+- **Events:** `service_provider_transferred { service_id, previous_provider, new_provider }`.
+- **Errors:** `ServiceNotFound`, `Unauthorized`, `ProviderUnchanged`.
+- **Notes:** in-flight leases keep working. They bind to `service_id`, so the
+  new provider settles them with the original `locked_deposit`, `rate_per_call`
+  and `expires_at`; the old provider can no longer settle, deactivate or
+  transfer the service, and the consumer's refund path is unchanged.
+
 ---
 
 ## Leases
