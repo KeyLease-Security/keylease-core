@@ -3752,6 +3752,7 @@ fn test_lease_created_event_topics_and_payload_are_exact() {
     );
 
     let lease = ctx.registry.get_lease(&lease_id);
+    let service_rate = ctx.registry.get_service(&service_id).rate_per_call;
     let data = Val::try_from_val(&env, &body.data).unwrap();
     let payload = Map::<Symbol, Val>::try_from_val(&env, &data).unwrap();
 
@@ -3786,7 +3787,8 @@ fn test_lease_created_event_topics_and_payload_are_exact() {
     );
     assert_eq!(
         i128::try_from_val(&env, &field("rate_per_call")).unwrap(),
-        lease.rate_per_call
+        service_rate,
+        "payload carries the service rate snapshot"
     );
 
     // The values the map carries are the created lease's terms, not defaults.
