@@ -244,7 +244,7 @@
   },
   {
     "function_v0": {
-      "doc": "Activate or deactivate a service. Only the owning provider may call this.\\n\\nExisting leases remain valid; deactivation only blocks *new* leases.",
+      "doc": "Activate or deactivate a service. Only the owning provider may call this.\\n\\nExisting leases remain valid; deactivation only blocks *new* leases.\\n\\nSetting the status the service already has is an accepted, idempotent\\nwrite rather than an error, so a client may safely retry after a timeout.\\nEach successful call publishes [`ServiceStatusChanged`], including\\na repeat with the same value: the event is the caller's confirmation that\\nthe write landed, and the payload always states the stored status.",
       "name": "set_service_active",
       "inputs": [
         {
