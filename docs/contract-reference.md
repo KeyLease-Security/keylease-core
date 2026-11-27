@@ -552,6 +552,38 @@ Complete the hand-over and become the admin.
   `accept_admin` the incoming one's, so the hand-over as a whole needs both and
   no third party can complete it.
 
+### `pause`
+
+```rust
+pub fn pause(env: Env, admin: Address) -> Result<(), Error>
+```
+
+Block new commitments during an incident. Admin only.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **State:** sets `DataKey::Paused = true` in instance storage; extends instance
+  TTL.
+- **Events:** `emergency_paused { schema_version, admin }`.
+- **Errors:** `NotInitialized`, `Unauthorized`.
+- **Notes:** blocks `register_service`, `set_service_active`, `create_lease` and
+  `create_lease_for`. It never blocks `settle_lease` / `finalize_settlement`,
+  consumer revocation, or their refunds: escrow must stay releasable. An absent
+  flag means unpaused, so an upgrade needs no migration.
+
+### `unpause`
+
+```rust
+pub fn unpause(env: Env, admin: Address) -> Result<(), Error>
+```
+
+Resume normal operations after an emergency pause. Admin only.
+
+- **Caller / auth:** `admin`, and `admin` must match the stored admin.
+- **State:** sets `DataKey::Paused = false` in instance storage; extends instance
+  TTL. Calling it while already unpaused succeeds and leaves the flag clear.
+- **Events:** `emergency_unpaused { schema_version, admin }`.
+- **Errors:** `NotInitialized`, `Unauthorized`.
+
 ---
 
 ## Services
@@ -1112,6 +1144,7 @@ performed one could not be used to price a read.
 | `remaining_calls` | `(env, lease_id: u64) -> Result<u32, Error>` | calls left; `0` once settled **or** expired |
 | `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; stays at `locked_deposit` while a settlement is pending or challenged; `0` once finalized or revoked |
 | `get_settlement` | `(env, lease_id: u64) -> Result<Settlement, Error>` | the `Settlement`, else `SettlementNotFound` |
+| `is_paused` | `(env) -> bool` | `true` while admin emergency pause blocks new commitments; absent flag reads `false` |
 | `service_stats` | `(env, service_id: u64) -> Result<ServiceStats, Error>` | cumulative settled leases / calls / payout, else `ServiceNotFound` |
 | `get_services` | `(env, start: u64, limit: u32) -> Result<ServicePage, Error>` | up to `limit` services, ascending from `start` |
 | `get_leases` | `(env, start: u64, limit: u32) -> Result<LeasePage, Error>` | up to `limit` leases, ascending from `start` |
@@ -1191,6 +1224,8 @@ because topics are positional and indexers filter on them.
 | `admin_transfer_proposed` | — | `schema_version`, `admin`, `new_admin`, `expires_at` |
 | `admin_transfer_canceled` | — | `schema_version`, `admin`, `new_admin` |
 | `admin_transfer_accepted` | — | `schema_version`, `previous_admin`, `new_admin` |
+| `emergency_paused` | — | `schema_version`, `admin` |
+| `emergency_unpaused` | — | `schema_version`, `admin` |
 
 See [integration.md](./integration.md#event-schema-version) for how to branch on
 the version.
@@ -1502,6 +1537,7 @@ recording it there fails `cargo test`. Add a new code by appending it to
 | 41 | `AdminTransferExpired` | `accept_admin` at or after `expires_at` |
 | 42 | `InvalidAdmin` | `propose_admin` named the current admin |
 | 43 | `InvalidEndpointHash` | `endpoint_hash` is all zeroes and commits to nothing |
+| 44 | `ContractPaused` | new commitments refused while admin emergency pause is active |
 
 ## Invoking with the Stellar CLI
 
