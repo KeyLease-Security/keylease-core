@@ -489,17 +489,20 @@ cargo run --manifest-path examples/indexer/Cargo.toml -- \
 ```
 
 Options:
+
 - `--rpc-url <URL>`: Soroban RPC endpoint (default: `https://soroban-testnet.stellar.org`).
 - `--contract-id <ID>`: The KeyLease registry contract address (`C...`).
 - `--start-ledger <N>`: Ledger sequence number to start indexing from.
 - `--ledger-file <PATH>`: Path to persist the JSON lease ledger (default: `lease_ledger.json`).
 - `--poll-interval <SECS>`: Interval between RPC polls in seconds (default: 5).
 - `--once`: Run a single poll cycle and exit.
-- `--fixture <PATH>`: Offline mode: replay a JSON array of `getEvents` event responses without network access.
+- `--fixture <PATH>`: Offline mode: replay a JSON array of `getEvents` event
+  responses without network access.
 
 #### Topic Layout and Filtering
 
 The indexer matches on the contract's real event structure:
+
 - **Topic 0**: Event name symbol (`lease_created` or `lease_settled`).
 - **Topic 1**: Lease identifier (`u64`).
 - **Value**: Event data map containing:
