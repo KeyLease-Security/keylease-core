@@ -11,12 +11,12 @@ use keylease_mock_token::{MockToken, MockTokenClient};
 
 use crate::events::{
     AdminTransferAccepted, AdminTransferCanceled, AdminTransferProposed, ContractUpgraded,
-    EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
-    LeaseCancellationWithdrawn, LeaseCancelled, LeaseChallengeCancelled, LeaseChallengeResolved,
-    LeaseChallenged, LeaseCreated, LeaseDelegated, LeaseRevoked, LeaseSettled,
-    LeaseSettlementProposed, LeaseTransferred, RegistryInitialized, SchemaMigrated,
-    ServiceRateUpdated, ServiceRegistered, ServiceStatusChanged, UpgradeCancelled, UpgradeProposed,
-    EVENT_SCHEMA_VERSION,
+    EmergencyPaused, EmergencyUnpaused, EscrowTokenSet, LeaseCancellationRejected,
+    LeaseCancellationRequested, LeaseCancellationWithdrawn, LeaseCancelled,
+    LeaseChallengeCancelled, LeaseChallengeResolved, LeaseChallenged, LeaseCreated, LeaseDelegated,
+    LeaseRevoked, LeaseSettled, LeaseSettlementProposed, LeaseTransferred, RegistryInitialized,
+    SchemaMigrated, ServiceRateUpdated, ServiceRegistered, ServiceStatusChanged, UpgradeCancelled,
+    UpgradeProposed, EVENT_SCHEMA_VERSION,
 };
 use crate::storage::{
     self, DataKey, LEDGER_BUMP_EXTEND, LEDGER_BUMP_THRESHOLD, LEGACY_SCHEMA_VERSION,
@@ -5179,7 +5179,7 @@ fn test_fresh_counters_start_at_zero_and_move_only_on_success() {
 /// Every published error code with the variant it names, in order. This is the
 /// table in `docs/contract-reference.md`; the two must change together, and only
 /// by appending.
-const ERROR_ABI: [(u32, Error); 43] = [
+const ERROR_ABI: [(u32, Error); 44] = [
     (1, Error::AlreadyInitialized),
     (2, Error::NotInitialized),
     (3, Error::Unauthorized),
@@ -5223,6 +5223,7 @@ const ERROR_ABI: [(u32, Error); 43] = [
     (41, Error::AdminTransferExpired),
     (42, Error::InvalidAdmin),
     (43, Error::InvalidEndpointHash),
+    (44, Error::ContractPaused),
 ];
 
 #[test]
@@ -6218,4 +6219,158 @@ fn test_admin_transfer_extends_instance_ttl() {
     ctx.registry.accept_admin(&new_admin);
     let ttl = env.as_contract(&ctx.registry_id(), || env.storage().instance().get_ttl());
     assert_eq!(ttl, LEDGER_BUMP_EXTEND);
+}
+
+// ---------------------------------------------------------------------------
+// Admin emergency pause (#120)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pause_flag_defaults_to_unpaused() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    // No `DataKey::Paused` was written by `init`, so an upgraded registry that
+    // predates the flag starts accepting new commitments without a migration.
+    assert!(!ctx.registry.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause_transitions_and_events() {
+    let env = Env::default();
+    let ctx = setup(&env);
+
+    assert!(!ctx.registry.is_paused());
+
+    ctx.registry.pause(&ctx.admin);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &EmergencyPaused {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: ctx.admin.clone(),
+        },
+    );
+    assert!(ctx.registry.is_paused());
+
+    ctx.registry.unpause(&ctx.admin);
+    assert_single_event(
+        &env,
+        &ctx.registry_id(),
+        &EmergencyUnpaused {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: ctx.admin.clone(),
+        },
+    );
+    assert!(!ctx.registry.is_paused());
+}
+
+#[test]
+fn test_pause_and_unpause_are_admin_only() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let impostor = Address::generate(&env);
+
+    assert_eq!(
+        ctx.registry.try_pause(&impostor),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert!(!ctx.registry.is_paused());
+
+    ctx.registry.pause(&ctx.admin);
+
+    assert_eq!(
+        ctx.registry.try_unpause(&impostor),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert!(ctx.registry.is_paused());
+}
+
+#[test]
+fn test_paused_contract_blocks_new_commitments_only() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let delegate = Address::generate(&env);
+    let other_endpoint = BytesN::from_array(&env, &[1u8; 32]);
+
+    ctx.registry.pause(&ctx.admin);
+    assert!(ctx.registry.is_paused());
+
+    assert_eq!(
+        ctx.registry
+            .try_register_service(&ctx.provider, &RATE, &other_endpoint),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_set_service_active(&ctx.provider, &service_id, &false),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert_eq!(
+        ctx.registry
+            .try_create_lease(&ctx.consumer, &service_id, &10, &3_600),
+        Err(Ok(Error::ContractPaused))
+    );
+    // The delegated path shares the mint helper; it must not be a bypass.
+    assert_eq!(
+        ctx.registry
+            .try_create_lease_for(&delegate, &ctx.consumer, &service_id, &10, &3_600,),
+        Err(Ok(Error::ContractPaused))
+    );
+
+    ctx.registry.unpause(&ctx.admin);
+
+    let new_service_id = ctx
+        .registry
+        .register_service(&ctx.provider, &RATE, &other_endpoint);
+    assert_eq!(new_service_id, 2);
+    ctx.registry
+        .set_service_active(&ctx.provider, &service_id, &false);
+    assert!(!ctx.registry.get_service(&service_id).is_active);
+    ctx.registry
+        .set_service_active(&ctx.provider, &service_id, &true);
+    assert_eq!(
+        ctx.registry
+            .create_lease(&ctx.consumer, &service_id, &10, &3_600),
+        1
+    );
+}
+
+#[test]
+fn test_paused_contract_still_releases_settlement_and_revocation_refunds() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let ctx = setup(&env);
+    let service_id = register_default_service(&env, &ctx);
+    let lease_to_settle = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let lease_to_revoke = ctx
+        .registry
+        .create_lease(&ctx.consumer, &service_id, &10, &3_600);
+    let consumer_before = ctx.token.balance(&ctx.consumer);
+
+    ctx.registry.pause(&ctx.admin);
+    assert!(ctx.registry.is_paused());
+
+    // Provider payout must not be hostage to the pause.
+    env.ledger().set_timestamp(1_000 + 3_600);
+    ctx.registry
+        .settle_lease(&ctx.provider, &lease_to_settle, &4);
+    finalize_after_challenge_window(&env, &ctx, &lease_to_settle);
+    assert!(ctx.registry.get_lease(&lease_to_settle).settled);
+    assert_eq!(ctx.token.balance(&ctx.provider), RATE * 4);
+    assert_eq!(ctx.token.balance(&ctx.consumer), consumer_before + RATE * 6);
+
+    // Nor must the consumer's full refund for an unserved lease.
+    env.ledger().set_timestamp(1_000 + 3_600 + GRACE + 1);
+    ctx.registry
+        .revoke_expired_lease(&ctx.consumer, &lease_to_revoke);
+    assert!(ctx.registry.get_lease(&lease_to_revoke).settled);
+    assert_eq!(
+        ctx.token.balance(&ctx.consumer),
+        consumer_before + RATE * 6 + RATE * 10
+    );
 }
