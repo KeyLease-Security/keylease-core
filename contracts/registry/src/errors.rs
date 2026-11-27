@@ -110,4 +110,8 @@ pub enum Error {
     /// schema-versioning and admin-transfer codes so every number already
     /// published keeps its meaning.
     InvalidEndpointHash = 43,
+    /// The contract is currently paused by admin emergency action. New
+    /// service registrations and lease creations are refused; settlements and
+    /// consumer revocations remain available.
+    ContractPaused = 44,
 }

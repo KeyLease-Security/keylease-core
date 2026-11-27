@@ -13,6 +13,7 @@
 //! | Call | Instance | Service entry | Lease entry |
 //! | --- | --- | --- | --- |
 //! | `init`, `upgrade`, `register_service` | extend | — | — |
+//! | `pause`, `unpause` | extend | — | — |
 //! | `migrate` (when it migrates) | extend | — | — |
 //! | `propose_admin`, `cancel_admin_transfer`, `accept_admin` | extend | — | — |
 //! | `set_token` | extend, unless the token is unchanged | — | — |
@@ -135,8 +136,6 @@ pub enum DataKey {
     ServiceCount,
     /// Monotonic lease id counter (instance storage).
     LeaseCount,
-    /// Emergency pause flag (instance storage).
-    Paused,
     /// `Service` by id (persistent storage).
     Service(u64),
     /// `Lease` by id (persistent storage).
@@ -175,6 +174,9 @@ pub enum DataKey {
     /// entry's TTL, which every admin call extends, and it is bounded to a
     /// single value, so it adds no new rent policy of its own.
     PendingAdmin,
+    /// Emergency pause flag (instance storage). Appended so every existing
+    /// `DataKey` keeps its encoding; an absent key means unpaused.
+    Paused,
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +274,26 @@ pub fn set_token(env: &Env, token: &Address) {
 
 pub fn get_token(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::Token)
+}
+
+// ---------------------------------------------------------------------------
+// Emergency pause
+// ---------------------------------------------------------------------------
+
+/// Whether new commitments are currently blocked by an admin emergency pause.
+///
+/// The key is absent on every deployment that predates this feature, so the
+/// default is `false` and an upgrade needs no data migration.
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+/// Set or clear the emergency pause flag in instance storage.
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
 /// Store a pending upgrade, replacing any previous proposal.
