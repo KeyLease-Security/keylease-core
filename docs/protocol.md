@@ -4,6 +4,10 @@
 
 | Actor | Address | Can do |
 | --- | --- | --- |
+| **Admin** | one Stellar account | `init` once, `set_token`, `upgrade`. Cannot move escrowed funds. |
+| **Provider** | per service (account or contract address) | Register/pause services, configure receipt keys, settle leases it owns, claim payouts. |
+| **Consumer** | per lease (account or contract address) | Create and top up leases, revoke expired unsettled leases, claim refunds. |
+| **Admin** | one Stellar account | `init` once, `set_token`, `propose_upgrade`/`execute_upgrade`/`cancel_upgrade` (24h delay). Cannot move escrowed funds. |
 | **Admin** | one Stellar account | `init` once, `set_token`, `propose_upgrade`/`execute_upgrade`/`cancel_upgrade` (24h delay), `propose_admin` / `cancel_admin_transfer`. Cannot move escrowed funds. |
 | **Provider** | per service (account or contract address) | Register/pause services, settle leases it owns. |
 | **Consumer** | per lease (account or contract address) | Create leases, revoke expired unsettled leases. |
@@ -64,6 +68,13 @@ unknown creation time (see the [contract reference](contract-reference.md#create
 
 ```mermaid
 stateDiagram-v2
+    [*] --> Active: create_lease<br/>(escrow rate × calls)
+    Active --> Active: top_up_lease<br/>(+calls / +time)
+    Active --> Expired: now ≥ expires_at
+    Active --> Settled: settle_lease<br/>(verified_calls == allocated_calls)
+    Expired --> Settled: settle_lease / settle_leases<br/>(provider, within grace)
+    Expired --> Settled: revoke_expired_lease<br/>(consumer, after 24h grace)
+    Settled --> [*]: claim<br/>(provider + consumer)
     [*] --> Active: create_lease / create_lease_for<br/>(escrow rate × calls)
     Active --> Expired: now ≥ expires_at
     Active --> SettlementPending: settle_lease<br/>(verified_calls == allocated_calls)
@@ -150,6 +161,35 @@ The second clause is the "consumer got what it paid for" fast path: if every
 allocated call was consumed, the provider should not have to wait for expiry to
 be paid.
 
+A lease can be extended before it expires with `top_up_lease`. Additional calls
+are priced from the lease's own rate snapshot (`locked_deposit /
+allocated_calls`), never from a current price, so in-flight access is never
+repriced. `used_calls` is preserved and the new expiry may not exceed 30 days
+from now.
+
+### Settlement is a pull payment
+
+Neither settlement nor revocation transfers tokens inline. They persist the
+transition and **credit a claimable balance**: the provider is credited
+`verified_calls × rate_per_call`, the consumer the remainder (or the full
+deposit on revocation). Each beneficiary withdraws with `claim`, and balances
+accumulate across leases. A claim removes the entry before the SEP-41 transfer,
+which makes repeated claims and re-entrant tokens fail with `NothingToClaim`.
+
+This keeps every money-out path independent of the settlement shape, lets a
+provider batch up to 20 settlements in one call (`settle_leases`), and means a
+failure in a beneficiary's token account cannot block another beneficiary's
+payout.
+
+### Optional signed usage receipts
+
+By default the provider is trusted to report `verified_calls`. A provider can
+opt a service into a stronger mode with `set_service_receipt_key`: settlement
+must then be submitted through `settle_lease_with_receipt` with an ed25519
+signature over the receipt domain, this contract's address, the lease id, the
+service id and the reported call count. The binding rejects receipts moved to
+another lease, service or deployment, and a settled lease rejects replays.
+Clearing the key (`None`) restores the default unsigned mode.
 Settlement itself does not pay out. It writes a `Settlement` entry with
 `state = Pending` and `challengeable_until = now + CHALLENGE_WINDOW_SECS`
 (24 hours). During that window the consumer may challenge the reported call
@@ -317,6 +357,17 @@ spans a contract upgrade stays decodable (see
 
 | Event | Topics | Data |
 | --- | --- | --- |
+| `registry_initialized` | — | `admin` |
+| `escrow_token_set` | — | `admin`, `token` |
+| `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
+| `service_status_changed` | `service_id` | `provider`, `is_active` |
+| `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_topped_up` | `lease_id` | `consumer`, `additional_calls`, `additional_duration_secs`, `new_expires_at`, `added_deposit` |
+| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `claimed` | `beneficiary` | `amount` |
+| `service_receipt_key_set` | `service_id` | `provider`, `receipt_key` |
+| `contract_upgraded` | — | `admin`, `new_wasm_hash` |
 | `registry_initialized` | — | `schema_version`, `admin` |
 | `escrow_token_set` | — | `schema_version`, `admin`, `token` |
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
@@ -369,12 +420,15 @@ The registry transfers `500_000_000` from the consumer into escrow and sets
 
 **2a. `settle_lease` after 1 hour with 320 calls consumed**
 
+```
+payout = 1_000_000 × 320 = 320_000_000   (credit the provider)
 ```text
 payout = 1_000_000 × 320 = 320_000_000   (32 XLM to the provider)
 refund = 500_000_000 − 320_000_000
-       = 180_000_000                     (18 XLM back to the consumer)
+       = 180_000_000                     (credit the consumer)
 ```
 
+The provider calls `claim` for 32 XLM and the consumer calls `claim` for 18 XLM.
 Those amounts stay in escrow for the 24-hour challenge window. If the consumer
 does not dispute them, `finalize_settlement` releases 32 XLM to the provider and
 18 XLM to the consumer. If the admin upholds a challenge, the provider receives
@@ -382,6 +436,8 @@ does not dispute them, `finalize_settlement` releases 32 XLM to the provider and
 
 **2b. Provider goes dark; consumer calls `revoke_expired_lease` after 24h**
 
+```
+refund = locked_deposit = 500_000_000    (50 XLM credit, withdrawn with claim)
 ```text
 refund = locked_deposit = 500_000_000    (50 XLM, the full deposit)
 ```
@@ -464,6 +520,21 @@ provider — before quoting a per-call price.
 
 These must hold for every reachable state. They are asserted in tests.
 
+1. **Conservation.** For every lease, `payout + refund == locked_deposit`, and
+   every credited stroop is withdrawable exactly once by its beneficiary.
+2. **Single release.** A settled lease can never be settled or revoked again
+   (`LeaseAlreadySettled`), and `settled` is persisted before any claim is
+   credited or token called.
+3. **Bounded claim.** A provider can never receive more than
+   `allocated_calls × rate_per_call`, and only for a service it owns.
+4. **Guaranteed exit.** Every lease has a consumer path to a full refund.
+5. **Checked math.** Deposit, top-up, payout and timestamp arithmetic abort on
+   overflow rather than truncating.
+6. **Claimable storage.** A lease's persistent entry outlives its term plus the
+   grace window (`MAX_LEASE_DURATION_SECS = 30 days`).
+5. **Checked math.** Deposit, payout, refund and timestamp arithmetic abort on
+   overflow rather than truncating.
+6. **Consented early exit.** An early cancellation releases `rate × served_calls`
 1. **Conservation.** For every settlement, `payout + refund == locked_deposit`.
 2. **Single release.** A settled lease can never be settled or revoked again
    (`LeaseAlreadySettled`), and a finalized settlement is persisted before any
@@ -506,6 +577,10 @@ These must hold for every reachable state. They are asserted in tests.
 | `Admin`, `Token` | instance | configuration; instance TTL is bumped on every state change |
 | `PendingAdmin` | instance | at most one admin hand-over awaiting acceptance; cleared on accept or cancel |
 | `ServiceCount`, `LeaseCount` | instance | monotonic id counters |
+| `Service(u64)` | persistent | TTL extended on save and on read |
+| `Lease(u64)` | persistent | TTL extended on save and on read to cover term + grace |
+| `ServiceReceiptKey(u64)` | persistent | optional ed25519 key for signed receipts |
+| `Claimable(Address)` | persistent | pull-payment balance, removed when claimed |
 | `SchemaVersion` | instance | storage schema the data conforms to; state-changing calls stop while it differs from the running Wasm's |
 | `Service(u64)` | persistent | TTL extended on save, on `create_lease` and by `bump_service`, never by a read |
 | `Lease(u64)` | persistent | TTL extended on save and by `bump_lease`, never by a read |

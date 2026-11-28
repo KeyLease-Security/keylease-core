@@ -27,8 +27,8 @@ This guide walks through buying, using and reclaiming a lease with Stellar.
 
 - You **prepay** `rate_per_call × requested_calls` into Soroban escrow.
 - You get an on-chain authorization that expires after `duration_secs`.
-- You pay **only for the calls you use**: unused balance is refunded at
-  settlement.
+- You pay **only for the calls you use**: unused balance is credited to you at
+  settlement and withdrawn with `claim`.
 - If the provider never settles, you reclaim the **entire** deposit 24 hours
   after expiry — no support ticket, no trust required.
 
@@ -114,9 +114,26 @@ proof of purchase.
 **Choose your numbers deliberately.** If your lease expires while you still have
 unused calls, those calls are not usable — `remaining_calls` drops to `0` at
 `expires_at`. The maximum duration is 30 days (`MAX_LEASE_DURATION_SECS`).
-Under-buy with a generous duration, then renew, rather than over-buying with a
+Under-buy with a generous duration, then top up, rather than over-buying with a
 short one.
 
+### Top up instead of buying a second lease
+
+An active lease can be extended with more calls, more time, or both. Additional
+calls use the lease's original rate, so this is never repriced:
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account consumer --network testnet \
+  --send=yes -- top_up_lease \
+     --consumer $CONSUMER \
+     --lease_id 1 \
+     --additional_calls 100 \
+     --additional_duration_secs 1800
+```
+
+This escrows `100 × rate` more and extends expiry by 30 minutes, keeping the
+same lease id. A settled or expired lease cannot be topped up.
 `rate_per_call × requested_calls` also has a ceiling: `MAX_LEASE_DEPOSIT`
 (1,000,000,000,000 base units, so 100,000 of a seven-decimal token). A lease
 above it reverts with `DepositTooLarge` before the token is called, so an
@@ -215,6 +232,8 @@ path below.
 
 ## 6. Get your money back
 
+**Normal path — one claim.** When the provider settles, your unused balance is
+credited to your claimable balance. Withdraw it with:
 **Normal path — automatic.** When the provider settles, the unused balance is
 returned to you once the challenge window closes. Nothing to claim.
 
@@ -225,6 +244,11 @@ can dispute it inside that window with a 32-byte evidence hash:
 ```bash
 stellar contract invoke \
   --id $REGISTRY --source-account consumer --network testnet \
+  --send=yes -- claim --beneficiary $CONSUMER
+```
+
+Credits accumulate across leases, so a single `claim` can withdraw several
+refunds. Check the balance with `claimable_balance --beneficiary $CONSUMER`.
   --send=yes -- challenge_settlement \
      --consumer $CONSUMER --lease_id 1 \
      --evidence_hash <sha256-of-your-evidence>
@@ -251,9 +275,10 @@ stellar contract invoke \
   --send=yes -- revoke_expired_lease --consumer $CONSUMER --lease_id 1
 ```
 
-This refunds the full `locked_deposit` and emits `lease_revoked { lease_id,
-consumer, refund }`. It works for a lease that was never used and for one that
-was partially used but never settled.
+This credits the full `locked_deposit`, emits `lease_revoked { lease_id,
+consumer, refund }`, and leaves the money withdrawable with `claim`. It works for
+a lease that was never used and for one that was partially used but never
+settled.
 
 ### Why you must wait 24 hours
 
@@ -265,6 +290,10 @@ constant in the contract (`SETTLE_GRACE_PERIOD_SECS = 86_400`).
 
 | Lease state | What happens |
 | --- | --- |
+| Provider settles before/at expiry | `locked_deposit − used × rate` is credited; `claim` withdraws it |
+| Provider settles after expiry within 24h | Same as above |
+| Provider settles with `verified_calls = 0` | The entire deposit is credited |
+| Provider never settles, `now ≥ expiry + 24h` | You `revoke`; the entire deposit is credited |
 | Provider proposes a settlement | Funds stay locked; you have 24h to challenge |
 | You challenge inside 24h | Payout frozen until the admin resolves it |
 | Dispute upheld | You get the entire deposit back |

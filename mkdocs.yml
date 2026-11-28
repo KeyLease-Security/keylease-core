@@ -81,6 +81,7 @@ nav:
       - 'Design: consumer challenge window': design/consumer-challenge-window.md
       - 'Design: early cancellation': design/early-cancellation.md
       - Deployments: deployments.md
+      - Design notes: design/wave-11.md
       - Design notes:
           - Emergency pause (#120): design/emergency-pause.md
           - Storage schema versioning (#123): design/123-storage-schema-versioning.md

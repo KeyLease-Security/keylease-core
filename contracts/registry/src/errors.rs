@@ -42,6 +42,23 @@ pub enum Error {
     /// Lease duration exceeds `MAX_LEASE_DURATION_SECS`, so its storage entry
     /// could not be kept alive for the whole term.
     DurationTooLong = 16,
+    /// A top-up asked for neither additional calls nor additional duration.
+    InvalidTopUp = 17,
+    /// A top-up was attempted on a lease that has already expired.
+    LeaseExpired = 18,
+    /// A batch settlement was called with an empty list of leases.
+    EmptyBatch = 19,
+    /// A batch settlement exceeded `MAX_BATCH_SETTLE` leases.
+    BatchTooLarge = 20,
+    /// The same lease id appeared more than once in a batch settlement.
+    DuplicateLease = 21,
+    /// `claim` was called by an address with no claimable balance.
+    NothingToClaim = 22,
+    /// The lease's service requires a signed usage receipt, but the settlement
+    /// was submitted through the unsigned `settle_lease` path.
+    ReceiptRequired = 23,
+    /// A signed receipt was supplied for a service that has no receipt key set.
+    ReceiptNotConfigured = 24,
     /// Deposit exceeds `MAX_LEASE_DEPOSIT`. Distinct from `Overflow`: the
     /// multiplication fit in `i128`, the amount is simply too large to escrow
     /// in a single lease.

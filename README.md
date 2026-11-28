@@ -115,6 +115,16 @@ keylease-core/
 | `accept_admin(new_admin)` | `new_admin` | Complete the hand-over before `expires_at`; the previous admin loses every admin right. Emits `admin_transfer_accepted`. |
 | `register_service(provider, rate_per_call, endpoint_hash) -> u64` | `provider` | Publish a leasable service. `rate_per_call` must be positive and at most `MAX_RATE_PER_CALL`. Returns `service_id`. Emits `service_registered`. |
 | `set_service_active(provider, service_id, is_active)` | `provider` | Pause/resume new leases. Emits `service_status_changed`. |
+| `set_service_receipt_key(provider, service_id, receipt_key)` | `provider` | Opt a service into required provider-signed usage receipts, rotate or clear the ed25519 key. Emits `service_receipt_key_set`. |
+| `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
+| `top_up_lease(consumer, lease_id, additional_calls, additional_duration_secs)` | `consumer` | Extend an active lease at its original rate. Emits `lease_topped_up`. |
+| `settle_lease(provider, lease_id, verified_calls)` | `provider` | Credit the provider and refund the remainder (unsigned mode). Emits `lease_settled`. |
+| `settle_lease_with_receipt(provider, lease_id, verified_calls, receipt)` | `provider` | Settle with a provider-signed usage receipt (receipt mode). Emits `lease_settled`. |
+| `settle_leases(provider, settlements)` | `provider` | Settle up to 20 leases in one all-or-nothing call. Emits one `lease_settled` per lease. |
+| `claim(beneficiary)` | `beneficiary` | Withdraw the pull-payment balance credited by settlements or revocations. Emits `claimed`. |
+| `revoke_expired_lease(consumer, lease_id)` | `consumer` | Credit the full deposit 24h after expiry. Emits `lease_revoked`. |
+| `get_admin()`, `get_token()`, `get_service(id)`, `get_lease(id)`, `version()` | — | Read-only views. |
+| `lease_status(id)`, `remaining_calls(id)`, `locked_balance(id)`, `claimable_balance(address)` | — | Derived lifecycle queries. |
 | `update_service(provider, service_id, rate_per_call, endpoint_hash) -> service_id` | `provider` | Update rate and endpoint hash for a service. Emits `service_rate_updated`. Only the owning provider may call this. Existing leases keep their original rate. |
 | `create_lease(consumer, service_id, requested_calls, duration_secs) -> u64` | `consumer` | Lock `rate × calls` and mint a lease. Emits `lease_created`. |
 | `transfer_lease(consumer, lease_id, new_consumer)` | `consumer` | Assign an unsettled lease, moving access and the refund path. Emits `lease_transferred`. |
@@ -149,6 +159,17 @@ consumer of the stream should branch on it.
 
 | Event | Topics | Data |
 | --- | --- | --- |
+| `registry_initialized` | — | `admin` |
+| `escrow_token_set` | — | `admin`, `token` |
+| `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
+| `service_status_changed` | `service_id` | `provider`, `is_active` |
+| `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_topped_up` | `lease_id` | `consumer`, `additional_calls`, `additional_duration_secs`, `new_expires_at`, `added_deposit` |
+| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `claimed` | `beneficiary` | `amount` |
+| `service_receipt_key_set` | `service_id` | `provider`, `receipt_key` |
+| `contract_upgraded` | — | `admin`, `new_wasm_hash` |
 | `registry_initialized` | — | `schema_version`, `admin` |
 | `escrow_token_set` | — | `schema_version`, `admin`, `token` |
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
@@ -214,6 +235,11 @@ An unsettled lease can change hands with `transfer_lease`: the single
 `Lease.consumer` field is rewritten, so access and the refund path move together.
 Once a settlement is proposed the lease is frozen and cannot be transferred
 during the challenge window.
+
+Settlement and revocation never transfer tokens inline. They credit **pull
+payments**: the provider and consumer each accumulate a claimable balance and
+withdraw it with `claim`, which keeps every money-out path small,
+checks-effects-interactions safe and independent of who settles first.
 
 ---
 
@@ -325,6 +351,14 @@ protocol, its Stellar dependencies and how to integrate with it:
 KeyLease escrows funds, so the contract is written to a small, auditable set of
 invariants:
 
+1. **Checked arithmetic everywhere.** Deposit (`rate × calls`), top-up and
+   payout math use `checked_mul`/`checked_add`; overflow aborts the transaction
+   instead of minting a cheap lease or a truncated refund.
+2. **Checks-effects-interactions.** Settlement and revocation persist state and
+   record claimable balances before any token is called, and `claim` removes the
+   balance before transferring, so a re-entrant SEP-41 token cannot be paid
+   twice. `test_reentrant_token_cannot_claim_a_balance_twice` installs a hostile
+   token that calls back into `claim` and asserts the second attempt is rejected.
 1. **Checked arithmetic everywhere.** Deposit (`rate × calls`) and payout math
    use `checked_mul`/`checked_add`; overflow aborts the transaction instead of
    minting a cheap lease or a truncated refund.
@@ -423,6 +457,8 @@ afternoon of redeploying.
 cargo test --all
 ```
 
+The 72 tests in `contracts/registry/src/test.rs` cover:
+The 133 tests in `contracts/registry/src/test.rs` cover:
 The 171 tests in `contracts/registry/src/test.rs` cover:
 
 - service registration and ID monotonicity,
@@ -436,6 +472,7 @@ The 171 tests in `contracts/registry/src/test.rs` cover:
   and cancellation, admin uphold/reject, authorization and evidence checks),
 - expired, unsettled leases being fully reclaimed by the consumer,
 - the 24-hour grace window (boundary, early-settle, and post-settle cases),
+- unauthorized settle/revoke/upgrade/top-up/claim attempts,
 - unauthorized settle/revoke/upgrade/resolve attempts,
 - rate-math, timestamp and duration overflow/rejection,
 - the deposit ceiling at the limit, one unit above it, and as a product,
@@ -450,6 +487,12 @@ The 171 tests in `contracts/registry/src/test.rs` cover:
 - the explicit `bump_service` / `bump_lease` maintenance calls and the lease TTL
   policy behind them,
 - the full lifecycle escrowed with the **native Stellar Asset Contract**,
+- a **re-entrant token** attempting a second claim,
+- lease top-ups (calls, duration, rate preservation, partial settlement),
+- bounded batch settlement (limit, duplicates, mixed ownership, all-or-nothing),
+- pull-payment claims (accumulation, single use, conservation),
+- optional signed usage receipts (valid, invalid, mismatched and replayed),
+- status transitions and derived views.
 - a **re-entrant token** attempting a second settlement,
 - status transitions and derived views,
 - the stored `LeaseStatus` and `Error` discriminants, so nothing existing can be

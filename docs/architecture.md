@@ -21,9 +21,9 @@ flowchart TB
         EV[["Contract events<br/>lease_created · lease_transferred · settlement_proposed · challenged · lease_settled · lease_revoked"]]
     end
 
-    DEV -- "create_lease (auth: consumer)" --> REG
-    PROV -- "register_service · settle_lease (auth: provider)" --> REG
-    REG -- "transfer / refund" --> TOK
+    DEV -- "create_lease · top_up_lease · claim (auth: consumer)" --> REG
+    PROV -- "register_service · settle_lease(s) · claim (auth: provider)" --> REG
+    REG -- "transfer on deposit / claim" --> TOK
     REG -. "typed events" .-> EV
     EV -. "subscribe" .-> IDX
     IDX -. "verify + meter" .-> PROV
@@ -55,8 +55,10 @@ The registry holds no privileged token logic. It calls the standard SEP-41
 - any custom SEP-41 asset works without a contract change,
 - `contracts/mock_token` exists only for tests and local sandboxes.
 
-The token boundary is a cross-contract call, so the money paths follow
-checks-effects-interactions and are tested against a re-entrant token.
+The token boundary is a cross-contract call, so settlement and revocation only
+record claimable balances and the token is called by `claim`. That money path
+follows checks-effects-interactions (the balance is removed before the
+transfer) and is tested against a re-entrant token.
 
 ### Consumers of the ledger
 
@@ -95,6 +97,10 @@ sequenceDiagram
         P-->>C: 401 / 403 / 429
     end
     P->>R: settle_lease(provider, lease_id, verified_calls)
+    R-->>P: lease_settled event (payout + refund credited)
+    P->>R: claim(provider)   (consumer claims its refund separately)
+    R->>T: transfer(registry → beneficiary)
+    R-->>P: claimed event
     R-->>P: lease_settlement_proposed event (funds still locked)
     Note over C,R: 24h consumer challenge window
     C->>R: challenge_settlement(consumer, lease_id, evidence_hash)  (optional)

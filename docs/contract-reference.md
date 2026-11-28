@@ -7,6 +7,12 @@ as authoritative.
 - **Package:** `keylease-registry`
 - **Wasm:** `target/wasm32v1-none/release/keylease_registry.wasm`
 - **Network target:** Stellar (`wasm32v1-none`), `soroban-sdk 26`
+- **Constants:** `SETTLE_GRACE_PERIOD_SECS = 86_400` (24 hours),
+  `MAX_LEASE_DURATION_SECS = 2_592_000` (30 days),
+  `MAX_BATCH_SETTLE = 20`, `USAGE_RECEIPT_DOMAIN = "KeyLease/usage-receipt/v1"`
+- **Storage TTL:** `LEDGER_BUMP_THRESHOLD = 17_280`, `LEDGER_BUMP_EXTEND = 518_400`;
+  leases extend to term + 24h grace + a 1-day buffer
+- **Constants:** eight of them, all tabulated in [Constants](#constants)
 - **Constants:** nine of them, all tabulated in [Constants](#constants), including
   `SETTLE_GRACE_PERIOD_SECS = 86_400` and `CHALLENGE_WINDOW_SECS = 86_400` (24 hours each)
 - **Storage TTL:** leases extend to term + 24h grace + a 1-day buffer, clamped to
@@ -644,7 +650,35 @@ Pause or resume **new** leases for a service.
 - **Events:** `service_status_changed { service_id, provider, is_active }`.
 - **Errors:** `ServiceNotFound`, `Unauthorized`.
 - **Notes:** existing leases stay valid and settleable. Deactivation only blocks
-  `create_lease`.
+  `create_lease` and `top_up_lease` for new allotments is still governed by the
+  existing lease.
+
+### `set_service_receipt_key`
+
+```rust
+pub fn set_service_receipt_key(
+    env: Env,
+    provider: Address,
+    service_id: u64,
+    receipt_key: Option<BytesN<32>>,
+) -> Result<(), Error>
+```
+
+Opt a service into required provider-signed usage receipts, rotate the key, or
+clear it.
+
+- **Caller / auth:** `provider`, and it must own the service.
+- **Parameters:**
+  - `Some(key)` — a 32-byte ed25519 public key. Every settlement of this
+    service's leases must then carry a signature from the matching private key.
+  - `None` — remove the requirement and restore unsigned settlement.
+- **State:** writes or removes `ServiceReceiptKey(service_id)`; the `Service`
+  struct itself is unchanged so existing entries keep their layout.
+- **Events:** `service_receipt_key_set { service_id, provider, receipt_key }`.
+- **Errors:** `ServiceNotFound`, `Unauthorized`.
+- **Notes:** the mode is per service. A receipt is bound to this contract, the
+  lease id, the service id and the settled call count; see
+  [`settle_lease_with_receipt`](#settle_lease_with_receipt).
 
 ---
 
@@ -816,6 +850,38 @@ employer, a treasury, or a build system paying for a team member).
   against the lease, and the **consumer** owns the refund path, including for a
   lease they never paid the fee for.
 
+### `top_up_lease`
+
+```rust
+pub fn top_up_lease(
+    env: Env,
+    consumer: Address,
+    lease_id: u64,
+    additional_calls: u32,
+    additional_duration_secs: u64,
+) -> Result<(), Error>
+```
+
+Extend an active lease with more calls and/or more time.
+
+- **Caller / auth:** `consumer`, and it must be the lease's consumer.
+- **Preconditions:** at least one of the two additions is non-zero, the lease
+  exists, is not settled and has not expired, and the resulting expiry is not
+  more than `MAX_LEASE_DURATION_SECS` from now.
+- **Pricing:** additional calls are priced from the lease's own original rate,
+  derived as `locked_deposit / allocated_calls`. The lease carries its rate
+  snapshot, so an in-flight lease is never repriced.
+- **Recomputation:** `allocated_calls += additional_calls`, `expires_at +=
+  additional_duration_secs`, and `locked_deposit += additional_calls × rate`.
+  `used_calls` is preserved, so the remaining allotment is
+  `new_allocated_calls − used_calls` and the original settlement terms still
+  apply.
+- **Effects:** persists the extended lease (extending its TTL) **first**, then
+  `transfer(consumer → contract, added_deposit)`; the transfer is skipped when
+  only duration is added.
+- **Events:** `lease_topped_up { lease_id, consumer, additional_calls, additional_duration_secs, new_expires_at, added_deposit }`.
+- **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
+  `LeaseExpired`, `InvalidTopUp`, `DurationTooLong`, `TokenNotSet`, `Overflow`.
 ### `transfer_lease`
 
 ```rust
@@ -855,11 +921,101 @@ pub fn settle_lease(
 ) -> Result<(), Error>
 ```
 
+Credit the provider for verified calls and credit the remainder to the consumer.
 Propose a settlement and open the consumer challenge window. No funds move yet.
 
 - **Caller / auth:** `provider`, and it must own the lease's service.
 - **Trigger:** at or after expiry, or as soon as every allocated call is consumed.
 - **Preconditions:** lease exists, is not settled, `verified_calls ≤
+  allocated_calls`, the caller owns the service, the lease has expired **or**
+  `verified_calls == allocated_calls`, and the service has **no** receipt key.
+- **Effects:** persists `used_calls` and `settled = true` **first**, then credits
+  `verified_calls × rate_per_call` to the provider's claimable balance and
+  `locked_deposit − payout` to the consumer's. Tokens move only when each
+  beneficiary calls [`claim`](#claim).
+- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Errors:** `LeaseNotFound`, `LeaseAlreadySettled`, `InvalidCalls`,
+  `Unauthorized`, `LeaseNotSettleable`, `ReceiptRequired`, `TokenNotSet`,
+  `Overflow`.
+- **Notes:** zero-value credits are skipped. Settling with `verified_calls = 0`
+  is a legitimate way for a provider to refund an unusable lease.
+
+### `settle_lease_with_receipt`
+
+```rust
+pub fn settle_lease_with_receipt(
+    env: Env,
+    provider: Address,
+    lease_id: u64,
+    verified_calls: u32,
+    receipt: BytesN<64>,
+) -> Result<(), Error>
+```
+
+Settle a lease that belongs to a receipt-protected service.
+
+- **Caller / auth:** `provider`, and it must own the lease's service.
+- **Preconditions:** the service has a receipt key, the lease is settleable, and
+  `receipt` is a valid ed25519 signature over the payload below.
+- **Signed payload** (`101` bytes):
+  ```text
+  "KeyLease/usage-receipt/v1"   domain, 25 bytes
+  || contract address StrKey   56 bytes
+  || lease_id                  u64 big-endian
+  || service_id                u64 big-endian
+  || verified_calls            u32 big-endian
+  ```
+- **Effects:** identical to `settle_lease`.
+- **Events:** `lease_settled { lease_id, provider, verified_calls, payout, refund }`.
+- **Errors:** `LeaseNotFound`, `LeaseAlreadySettled`, `InvalidCalls`,
+  `Unauthorized`, `LeaseNotSettleable`, `ReceiptNotConfigured`, `TokenNotSet`,
+  `Overflow`. An invalid signature aborts the transaction.
+- **Notes:** binding the contract, lease, service and call count means a receipt
+  cannot be reused on another lease or deployment. Replaying it on the same
+  lease fails with `LeaseAlreadySettled`.
+
+### `settle_leases`
+
+```rust
+pub fn settle_leases(
+    env: Env,
+    provider: Address,
+    settlements: Vec<(u64, u32)>,
+) -> Result<(), Error>
+```
+
+Settle up to `MAX_BATCH_SETTLE = 20` leases owned by one provider in a single
+all-or-nothing call.
+
+- **Caller / auth:** `provider`, checked once for the whole batch.
+- **Preconditions:** the batch is non-empty and within the limit, contains no
+  duplicate lease ids, and every pair passes the same validation as
+  `settle_lease` (ownership, settleability, call bounds, unsigned mode).
+- **Effects:** pass 1 validates every lease before any state changes; pass 2
+  persists and credits each one. If any entry is invalid nothing is settled.
+- **Events:** one `lease_settled` per lease.
+- **Errors:** `EmptyBatch`, `BatchTooLarge`, `DuplicateLease`, `LeaseNotFound`,
+  `LeaseAlreadySettled`, `InvalidCalls`, `Unauthorized`, `LeaseNotSettleable`,
+  `ReceiptRequired`, `Overflow`.
+- **Notes:** receipt-protected services must settle individually with
+  `settle_lease_with_receipt`.
+
+### `claim`
+
+```rust
+pub fn claim(env: Env, beneficiary: Address) -> Result<(), Error>
+```
+
+Withdraw the pull-payment balance credited by settlements and revocations.
+
+- **Caller / auth:** `beneficiary` must authorize.
+- **Effects:** removes the balance entry **first**, then
+  `transfer(contract → beneficiary, amount)`.
+- **Events:** `claimed { beneficiary, amount }`.
+- **Errors:** `NothingToClaim`, `TokenNotSet`, `Overflow`.
+- **Notes:** balances accumulate across leases, so one `claim` can withdraw
+  several settlements. Removing the entry before the transfer makes repeated
+  claims and re-entrant tokens fail with `NothingToClaim`.
   allocated_calls`, the caller owns the service, and the lease has expired **or**
   `verified_calls == allocated_calls`.
 - **Effects:** persists `used_calls` and `settled = true`, then writes a
@@ -987,12 +1143,14 @@ Reclaim the **full** deposit when the provider never settled.
 
 - **Caller / auth:** `consumer`, and it must be the lease's consumer.
 - **Trigger:** after `expires_at + SETTLE_GRACE_PERIOD_SECS`.
+- **Effects:** persists `settled = true` and credits `locked_deposit` to the
+  consumer's claimable balance; the consumer withdraws with `claim`.
 - **Effects:** persists `settled = true` **and** the revocation marker
   (`LeaseRevoked(lease_id)`) first, then
   `transfer(contract → consumer, locked_deposit)`.
 - **Events:** `lease_revoked { lease_id, consumer, refund }`.
 - **Errors:** `LeaseNotFound`, `Unauthorized`, `LeaseAlreadySettled`,
-  `LeaseNotExpired`, `RevokeWindowNotElapsed`, `TokenNotSet`, `Overflow`.
+  `LeaseNotExpired`, `RevokeWindowNotElapsed`, `Overflow`.
 - **Notes:** this is the consumer's escape hatch, and the reason escrow is safe
   against an unresponsive provider. It is unavailable once a settlement has been
   proposed: the lease is marked settled at proposal time and the challenge
@@ -1142,6 +1300,8 @@ performed one could not be used to price a read.
 | `quote_lease` | `(env, service_id: u64, requested_calls: u32, duration_secs: u64) -> Result<LeaseQuote, Error>` | the `locked_deposit` and `expires_at` `create_lease` would produce |
 | `lease_status` | `(env, lease_id: u64) -> Result<LeaseStatus, Error>` | derived status at current ledger time |
 | `remaining_calls` | `(env, lease_id: u64) -> Result<u32, Error>` | calls left; `0` once settled **or** expired |
+| `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; `0` once settled |
+| `claimable_balance` | `(env, beneficiary: Address) -> i128` | pull-payment balance available to `claim` |
 | `locked_balance` | `(env, lease_id: u64) -> Result<i128, Error>` | `locked_deposit`; stays at `locked_deposit` while a settlement is pending or challenged; `0` once finalized or revoked |
 | `get_settlement` | `(env, lease_id: u64) -> Result<Settlement, Error>` | the `Settlement`, else `SettlementNotFound` |
 | `is_paused` | `(env) -> bool` | `true` while admin emergency pause blocks new commitments; absent flag reads `false` |
@@ -1202,6 +1362,17 @@ because topics are positional and indexers filter on them.
 
 | Event | Topics | Payload fields |
 | --- | --- | --- |
+| `registry_initialized` | — | `admin` |
+| `escrow_token_set` | — | `admin`, `token` |
+| `service_registered` | `service_id` | `provider`, `rate_per_call`, `endpoint_hash` |
+| `service_status_changed` | `service_id` | `provider`, `is_active` |
+| `lease_created` | `lease_id` | `service_id`, `consumer`, `allocated_calls`, `expires_at`, `locked_deposit` |
+| `lease_topped_up` | `lease_id` | `consumer`, `additional_calls`, `additional_duration_secs`, `new_expires_at`, `added_deposit` |
+| `lease_settled` | `lease_id` | `provider`, `verified_calls`, `payout`, `refund` |
+| `lease_revoked` | `lease_id` | `consumer`, `refund` |
+| `claimed` | `beneficiary` | `amount` |
+| `service_receipt_key_set` | `service_id` | `provider`, `receipt_key` |
+| `contract_upgraded` | — | `admin`, `new_wasm_hash` |
 | `registry_initialized` | — | `schema_version`, `admin` |
 | `escrow_token_set` | — | `schema_version`, `admin`, `token` |
 | `service_registered` | `service_id` | `schema_version`, `provider`, `rate_per_call`, `endpoint_hash` |
@@ -1346,6 +1517,14 @@ can still be settled or revoked, and the next write stores the current shape.
 
 ```rust
 pub enum DataKey {
+    Admin,                 // instance
+    Token,                 // instance
+    ServiceCount,          // instance
+    LeaseCount,            // instance
+    Service(u64),          // persistent
+    Lease(u64),            // persistent
+    ServiceReceiptKey(u64),// persistent
+    Claimable(Address),    // persistent
     Admin,                     // instance
     Token,                     // instance
     ServiceCount,              // instance
@@ -1510,6 +1689,14 @@ recording it there fails `cargo test`. Add a new code by appending it to
 | 14 | `TokenNotSet` | escrow token not configured |
 | 15 | `Overflow` | checked arithmetic failed |
 | 16 | `DurationTooLong` | lease duration above `MAX_LEASE_DURATION_SECS` |
+| 17 | `InvalidTopUp` | top-up with zero calls and zero duration |
+| 18 | `LeaseExpired` | top-up after expiry |
+| 19 | `EmptyBatch` | batch settlement with no leases |
+| 20 | `BatchTooLarge` | batch above `MAX_BATCH_SETTLE` |
+| 21 | `DuplicateLease` | duplicate lease id in a batch |
+| 22 | `NothingToClaim` | `claim` with a zero balance |
+| 23 | `ReceiptRequired` | unsigned settlement of a receipt-protected service |
+| 24 | `ReceiptNotConfigured` | signed settlement of a service with no receipt key |
 | 17 | `DepositTooLarge` | deposit above `MAX_LEASE_DEPOSIT` |
 | 18 | `AttestorNotConfigured` | `settle_lease_attested` on a service with no attestor |
 | 19 | `AttestationRequired` | plain `settle_lease` on a service that requires one |
@@ -1572,6 +1759,15 @@ stellar contract invoke --id $REGISTRY --source-account consumer --network testn
      --requested_calls 500 \
      --duration_secs 3600
 
+# top up a lease (more calls, more time, or both)
+stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
+  -- top_up_lease \
+     --consumer $CONSUMER \
+     --lease_id 1 \
+     --additional_calls 100 \
+     --additional_duration_secs 1800
+
+# settle (unsigned service)
 # early cancellation: consumer asks, provider consents
 stellar contract invoke --id $REGISTRY --source-account consumer --network testnet \
   -- request_early_cancel --consumer $CONSUMER --lease_id 1
@@ -1596,6 +1792,15 @@ stellar contract invoke --id $REGISTRY --network testnet \
 stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
   -- settle_lease --provider $PROVIDER --lease_id 1 --verified_calls 320
 
+# settle a batch of up to 20 leases
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  -- settle_leases \
+     --provider $PROVIDER \
+     --settlements '[[1,320],[2,500]]'
+
+# withdraw a pull-payment balance
+stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
+  -- claim --beneficiary $PROVIDER
 # finalize after the 24h challenge window (anyone may call this)
 stellar contract invoke --id $REGISTRY --source-account provider --network testnet \
   -- finalize_settlement --lease_id 1

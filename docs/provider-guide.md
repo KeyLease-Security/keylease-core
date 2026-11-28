@@ -111,6 +111,15 @@ stellar contract invoke \
   --send=yes -- settle_lease --provider $PROVIDER --lease_id 1 --verified_calls 320
 ```
 
+The registry credits you `verified_calls × rate_per_call` and credits the rest to
+the consumer, then emits `lease_settled { lease_id, provider, verified_calls,
+payout, refund }`. Withdraw your credit with:
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account provider --network testnet \
+  --send=yes -- claim --beneficiary $PROVIDER
+```
 That call moves no funds. It records `verified_calls × rate_per_call` as your
 payout, records the rest as the consumer's refund, and emits
 `lease_settlement_proposed { lease_id, provider, verified_calls, payout, refund,
@@ -129,6 +138,39 @@ refund }` and transfers the payout to you and the refund to the consumer.
 
 Settle with `verified_calls = 0` to propose a full refund for a lease you could
 not serve.
+
+### Settle a queue in one transaction
+
+`settle_leases` settles up to `MAX_BATCH_SETTLE = 20` leases you own. It is
+all-or-nothing: if any lease is invalid the whole call reverts.
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account provider --network testnet \
+  --send=yes -- settle_leases \
+     --provider $PROVIDER \
+     --settlements '[[1,320],[2,500]]'
+```
+
+### Require signed usage receipts
+
+If you want settlement to carry cryptographic attestation of the reported count,
+opt the service into receipts:
+
+```bash
+stellar contract invoke \
+  --id $REGISTRY --source-account provider --network testnet \
+  --send=yes -- set_service_receipt_key \
+     --provider $PROVIDER --service_id 1 \
+     --receipt_key <64_HEX_CHARS>
+```
+
+After that, `settle_lease` returns `ReceiptRequired`; settle with
+`settle_lease_with_receipt`, signing the 101-byte payload documented in the
+[contract reference](contract-reference.md#settle_lease_with_receipt). Receipt
+mode is per service and batch settlement is unavailable for it. Pass
+`--receipt_key` with an empty value (or clear it with the CLI's option syntax) to
+return to unsigned settlement.
 
 ### Settling rules
 
@@ -175,6 +217,15 @@ settled cannot be cancelled early.
 
 ## 6. Accounting
 
+`settle_lease` credits your pull-payment balance; `claim` moves it to your
+account. Nothing else pays you. Balances accumulate across leases, so you can
+settle a queue and claim once. Until you claim, the registry holds the credited
+amount on your behalf — there is no yield, and no one else can withdraw it.
+
+- **Revenue recognised:** `verified_calls × rate_per_call` per settlement,
+  published in the `lease_settled` event.
+- **Unused consumer balance:** credited to the consumer at settlement, or via
+  `revoke_expired_lease` after the 24h grace window.
 `finalize_settlement` pays you from escrow. Nothing else does. The registry never
 holds funds on your behalf after finalization, and there is no yield or custody
 to manage.

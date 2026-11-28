@@ -14,6 +14,9 @@ custody, verification, monitoring, upgrade, and rollback records.
 
 | Assumption | Consequence if violated |
 | --- | --- |
+| The admin configures a well-behaved SEP-41 token. | A malicious token contract could revert claims and stall settlement payouts. It cannot pay a balance twice: `settled` is persisted before crediting, the claimable entry is removed before the transfer, and a re-entrant token is rejected (`NothingToClaim`). |
+| The admin does not upgrade to a malicious Wasm. | An upgrade can change the contract logic. The admin key should be cold or multisig; upgrades emit `contract_upgraded`. |
+| The provider reports `verified_calls` honestly, unless the service opts into signed receipts. | It can under-report (it gets paid less) but never over-report past `allocated_calls`. With a receipt key configured, the count must be covered by a provider signature bound to the contract, lease, service and call count. |
 | The admin configures a well-behaved SEP-41 token. | A malicious token contract could revert transfers and stall settlement. It cannot be paid twice: `settled` is persisted before the transfer, and a re-entrant token is rejected (`LeaseAlreadySettled`). |
 | The admin does not upgrade to a malicious Wasm. | An upgrade can change the contract logic. The admin key should be cold or multisig. Upgrades now require a 24h on-ledger delay and emit `upgrade_proposed` with the hash and execution ledger, so consumers can exit; execution emits `contract_upgraded`. |
 | The provider reports `verified_calls` honestly, or the consumer and admin can correct it. | It can under-report (it gets paid less) and can over-report up to `allocated_calls`; the consumer has 24h to challenge the report, and the admin resolves the dispute. |
@@ -35,6 +38,12 @@ take more than it is owed, and it cannot prevent the consumer's refund.
 3. **Only the consumer can revoke, and only after the grace window.** Combined
    checks for ownership, expiry and elapsed grace (`Unauthorized`,
    `LeaseNotExpired`, `RevokeWindowNotElapsed`).
+4. **A lease releases funds once.** Every money path checks `settled` first,
+   persists `settled = true`, credits pull-payment balances, and `claim`
+   removes the balance before calling the token (`LeaseAlreadySettled`,
+   `NothingToClaim`). Checks-effects-interactions is enforced by
+   `test_reentrant_token_cannot_claim_a_balance_twice`.
+5. **Overflow aborts.** Deposit, top-up, payout and expiry arithmetic use
 4. **Early cancellation needs the provider's consent.** Only the consumer can
    request or withdraw, only the owning provider can approve or reject, and only
    approval moves funds (`Unauthorized`, `CancellationNotRequested`). A request
@@ -101,9 +110,15 @@ Asserted in `contracts/registry/src/test.rs`. The
 [contract reference](contract-reference.md) lists the exact error code for each
 violation.
 
+- `payout + refund == locked_deposit` for every lease.
+- `claimable(provider) + claimable(consumer)` equals the sum of every unsettled
+  credit and every stroop credited is withdrawable exactly once.
 - `payout + refund == locked_deposit` for every settlement and every approved
   early cancellation.
 - A settled lease never transitions again.
+- `settled` is true on-chain before any balance is credited or value leaves the
+  contract.
+- No lease can leave more value than was escrowed.
 - `settled` is true on-chain before any value leaves the contract.
 - A settlement is `Finalized` on-chain before any value leaves the contract.
 - No settlement can release more value than was escrowed.
@@ -128,6 +143,9 @@ violation.
 | Admin upholds every challenge to deny payouts | On-chain `lease_challenge_resolved` events; admin should be cold/multisig; consumer and provider can both observe |
 | Attacker settles someone else's lease | `service.provider == provider` check |
 | Attacker revokes someone else's lease | `lease.consumer == consumer` check |
+| Re-entrant token pays a balance twice | balance removed before transfer; adversarial test |
+| A receipt is reused on another lease, service or deployment | receipt binds contract, lease, service and call count |
+| Batch settlement partially applies | validate-all pass before any state change; transaction atomicity |
 | Attacker transfers someone else's lease | `lease.consumer == consumer` check + `require_auth` on the current consumer |
 | Consumer transfers, then revokes as the old owner | Ownership is one field; the revoke/refund path reads the new consumer |
 | Lease changes hands after payout | `settled` check in `transfer_lease` (`LeaseNotTransferable`) |
@@ -292,6 +310,12 @@ These are real and tracked as Drips Wave issues rather than hidden.
   it. Transferring a service is a `wave-medium` issue.
 - **No rate updates.** Changing `rate_per_call` requires registering a new
   service; in-flight leases keep their original escrow.
+- **Settlement is a single report by default.** The contract trusts the
+  provider's `verified_calls` unless the service opts into signed usage
+  receipts. Even then the signature proves the provider attested to a count, not
+  that an HTTP request was served; consumers remain protected by the fixed
+  allotment and the refund path.
+- **Not audited.** Do not escrow mainnet value you would be unhappy to lose.
 - **Settlement disputes are adjudicated, not proven.** The contract trusts the
   provider's `verified_calls` unless the consumer challenges it. The challenge is
   a 32-byte evidence commitment, and the admin decides off chain; the contract
