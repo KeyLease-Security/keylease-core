@@ -469,3 +469,23 @@ pub struct AdminTransferAccepted {
     /// Address that authorized the acceptance and is now the admin.
     pub new_admin: Address,
 }
+
+/// Emitted when the admin triggers an emergency pause.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyPaused {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Admin that authorized the pause.
+    pub admin: Address,
+}
+
+/// Emitted when the admin unpauses the registry.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyUnpaused {
+    /// Payload schema version; see the module docs.
+    pub schema_version: u32,
+    /// Admin that authorized the unpause.
+    pub admin: Address,
+}

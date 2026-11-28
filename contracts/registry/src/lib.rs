@@ -107,12 +107,12 @@ use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, St
 pub use crate::errors::Error;
 pub use crate::events::{
     AdminTransferAccepted, AdminTransferCanceled, AdminTransferProposed, ContractUpgraded,
-    EscrowTokenSet, LeaseCancellationRejected, LeaseCancellationRequested,
-    LeaseCancellationWithdrawn, LeaseCancelled, LeaseChallengeCancelled, LeaseChallengeResolved,
-    LeaseChallenged, LeaseCreated, LeaseDelegated, LeaseRevoked, LeaseSettled,
-    LeaseSettlementProposed, LeaseTransferred, RegistryInitialized, SchemaMigrated,
-    ServiceAttestorSet, ServiceRateUpdated, ServiceRegistered, ServiceStatusChanged,
-    UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
+    EmergencyPaused, EmergencyUnpaused, EscrowTokenSet, LeaseCancellationRejected,
+    LeaseCancellationRequested, LeaseCancellationWithdrawn, LeaseCancelled,
+    LeaseChallengeCancelled, LeaseChallengeResolved, LeaseChallenged, LeaseCreated, LeaseDelegated,
+    LeaseRevoked, LeaseSettled, LeaseSettlementProposed, LeaseTransferred, RegistryInitialized,
+    SchemaMigrated, ServiceAttestorSet, ServiceRateUpdated, ServiceRegistered,
+    ServiceStatusChanged, UpgradeCancelled, UpgradeProposed, EVENT_SCHEMA_VERSION,
 };
 pub use crate::storage::SCHEMA_VERSION;
 pub use crate::types::{
@@ -302,6 +302,40 @@ impl KeyLeaseRegistry {
         storage::set_schema_version(&env, SCHEMA_VERSION);
         storage::extend_instance_ttl(&env);
         RegistryInitialized {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: admin.clone(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Trigger an emergency pause. Admin only.
+    ///
+    /// Blocks new service registrations and lease creations (including the
+    /// delegated `create_lease_for` path). It deliberately does **not** block
+    /// [`KeyLeaseRegistry::settle_lease`] or
+    /// [`KeyLeaseRegistry::revoke_expired_lease`]: escrowed funds must stay
+    /// releasable during an incident.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::set_paused(&env, true);
+        storage::extend_instance_ttl(&env);
+        EmergencyPaused {
+            schema_version: EVENT_SCHEMA_VERSION,
+            admin: admin.clone(),
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Resume normal operations after an emergency pause. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+        storage::set_paused(&env, false);
+        storage::extend_instance_ttl(&env);
+        EmergencyUnpaused {
             schema_version: EVENT_SCHEMA_VERSION,
             admin: admin.clone(),
         }
@@ -633,6 +667,10 @@ impl KeyLeaseRegistry {
         provider.require_auth();
         storage::check_schema(&env)?;
 
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+
         if rate_per_call <= 0 {
             return Err(Error::InvalidRate);
         }
@@ -689,6 +727,10 @@ impl KeyLeaseRegistry {
     ) -> Result<(), Error> {
         provider.require_auth();
         storage::check_schema(&env)?;
+
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
 
         let mut service = storage::get_service(&env, service_id)?;
         if service.provider != provider {
@@ -1749,6 +1791,13 @@ impl KeyLeaseRegistry {
         storage::get_settlement(&env, lease_id)
     }
 
+    /// Query whether the registry is currently paused by admin emergency action.
+    ///
+    /// An upgraded deployment that has never called `pause` reports `false`.
+    pub fn is_paused(env: Env) -> bool {
+        storage::is_paused(&env)
+    }
+
     /// Escrow balance owed to a lease, in token stroops, at the current ledger
     /// time. Includes a proposed settlement's payout and refund until it is
     /// finalized.
@@ -1883,6 +1932,11 @@ fn mint_lease(
     requested_calls: u32,
     duration_secs: u64,
 ) -> Result<u64, Error> {
+    // Both lease-creation entry points funnel through here, so a pause cannot
+    // be bypassed by the delegated `create_lease_for` path.
+    if storage::is_paused(env) {
+        return Err(Error::ContractPaused);
+    }
     if requested_calls == 0 {
         return Err(Error::InvalidCalls);
     }

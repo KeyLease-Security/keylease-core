@@ -13,6 +13,8 @@ fn collect_spec_entries() -> Vec<ScSpecEntry> {
     // Contract functions (exported entry points)
     let fns: Vec<Vec<u8>> = vec![
         crate::KeyLeaseRegistry::spec_xdr_init().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_pause().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_unpause().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_set_token().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_propose_upgrade().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_cancel_upgrade().to_vec(),
@@ -53,6 +55,7 @@ fn collect_spec_entries() -> Vec<ScSpecEntry> {
         crate::KeyLeaseRegistry::spec_xdr_remaining_calls().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_locked_balance().to_vec(),
         crate::KeyLeaseRegistry::spec_xdr_get_settlement().to_vec(),
+        crate::KeyLeaseRegistry::spec_xdr_is_paused().to_vec(),
     ];
     for xdr in fns {
         entries.push(ScSpecEntry::from_xdr(xdr, Limits::none()).unwrap());
@@ -81,6 +84,8 @@ fn collect_spec_entries() -> Vec<ScSpecEntry> {
         crate::events::AdminTransferProposed::spec_xdr().to_vec(),
         crate::events::AdminTransferCanceled::spec_xdr().to_vec(),
         crate::events::AdminTransferAccepted::spec_xdr().to_vec(),
+        crate::events::EmergencyPaused::spec_xdr().to_vec(),
+        crate::events::EmergencyUnpaused::spec_xdr().to_vec(),
     ];
     for xdr in events {
         entries.push(ScSpecEntry::from_xdr(xdr, Limits::none()).unwrap());
