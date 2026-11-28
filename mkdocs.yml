@@ -83,6 +83,7 @@ nav:
       - Deployments: deployments.md
       - Design notes: design/wave-11.md
       - Design notes:
+          - Emergency pause (#120): design/emergency-pause.md
           - Storage schema versioning (#123): design/123-storage-schema-versioning.md
           - Two-step admin transfer (#121): design/121-admin-transfer.md
           - Provider staking and slashing (#137): design/137-provider-staking.md

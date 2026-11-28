@@ -22,6 +22,48 @@
   },
   {
     "function_v0": {
+      "doc": "Trigger an emergency pause. Admin only.\\n\\nBlocks new service registrations and lease creations (including the\\ndelegated `create_lease_for` path). It deliberately does **not** block\\n[`KeyLeaseRegistry::settle_lease`] or\\n[`KeyLeaseRegistry::revoke_expired_lease`]: escrowed funds must stay\\nreleasable during an incident.",
+      "name": "pause",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Resume normal operations after an emergency pause. Admin only.",
+      "name": "unpause",
+      "inputs": [
+        {
+          "doc": "",
+          "name": "admin",
+          "type_": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "result": {
+            "ok_type": "void",
+            "error_type": "error"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "function_v0": {
       "doc": "Configure the SEP-41 token used to escrow deposits. Admin only.\\n\\nKept as a separate, admin-gated entry point so that deployments can point\\nthe registry at the native Stellar asset contract (SAC) or a custom SEP-41\\ntoken without redeploying the registry logic.\\n\\nRepeating the call with the token that is already configured is a **no-op**:\\nnothing is written, the instance TTL is not extended and no\\n`escrow_token_set` event is published, so an idempotent retry can never be\\nmistaken for a token migration. The no-op is decided *after*\\n`require_auth()` and the stored-admin check, so it cannot be used to probe\\nor bypass either of them.",
       "name": "set_token",
       "inputs": [
@@ -244,7 +286,7 @@
   },
   {
     "function_v0": {
-      "doc": "Activate or deactivate a service. Only the owning provider may call this.\\n\\nExisting leases remain valid; deactivation only blocks *new* leases.",
+      "doc": "Activate or deactivate a service. Only the owning provider may call this.\\n\\nExisting leases remain valid; deactivation only blocks *new* leases.\\n\\nSetting the status the service already has is an accepted, idempotent\\nwrite rather than an error, so a client may safely retry after a timeout.\\nEach successful call publishes [`ServiceStatusChanged`], including\\na repeat with the same value: the event is the caller's confirmation that\\nthe write landed, and the payload always states the stored status.",
       "name": "set_service_active",
       "inputs": [
         {
@@ -1001,6 +1043,16 @@
             "error_type": "error"
           }
         }
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "doc": "Query whether the registry is currently paused by admin emergency action.\\n\\nAn upgraded deployment that has never called `pause` reports `false`.",
+      "name": "is_paused",
+      "inputs": [],
+      "outputs": [
+        "bool"
       ]
     }
   },
@@ -1838,6 +1890,56 @@
     }
   },
   {
+    "event_v0": {
+      "doc": "Emitted when the admin triggers an emergency pause.",
+      "lib": "",
+      "name": "EmergencyPaused",
+      "prefix_topics": [
+        "emergency_paused"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that authorized the pause.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
+    "event_v0": {
+      "doc": "Emitted when the admin unpauses the registry.",
+      "lib": "",
+      "name": "EmergencyUnpaused",
+      "prefix_topics": [
+        "emergency_unpaused"
+      ],
+      "params": [
+        {
+          "doc": "Payload schema version; see the module docs.",
+          "name": "schema_version",
+          "type_": "u32",
+          "location": "data"
+        },
+        {
+          "doc": "Admin that authorized the unpause.",
+          "name": "admin",
+          "type_": "address",
+          "location": "data"
+        }
+      ],
+      "data_format": "map"
+    }
+  },
+  {
     "udt_error_enum_v0": {
       "doc": "Contract-level error codes returned by [`crate::KeyLeaseRegistry`].\\n * Codes are stable and start at 1 (`0` is reserved by the host for success).\\n * New codes must be appended; codes are part of the ABI.\\n * The full mapping is pinned by `ERROR_ABI` in `test.rs`; extend it on append.",
       "lib": "",
@@ -2057,6 +2159,11 @@
           "doc": "`register_service` was called with an all-zero `endpoint_hash`, which\\ncommits to nothing and is treated as a placeholder. Appended after the\\nschema-versioning and admin-transfer codes so every number already\\npublished keeps its meaning.",
           "name": "InvalidEndpointHash",
           "value": 43
+        },
+        {
+          "doc": "The contract is currently paused by admin emergency action. New\\nservice registrations and lease creations are refused; settlements and\\nconsumer revocations remain available.",
+          "name": "ContractPaused",
+          "value": 44
         }
       ]
     }

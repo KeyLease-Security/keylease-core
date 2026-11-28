@@ -1,0 +1,12 @@
+[package]
+name = "keylease-indexer"
+version = "0.1.0"
+edition = "2021"
+description = "Runnable Soroban event indexer for KeyLeaseRegistry"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+stellar-xdr = { version = "26.0.1", default-features = false, features = ["curr", "base64", "alloc"] }
+stellar-strkey = "0.0.16"
+ureq = { version = "2.12", features = ["json"] }
