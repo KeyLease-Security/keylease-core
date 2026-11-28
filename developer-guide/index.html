@@ -1,0 +1,3367 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A Soroban protocol on Stellar for time-bound, escrowed API & RPC micro-leases.">
+      
+      
+      
+        <link rel="canonical" href="https://keylease-security.github.io/keylease-core/developer-guide/">
+      
+      
+        <link rel="prev" href="../consumer-guide/">
+      
+      
+        <link rel="next" href="../deployment/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Developer guide - KeyLease</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#developer-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="KeyLease" class="md-header__button md-logo" aria-label="KeyLease" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            KeyLease
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Developer guide
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/KeyLease-Security/keylease-core" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    KeyLease-Security/keylease-core
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="KeyLease" class="md-nav__button md-logo" aria-label="KeyLease" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    KeyLease
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/KeyLease-Security/keylease-core" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    KeyLease-Security/keylease-core
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Overview
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../introduction/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Introduction
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocol
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Protocol
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How the protocol works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contract-reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contract reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stellar
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Stellar
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../networks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Networks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../provider-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Provider guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../consumer-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Consumer guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer guide
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setup
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-commands-ci-runs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The commands CI runs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#project-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment variables
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#adding-a-new-entry-point" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a new entry point
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#code-standards" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Code standards
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing-conventions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing conventions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#abi-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ABI snapshot
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#releasing-a-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Releasing a version
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Releasing a version">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-bump-the-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Bump the version
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-write-the-notes-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Write the notes page
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-run-the-checks-a-release-is-gated-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Run the checks a release is gated on
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-tag-the-release-commit-on-main" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Tag the release commit on main
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-record-the-artifacts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Record the artifacts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrading-a-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrading a deployment
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-contract-state-and-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading contract state and events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deploying" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deploying
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#local-sandbox-walkthrough" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local sandbox walkthrough
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Local sandbox walkthrough">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#quick-start-with-the-sandbox-script" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start with the sandbox script
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#prerequisites_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1-start-a-local-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Start a local network
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-create-and-fund-three-identities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Create and fund three identities
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-deploy-the-registry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Deploy the registry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-initialise-set-the-escrow-token-publish-a-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Initialise, set the escrow token, publish a service
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-create-one-lease" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Create one lease
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-settle-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Settle it
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-read-the-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Read the events
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#8-keep-an-entry-alive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Keep an entry alive
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-differs-from-testnet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What differs from Testnet
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#teardown" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Teardown
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#using-contractsmock_token-instead-of-the-native-sac" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Using contracts/mock_token instead of the native SAC
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#contributing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contributing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#read-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read next
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mainnet-runbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mainnet runbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/upgrade-timelock/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design: time-locked upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/consumer-challenge-window/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design: consumer challenge window
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/early-cancellation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design: early cancellation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployments
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_5" id="__nav_6_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design notes
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design notes
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/emergency-pause/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Emergency pause (#120)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/123-storage-schema-versioning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage schema versioning (#123)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/121-admin-transfer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Two-step admin transfer (#121)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/137-provider-staking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Provider staking and slashing (#137)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/133-revenue-splits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Revenue splits (#133)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/transferable-leases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transferable leases (#134)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/136-oracle-attestation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optional oracle attestation (#136)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/v0.2.1/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Release notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/v0.2.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.2.0
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releases/v0.1.0/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    v0.1.0
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setup
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-commands-ci-runs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The commands CI runs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#project-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment variables
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#adding-a-new-entry-point" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a new entry point
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#code-standards" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Code standards
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing-conventions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing conventions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#abi-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ABI snapshot
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#releasing-a-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Releasing a version
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Releasing a version">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-bump-the-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Bump the version
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-write-the-notes-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Write the notes page
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-run-the-checks-a-release-is-gated-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Run the checks a release is gated on
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-tag-the-release-commit-on-main" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Tag the release commit on main
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-record-the-artifacts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Record the artifacts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrading-a-deployment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrading a deployment
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-contract-state-and-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading contract state and events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deploying" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deploying
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#local-sandbox-walkthrough" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local sandbox walkthrough
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Local sandbox walkthrough">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#quick-start-with-the-sandbox-script" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start with the sandbox script
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#prerequisites_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#1-start-a-local-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Start a local network
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-create-and-fund-three-identities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Create and fund three identities
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-deploy-the-registry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Deploy the registry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-initialise-set-the-escrow-token-publish-a-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Initialise, set the escrow token, publish a service
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-create-one-lease" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Create one lease
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-settle-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Settle it
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-read-the-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Read the events
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#8-keep-an-entry-alive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Keep an entry alive
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-differs-from-testnet" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What differs from Testnet
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#teardown" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Teardown
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#using-contractsmock_token-instead-of-the-native-sac" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Using contracts/mock_token instead of the native SAC
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#contributing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contributing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#read-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read next
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/KeyLease-Security/keylease-core/edit/main/docs/developer-guide.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="developer-guide">Developer guide<a class="headerlink" href="#developer-guide" title="Permanent link">&para;</a></h1>
+<p>How to build, test, upgrade and extend the KeyLease Soroban contracts.</p>
+<h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Version</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rust</td>
+<td><code>1.84+</code></td>
+<td><code>rustup install stable</code></td>
+</tr>
+<tr>
+<td>Wasm target</td>
+<td><code>wasm32v1-none</code></td>
+<td><code>rustup target add wasm32v1-none</code></td>
+</tr>
+<tr>
+<td>components</td>
+<td><code>rustfmt</code>, <code>clippy</code></td>
+<td><code>rustup component add rustfmt clippy</code></td>
+</tr>
+<tr>
+<td>Stellar CLI</td>
+<td>latest</td>
+<td>only needed to deploy, invoke, read events or upgrade on a network</td>
+</tr>
+<tr>
+<td>Node.js</td>
+<td><code>&gt;= 20.11</code></td>
+<td>only if you build your own JS client against Soroban RPC</td>
+</tr>
+</tbody>
+</table>
+<h2 id="setup">Setup<a class="headerlink" href="#setup" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/KeyLease-Security/keylease-core
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nb">cd</span><span class="w"> </span>keylease-core
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>rustup<span class="w"> </span>target<span class="w"> </span>add<span class="w"> </span>wasm32v1-none
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>cargo<span class="w"> </span>build<span class="w"> </span>--all
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--all
+</code></pre></div>
+<h2 id="the-commands-ci-runs">The commands CI runs<a class="headerlink" href="#the-commands-ci-runs" title="Permanent link">&para;</a></h2>
+<p>These five are the definition of "green". Run all five before opening a PR.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>cargo<span class="w"> </span>fmt<span class="w"> </span>--all<span class="w"> </span>--<span class="w"> </span>--check
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>cargo<span class="w"> </span>clippy<span class="w"> </span>--all-targets<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>cargo<span class="w"> </span>clippy<span class="w"> </span>--target<span class="w"> </span>wasm32v1-none<span class="w"> </span>--release<span class="w"> </span>--all<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--all
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>cargo<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>wasm32v1-none<span class="w"> </span>--release<span class="w"> </span>--all
+</code></pre></div>
+<p>CI also runs a cargo-deny dependency policy check (<code>deny.toml</code>), a shellcheck
+pass over every tracked shell script, a gitleaks secret scan, and a ClamAV
+malware scan over the checkout and the built Wasm artifacts. CI job names are
+<code>Format</code>, <code>Shellcheck</code>, <code>Clippy</code>, <code>Test</code>, <code>Build (wasm32v1-none)</code>,
+<code>SBOM (CycloneDX)</code>, <code>Secret Scan</code>, <code>Dependency Policy</code> and <code>Malware Scan</code> — these
+are the required status checks in branch protection.</p>
+<p><code>SBOM (CycloneDX)</code> generates a machine-readable inventory of the crates in the
+registry Wasm from <code>Cargo.lock</code>, stamps the workspace version and full commit SHA
+into its metadata, and uploads it as the <code>sbom-cyclonedx</code> workflow artifact.
+Consumers can download that artifact from the CI run for any commit to answer
+"which crates were compiled into this Wasm?" without rebuilding it.</p>
+<p>The shell pass is not one of the four cargo commands, so run it separately:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>git<span class="w"> </span>ls-files<span class="w"> </span>-z<span class="w"> </span><span class="s1">'*.sh'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>xargs<span class="w"> </span>-0<span class="w"> </span>shellcheck
+</code></pre></div>
+<p>It uses shellcheck's default severity, which includes style notes, and fails
+outright when no tracked script matches.</p>
+<p>The script behaviour itself is covered by bats in <code>tests/</code>. The suite stubs
+<code>gh</code>, <code>stellar</code>, <code>cargo</code> and <code>rustup</code> on <code>PATH</code> (from <code>tests/stubs</code>), so it
+needs no network, credentials or Stellar toolchain:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>bats<span class="w"> </span>tests
+</code></pre></div>
+<p>It covers argument parsing, the mainnet guard, <code>--dry-run</code> plans and the
+"CLI not found" branches of <code>scripts/deploy-testnet.sh</code>,
+<code>scripts/create-issues.sh</code>, <code>scripts/setup-repo.sh</code> and
+<code>scripts/sandbox-local.sh</code>.</p>
+<h2 id="project-layout">Project layout<a class="headerlink" href="#project-layout" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>contracts/registry/src/lib.rs</code></td>
+<td>Entry points, <code>contractmeta!</code>, upgrade, protocol lifecycle.</td>
+</tr>
+<tr>
+<td><code>contracts/registry/src/events.rs</code></td>
+<td>Typed <code>#[contractevent]</code> payloads.</td>
+</tr>
+<tr>
+<td><code>contracts/registry/src/types.rs</code></td>
+<td><code>Service</code>, <code>Lease</code>, <code>ServiceStats</code>, <code>LeaseStatus</code>.</td>
+</tr>
+<tr>
+<td><code>contracts/registry/src/storage.rs</code></td>
+<td><code>DataKey</code> layout, TTL policy, accessors.</td>
+</tr>
+<tr>
+<td><code>contracts/registry/src/errors.rs</code></td>
+<td>Stable <code>Error</code> codes (never reuse a number).</td>
+</tr>
+<tr>
+<td><code>contracts/registry/src/test.rs</code></td>
+<td>Lifecycle, SAC, events, upgrade and re-entrancy tests.</td>
+</tr>
+<tr>
+<td><code>contracts/mock_token/</code></td>
+<td>Test/sandbox SEP-41 token.</td>
+</tr>
+<tr>
+<td><code>scripts/deploy-testnet.sh</code></td>
+<td>Sequential testnet deploy and upgrade.</td>
+</tr>
+<tr>
+<td><code>scripts/sandbox-local.sh</code></td>
+<td>Local-network sandbox: deploy, write <code>.env.sandbox</code>, tear down.</td>
+</tr>
+<tr>
+<td><code>scripts/check-no-std.sh</code></td>
+<td>Checks the release Wasm is built without <code>std</code> and crates forbid <code>unsafe</code>.</td>
+</tr>
+<tr>
+<td><code>scripts/create-issues.sh</code></td>
+<td>Batch Wave backlog creation.</td>
+</tr>
+<tr>
+<td><code>scripts/setup-repo.sh</code></td>
+<td>Topics, labels, branch protection.</td>
+</tr>
+<tr>
+<td><code>tests/</code></td>
+<td>bats coverage for the shell scripts, with CLI stubs in <code>tests/stubs</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="environment-variables">Environment variables<a class="headerlink" href="#environment-variables" title="Permanent link">&para;</a></h2>
+<p>See <a href="https://github.com/KeyLease-Security/keylease-core/blob/main/.env.example"><code>.env.example</code></a>
+for the full list.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Used by</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KEYLEASE_NETWORK</code></td>
+<td>scripts, clients</td>
+<td><code>testnet</code> / <code>mainnet</code> / <code>futurenet</code> / <code>local</code></td>
+</tr>
+<tr>
+<td><code>KEYLEASE_RPC_URL</code></td>
+<td>scripts, clients</td>
+<td>Soroban RPC endpoint</td>
+</tr>
+<tr>
+<td><code>KEYLEASE_NETWORK_PASSPHRASE</code></td>
+<td>clients</td>
+<td>passphrase used to sign transactions</td>
+</tr>
+<tr>
+<td><code>KEYLEASE_CONTRACT_ID</code></td>
+<td>scripts, clients</td>
+<td>deployed <code>KeyLeaseRegistry</code> id</td>
+</tr>
+<tr>
+<td><code>KEYLEASE_SERVICE_ID</code></td>
+<td>clients</td>
+<td>service a consumer acquires from</td>
+</tr>
+<tr>
+<td><code>KEYLEASE_TOKEN_ADDRESS</code></td>
+<td>tooling</td>
+<td>SEP-41 / SAC escrow token</td>
+</tr>
+<tr>
+<td><code>KEYLEASE_ADMIN</code> / <code>KEYLEASE_PROVIDER</code> / <code>KEYLEASE_CONSUMER</code></td>
+<td>tooling</td>
+<td>Stellar addresses</td>
+</tr>
+<tr>
+<td><code>KEYLEASE_RATE_PER_CALL</code></td>
+<td><code>register_service</code></td>
+<td>stroops per call</td>
+</tr>
+<tr>
+<td><code>KEYLEASE_ENDPOINT_HASH</code></td>
+<td><code>register_service</code></td>
+<td>64 hex chars (32 bytes)</td>
+</tr>
+</tbody>
+</table>
+<p>Never commit secret seeds. <code>.env</code> is gitignored.</p>
+<h2 id="adding-a-new-entry-point">Adding a new entry point<a class="headerlink" href="#adding-a-new-entry-point" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Add the variant(s) to <code>errors.rs</code> (<strong>append</strong>, never renumber).</li>
+<li>Add any new <code>DataKey</code> variants to <code>storage.rs</code> with a documented TTL policy.</li>
+<li>Implement the entry point in <code>lib.rs</code>, documenting auth + preconditions.</li>
+<li>Add a typed event in <code>events.rs</code> and publish it after the state is persisted.</li>
+<li>Add tests covering the happy path <strong>and</strong> each failure/refund path, plus the
+   emitted event.</li>
+<li>Update the interface and event tables in <code>README.md</code> and
+   <a href="../contract-reference/"><code>docs/contract-reference.md</code></a>.</li>
+<li>If the change adds or modifies exported functions, events, or error
+   discriminants, update the ABI snapshot (see <a href="#abi-snapshot">ABI snapshot</a>).</li>
+</ol>
+<h2 id="code-standards">Code standards<a class="headerlink" href="#code-standards" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>#![no_std]</code> — no <code>std</code> in contract code; the target is <code>wasm32v1-none</code>.</li>
+<li><strong>All token math is checked</strong>; map failures to <code>Error::Overflow</code>.</li>
+<li><strong>Authenticate actors</strong> with <code>require_auth()</code> on the address you represent.</li>
+<li><strong>Follow checks-effects-interactions.</strong> Persist <code>settled</code> (or the equivalent)
+  before any cross-contract call.</li>
+<li><strong>Guard money paths</strong> with the <code>settled</code> check first.</li>
+<li><strong>Bound storage.</strong> Every persistent key needs a TTL policy and, if user input
+  controls its lifetime, an upper bound.</li>
+<li><strong>No unbounded loops</strong> over user-supplied collections.</li>
+<li><strong>Errors over panics.</strong></li>
+<li><strong>Never reuse an error code.</strong></li>
+<li><strong>Emit events</strong> for every state transition; never put secrets in one.</li>
+</ul>
+<h2 id="testing-conventions">Testing conventions<a class="headerlink" href="#testing-conventions" title="Permanent link">&para;</a></h2>
+<p>Use <code>env.mock_all_auths()</code> for happy paths and <code>try_*</code> client methods to assert
+specific errors:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="fm">assert_eq!</span><span class="p">(</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">    </span><span class="n">client</span><span class="p">.</span><span class="n">try_settle_lease</span><span class="p">(</span><span class="o">&amp;</span><span class="n">provider</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">lease_id</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="nb">Err</span><span class="p">(</span><span class="nb">Ok</span><span class="p">(</span><span class="n">Error</span><span class="p">::</span><span class="n">InvalidCalls</span><span class="p">))</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="p">);</span>
+</code></pre></div>
+<p>Event tests compare the emitted topics and payload with the event type generated
+by <code>#[contractevent]</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">assert_single_event</span><span class="p">(</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">    </span><span class="o">&amp;</span><span class="n">env</span><span class="p">,</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">    </span><span class="o">&amp;</span><span class="n">registry_id</span><span class="p">,</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">    </span><span class="o">&amp;</span><span class="n">LeaseSettled</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">lease_id</span><span class="p">,</span><span class="w"> </span><span class="n">provider</span><span class="p">,</span><span class="w"> </span><span class="n">verified_calls</span><span class="p">,</span><span class="w"> </span><span class="n">payout</span><span class="p">,</span><span class="w"> </span><span class="n">refund</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="p">);</span>
+</code></pre></div>
+<p>The suite also deploys the <strong>real Stellar Asset Contract</strong> as the escrow token
+(<code>env.register_stellar_asset_contract_v2</code>), and installs a hostile SEP-41 token
+that re-enters <code>settle_lease</code> to prove the double-settlement guard holds. Keep
+both patterns when adding money paths.</p>
+<p>Every security-sensitive change needs an adversarial test — an attempt to steal,
+strand, or double-spend.</p>
+<h2 id="abi-snapshot">ABI snapshot<a class="headerlink" href="#abi-snapshot" title="Permanent link">&para;</a></h2>
+<p><code>contracts/registry/abi_snapshot.json</code> is a checked-in snapshot of the public
+contract ABI: exported functions, event specs, and error discriminants. The
+<code>abi_snapshot</code> test in <code>contracts/registry/src/test_abi.rs</code> compares the
+current contract surface against this file and fails on any drift.</p>
+<p>To update the snapshot after a legitimate additive change:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nv">UPDATE_ABI_SNAPSHOT</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-p<span class="w"> </span>keylease-registry<span class="w"> </span>abi_snapshot<span class="w"> </span>--<span class="w"> </span>--nocapture
+</code></pre></div>
+<p>Review the diff carefully — renames, removals, reordering, or discriminant
+changes are breaking ABI changes and should not be accepted without an explicit
+versioning decision.</p>
+<h2 id="releasing-a-version">Releasing a version<a class="headerlink" href="#releasing-a-version" title="Permanent link">&para;</a></h2>
+<p>A release is four things: a version bump, a notes page, a check run and an
+annotated tag. Nothing in <code>.github/workflows/</code> publishes a crate, builds a
+GitHub Release or cuts a tag — <code>ci.yml</code> only gates commits and <code>docs.yml</code> only
+builds and publishes the site — so the steps below are the whole process.</p>
+<h3 id="1-bump-the-version">1. Bump the version<a class="headerlink" href="#1-bump-the-version" title="Permanent link">&para;</a></h3>
+<p><code>Cargo.toml</code> carries the only version this repository reports. Both crates
+inherit it (<code>version.workspace = true</code>), so one edit covers the workspace — but
+two more files have to follow it.</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>What changes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Cargo.toml</code></td>
+<td><code>[workspace.package] version = "X.Y.Z"</code></td>
+</tr>
+<tr>
+<td><code>contracts/registry/Cargo.toml</code></td>
+<td>the <code>version = "X.Y.Z"</code> pin on the <code>keylease-mock-token</code> dev-dependency</td>
+</tr>
+<tr>
+<td><code>Cargo.lock</code></td>
+<td>the <code>keylease-registry</code> and <code>keylease-mock-token</code> entries — regenerate with <code>cargo check --all</code> and commit the diff</td>
+</tr>
+</tbody>
+</table>
+<p>No other file carries a version string, because the version reaches the rest of
+the system through the build:</p>
+<ul>
+<li><code>contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"))</code> embeds the
+  new value in the Wasm, so <code>stellar contract info meta</code> reports it.</li>
+<li><code>version()</code> reads that same value, so the on-chain contract identifies itself
+  after the upgrade — the check in <a href="../deployment/#verifying-a-deployment">Deployment</a>.</li>
+</ul>
+<p>Use the convention the existing releases already follow. <code>0.x.0</code> is a release
+that changes what the world sees — a new entry point, a new event, a new error
+code, new storage. <code>0.x.1</code> is a release that changes none of those (v0.2.1 only
+changed the lease TTL policy). Error codes are append-only, so a new code alone
+is never a major-version event.</p>
+<h3 id="2-write-the-notes-page">2. Write the notes page<a class="headerlink" href="#2-write-the-notes-page" title="Permanent link">&para;</a></h3>
+<p>Add <code>docs/releases/vX.Y.Z.md</code>, then register it in <strong>both</strong> tables of contents —
+<code>mkdocs.yml</code> under <code>nav:</code> → <code>Project:</code> and <code>docs/SUMMARY.md</code> under
+<code>## Project</code>. The newest page keeps the <code>Release notes</code> label and the previous
+ones are relabelled to their version:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">Project</span><span class="p">:</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">Deployments</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">deployments.md</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">Release notes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">releases/v0.2.2.md</span><span class="w">   </span><span class="c1"># new</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">v0.2.1</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">releases/v0.2.1.md</span><span class="w">          </span><span class="c1"># relabelled</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">v0.2.0</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">releases/v0.2.0.md</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">v0.1.0</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">releases/v0.1.0.md</span>
+</code></pre></div>
+<p>Copy the shape from an existing page rather than inventing one:</p>
+<table>
+<thead>
+<tr>
+<th>Example</th>
+<th>What it shows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../releases/v0.2.1/">v0.2.1</a></td>
+<td>a behavior-only patch: the problem it solved, a short "What changed", compatibility stated as "no ABI, event, storage-key or error-code changes"</td>
+</tr>
+<tr>
+<td><a href="../releases/v0.2.0/">v0.2.0</a></td>
+<td>an additive release: new events and <code>upgrade</code>, a full "Interface at this tag" table, and an "Upgrading from v0.1.0" section</td>
+</tr>
+<tr>
+<td><a href="../releases/v0.1.0/">v0.1.0</a></td>
+<td>the first release, and the banner pattern a superseded page uses to point at the current interface</td>
+</tr>
+</tbody>
+</table>
+<p>A notes page needs these sections, in this order:</p>
+<ol>
+<li><strong>Heading and lead</strong> — <code># keylease-core vX.Y.Z</code> then one paragraph saying what
+   the release is and, when there is a reason, why it exists.</li>
+<li><strong>Highlights</strong> or <strong>What changed</strong> — one bullet per user-visible change, each
+   naming the entry point, constant or error code it touched.</li>
+<li><strong>Contracts</strong> — the package → Wasm table.</li>
+<li><strong>Interface at this tag</strong> — the entry points and their auth requirements, so
+   the page stays readable after the reference moves on.</li>
+<li><strong>Compatibility</strong> — Rust, <code>soroban-sdk</code>, Wasm target, the error-code range, and
+   an explicit statement about storage keys and events.</li>
+<li><strong>Upgrading from vX.Y.Z</strong> — required whenever a deployed network is running an
+   older build; say whether <code>upgrade</code> is safe in place.</li>
+<li><strong>Known limitations</strong>, <strong>Verification</strong> (the four commands), <strong>License</strong>.</li>
+<li><strong>Artifacts</strong> — link the <code>sbom-cyclonedx</code> workflow artifact so consumers can
+   see the crates compiled into the Wasm. It is generated from <code>Cargo.lock</code> by
+   the CI run for the release's commit, with the workspace version and full
+   commit in its CycloneDX metadata. Use this snippet, replacing the version
+   and pointing at the CI run for the tag:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="gu">## Artifacts</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="k">-</span><span class="w"> </span>[<span class="nt">CycloneDX SBOM (`sbom-cyclonedx`)</span>](<span class="na">https://github.com/KeyLease-Security/keylease-core/actions/workflows/ci.yml</span>)
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>  — crates compiled into this release's Wasm, generated from <span class="sb">`Cargo.lock`</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>  by the CI run for its commit and stamped with the workspace version and
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>  commit.
+</code></pre></div>
+<p>Never put a secret, seed or raw credential in a notes page — including a
+deployer's secret key. Addresses and ledger numbers are fine and useful.</p>
+<h3 id="3-run-the-checks-a-release-is-gated-on">3. Run the checks a release is gated on<a class="headerlink" href="#3-run-the-checks-a-release-is-gated-on" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>cargo<span class="w"> </span>fmt<span class="w"> </span>--all<span class="w"> </span>--<span class="w"> </span>--check
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>cargo<span class="w"> </span>clippy<span class="w"> </span>--all-targets<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>cargo<span class="w"> </span>clippy<span class="w"> </span>--target<span class="w"> </span>wasm32v1-none<span class="w"> </span>--release<span class="w"> </span>--all<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--all
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>cargo<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>wasm32v1-none<span class="w"> </span>--release<span class="w"> </span>--all
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>./scripts/check-no-std.sh<span class="w"> </span>--no-build
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>cargo<span class="w"> </span>deny<span class="w"> </span>check
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>./scripts/scan-malware.sh
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements-docs.txt<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>mkdocs<span class="w"> </span>build<span class="w"> </span>--strict
+</code></pre></div>
+<p>The first four are the CI jobs every commit must pass, and
+<code>check-no-std.sh</code> runs inside the <code>Build (wasm32v1-none)</code> job; <code>cargo deny check</code> and
+<code>./scripts/scan-malware.sh</code> are the Dependency Policy and Malware Scan jobs run
+locally. <code>mkdocs build --strict</code> is the one that bites here, because the failure
+it catches is a page missing from <code>nav:</code> or an anchor that does not resolve. It
+is a pull-request gate as well as a <code>main</code> gate, but only for a PR that touches
+<code>docs/**</code>, <code>mkdocs.yml</code> or <code>requirements-docs.txt</code> — those paths run the
+<code>Docs → Build preview</code> job. A release branch that changes none of them, such as
+one that only bumps the version, gets no preview run at all, so execute the
+command above yourself before tagging.</p>
+<h3 id="4-tag-the-release-commit-on-main">4. Tag the release commit on <code>main</code><a class="headerlink" href="#4-tag-the-release-commit-on-main" title="Permanent link">&para;</a></h3>
+<p>Tag the merge-base commit on <code>main</code> that carries both the version bump and the
+notes page — not a branch tip that has not merged. <code>v0.1.0</code> is an annotated tag,
+so stay annotated:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>git<span class="w"> </span>fetch<span class="w"> </span>origin
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>git<span class="w"> </span>tag<span class="w"> </span>-a<span class="w"> </span>vX.Y.Z<span class="w"> </span>-m<span class="w"> </span><span class="s2">"keylease-core vX.Y.Z"</span><span class="w"> </span>origin/main
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>git<span class="w"> </span>push<span class="w"> </span>origin<span class="w"> </span>vX.Y.Z
+</code></pre></div>
+<p>The tag is what makes the recorded hashes meaningful: it is the revision anyone
+can rebuild from to reproduce the deployed Wasm.</p>
+<h3 id="5-record-the-artifacts">5. Record the artifacts<a class="headerlink" href="#5-record-the-artifacts" title="Permanent link">&para;</a></h3>
+<p>Deploying is covered in <a href="../deployment/">Deployment</a>; what a release must
+<em>record</em> is in <a href="../deployments/">Deployments</a>, whose
+<a href="../deployments/#recording-a-deployment">Recording a deployment</a> steps this table
+feeds.</p>
+<table>
+<thead>
+<tr>
+<th>Artifact</th>
+<th>How to obtain it</th>
+<th>Where it is recorded</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Contract id</td>
+<td><code>stellar contract deploy</code> prints it</td>
+<td>Testnet table, <code>KeyLeaseRegistry</code></td>
+</tr>
+<tr>
+<td>Built Wasm digest</td>
+<td><code>sha256sum target/wasm32v1-none/release/keylease_registry.wasm</code></td>
+<td>"Verifying a listed address"</td>
+</tr>
+<tr>
+<td>On-chain Wasm hash</td>
+<td><code>stellar contract upload</code> prints it; <code>stellar contract info hash --id $REGISTRY</code> reads it back</td>
+<td>Testnet table, "Wasm hash"</td>
+</tr>
+<tr>
+<td>Version, as the chain sees it</td>
+<td><code>… -- version</code> and <code>stellar contract info meta --id $REGISTRY</code></td>
+<td>Testnet table + "On-chain metadata" (<code>rssdkver</code> included)</td>
+</tr>
+<tr>
+<td>Deploy-ledger trail</td>
+<td>ledger and tx hash for <code>init</code>, <code>set_token</code>, <code>register_service</code>, or the <code>upgrade</code></td>
+<td>Testnet table rows</td>
+</tr>
+<tr>
+<td>Pre/post counters</td>
+<td><code>service_count</code>, <code>lease_count</code>, <code>get_service</code>, <code>get_lease</code></td>
+<td>release notes "Verified on-chain" bullet</td>
+</tr>
+<tr>
+<td>Signer addresses</td>
+<td>admin, provider, demo consumer, escrow token</td>
+<td>Testnet table</td>
+</tr>
+<tr>
+<td>Source revision</td>
+<td>the tag cut in step 4</td>
+<td>Testnet table, "Deployed from"</td>
+</tr>
+<tr>
+<td>CycloneDX SBOM</td>
+<td><code>sbom-cyclonedx</code> artifact of the tagged CI run</td>
+<td>release notes "Artifacts" link</td>
+</tr>
+</tbody>
+</table>
+<p>The built digest and the on-chain hash are the same value only if the build is
+reproducible: check out the tag, run
+<code>cargo build --target wasm32v1-none --release --all</code> and compare against
+<code>stellar contract info hash</code>. If they differ, the release is not verifiable from
+source — say so in the notes page rather than recording a hash you cannot
+reproduce.</p>
+<h2 id="upgrading-a-deployment">Upgrading a deployment<a class="headerlink" href="#upgrading-a-deployment" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>stellar<span class="w"> </span>contract<span class="w"> </span>upload<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">  </span>--wasm<span class="w"> </span>target/wasm32v1-none/release/keylease_registry.wasm<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="w">  </span>--source-account<span class="w"> </span>admin<span class="w"> </span>--network<span class="w"> </span>testnet
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="nv">$REGISTRY</span><span class="w"> </span>--source-account<span class="w"> </span>admin<span class="w"> </span>--network<span class="w"> </span>testnet<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">  </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>propose_upgrade<span class="w"> </span>--admin<span class="w"> </span><span class="nv">$ADMIN</span><span class="w"> </span>--new_wasm_hash<span class="w"> </span>&lt;hash-from-upload&gt;
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="c1"># inspect the recorded hash and execution ledger timestamp</span>
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="nv">$REGISTRY</span><span class="w"> </span>--network<span class="w"> </span>testnet<span class="w"> </span>--<span class="w"> </span>get_pending_upgrade
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>
+<a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="c1"># after the 24h delay has elapsed (the contract rejects earlier calls)</span>
+<a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="nv">$REGISTRY</span><span class="w"> </span>--source-account<span class="w"> </span>admin<span class="w"> </span>--network<span class="w"> </span>testnet<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a><span class="w">  </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>execute_upgrade<span class="w"> </span>--admin<span class="w"> </span><span class="nv">$ADMIN</span>
+<a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a>
+<a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a><span class="c1"># or abandon the proposal: -- cancel_upgrade --admin $ADMIN</span>
+</code></pre></div>
+<p>Rules for upgrades:</p>
+<ul>
+<li>Never change the <code>DataKey</code> layout or the meaning of stored values.</li>
+<li>Append fields to a <code>#[contracttype]</code> struct; never reorder, rename or remove
+  one. A struct decodes by unpacking the field names it declares, so a missing
+  field makes existing entries undecodable. <code>Lease.created_at</code> is the worked
+  example: it was appended, and <code>storage::get_lease</code> keeps a legacy fallback that
+  reads pre-<code>created_at</code> entries and reports <code>created_at = 0</code> (unknown) so
+  settlement and refunds still work across the upgrade. Add the same fallback, or
+  drain the affected entries, whenever you extend a stored type.</li>
+<li>Never renumber or reuse an error code.</li>
+<li>Keep event names and payload fields compatible; add new events for new
+  transitions.</li>
+<li>Bump the workspace version so <code>version()</code> and <code>contractmeta!</code> change.</li>
+<li>Settle or revoke in-flight leases before changing token semantics.</li>
+</ul>
+<h2 id="reading-contract-state-and-events">Reading contract state and events<a class="headerlink" href="#reading-contract-state-and-events" title="Permanent link">&para;</a></h2>
+<p>Clients should prefer the read views and the event stream over raw storage:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="nv">$REGISTRY</span><span class="w"> </span>--source-account<span class="w"> </span>keylease-admin<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">  </span>--network<span class="w"> </span>testnet<span class="w"> </span>--<span class="w"> </span>get_lease<span class="w"> </span>--lease_id<span class="w"> </span><span class="m">1</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>stellar<span class="w"> </span>events<span class="w"> </span>--id<span class="w"> </span><span class="nv">$REGISTRY</span><span class="w"> </span>--network<span class="w"> </span>testnet<span class="w"> </span>--start-ledger<span class="w"> </span><span class="m">123456</span>
+</code></pre></div>
+<p>If you must read storage directly, <code>#[contracttype]</code> enums encode as an
+<code>SCV_VEC</code> whose first element is an <code>SCV_SYMBOL</code> with the variant name:</p>
+<table>
+<thead>
+<tr>
+<th>Logical key</th>
+<th>Wire key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DataKey::Admin</code></td>
+<td><code>Symbol("Admin")</code></td>
+</tr>
+<tr>
+<td><code>DataKey::Lease(7)</code></td>
+<td><code>Vec[Symbol("Lease"), u64(7)]</code></td>
+</tr>
+<tr>
+<td><code>DataKey::Service(3)</code></td>
+<td><code>Vec[Symbol("Service"), u64(3)]</code></td>
+</tr>
+<tr>
+<td><code>DataKey::Settlement(7)</code></td>
+<td><code>Vec[Symbol("Settlement"), u64(7)]</code></td>
+</tr>
+<tr>
+<td><code>DataKey::CancelRequest(7)</code></td>
+<td><code>Vec[Symbol("CancelRequest"), u64(7)]</code></td>
+</tr>
+</tbody>
+</table>
+<p>With <code>@stellar/stellar-sdk</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="k">import</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">xdr</span><span class="p">,</span><span class="w"> </span><span class="nx">nativeToScVal</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="kr">from</span><span class="w"> </span><span class="s1">'@stellar/stellar-sdk'</span><span class="p">;</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="c1">// DataKey::Lease(leaseId)</span>
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="nx">xdr</span><span class="p">.</span><span class="nx">ScVal</span><span class="p">.</span><span class="nx">scvVec</span><span class="p">([</span>
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="w">  </span><span class="nx">xdr</span><span class="p">.</span><span class="nx">ScVal</span><span class="p">.</span><span class="nx">scvSymbol</span><span class="p">(</span><span class="s1">'Lease'</span><span class="p">),</span>
+<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="w">  </span><span class="nx">nativeToScVal</span><span class="p">(</span><span class="nx">leaseId</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kr">type</span><span class="o">:</span><span class="w"> </span><span class="s1">'u64'</span><span class="w"> </span><span class="p">}),</span>
+<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="p">]);</span>
+</code></pre></div>
+<p><code>getContractData</code> returns a <code>scvMap</code> of the <code>Lease</code> struct fields. Decode it as
+<code>{ lease_id, service_id, consumer, allocated_calls, used_calls, expires_at,
+locked_deposit, settled }</code>. A proposed settlement is a separate
+<code>Settlement(u64)</code> entry; prefer the <code>get_settlement</code> view over raw storage. Full
+details are in the <a href="../contract-reference/#storage-layout">contract reference</a>,
+and the supported way to verify leases is described in
+<a href="../integration/">Integration</a>.</p>
+<h2 id="deploying">Deploying<a class="headerlink" href="#deploying" title="Permanent link">&para;</a></h2>
+<p>See <a href="../deployment/">Deployment</a>. <code>scripts/deploy-testnet.sh</code> runs the exact
+sequence and prints the values a client or indexer needs.</p>
+<h2 id="local-sandbox-walkthrough">Local sandbox walkthrough<a class="headerlink" href="#local-sandbox-walkthrough" title="Permanent link">&para;</a></h2>
+<p>The unit suite proves the contract logic inside a simulated ledger. This runs the
+same lifecycle against a real local network using the Wasm you just built, so you
+can watch one lease move value end to end.</p>
+<p><a href="https://github.com/KeyLease-Security/keylease-core/blob/main/scripts/sandbox-local.sh"><code>scripts/sandbox-local.sh</code></a>
+automates the walkthrough below: it connects to (or starts) the local network,
+funds three identities, deploys the registry and the mock token, registers one
+demo service and writes <code>.env.sandbox</code>. The manual sequence remains the
+reference for what the script runs and for stepping through a lifecycle by hand.</p>
+<h3 id="quick-start-with-the-sandbox-script">Quick start with the sandbox script<a class="headerlink" href="#quick-start-with-the-sandbox-script" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>./scripts/sandbox-local.sh<span class="w">              </span><span class="c1"># connect or start, deploy, write .env.sandbox</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>./scripts/sandbox-local.sh<span class="w"> </span>--dry-run<span class="w">    </span><span class="c1"># print every command; send nothing</span>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>./scripts/sandbox-local.sh<span class="w"> </span>--connect<span class="w">    </span><span class="c1"># require an already running network</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>./scripts/sandbox-local.sh<span class="w"> </span>--force<span class="w">      </span><span class="c1"># replace an existing .env.sandbox</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>./scripts/sandbox-local.sh<span class="w"> </span>--teardown<span class="w">   </span><span class="c1"># stop the container, remove identities and .env.sandbox</span>
+</code></pre></div>
+<p>The script has no <code>NETWORK</code> variable: every command passes <code>--network local</code>
+literally, so it cannot reach Testnet or Mainnet, and <code>--teardown</code> stops only
+the local container and removes the three <code>kl-sandbox-*</code> identities and
+<code>.env.sandbox</code> that it created. <code>.env.sandbox</code> holds public addresses and ids
+only — the identity seeds stay in the stellar CLI keystore — and it is
+gitignored.</p>
+<p>Everything in the manual sequence below is
+<a href="https://developers.stellar.org/docs/tools/cli/stellar-cli"><code>stellar 28.1.0</code></a>
+syntax; if your CLI is a different version, re-read the flag with
+<code>stellar &lt;command&gt; --help</code> rather than assuming.</p>
+<h3 id="prerequisites_1">Prerequisites<a class="headerlink" href="#prerequisites_1" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A running container engine (Docker, Podman or Colima).</td>
+<td><code>docker info</code> answers without error.</td>
+</tr>
+<tr>
+<td>The registry Wasm built.</td>
+<td><code>cargo build --target wasm32v1-none --release --all</code></td>
+</tr>
+<tr>
+<td>Port 8000 free on localhost.</td>
+<td><code>stellar container start local</code> maps <code>8000:8000</code> by default; pass <code>-p HOST_PORT:CONTAINER_PORT</code> to move it.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="1-start-a-local-network">1. Start a local network<a class="headerlink" href="#1-start-a-local-network" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>stellar<span class="w"> </span>container<span class="w"> </span>start<span class="w"> </span><span class="nb">local</span>
+</code></pre></div>
+<p>This runs the <code>stellar/quickstart</code> image with the node, Soroban RPC, Horizon
+<strong>and a friendbot</strong> in one container. The command has no detached mode — note that
+<code>-d</code> is <code>--docker-host</code>, not Docker's detach flag — so run it in its own terminal
+and leave it up for the rest of the walkthrough.</p>
+<p><code>local</code> is a built-in CLI network — <code>stellar network ls</code> already lists it, so you
+do not need <code>stellar network add</code>. It resolves to:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Network passphrase</td>
+<td><code>Standalone Network ; February 2017</code></td>
+</tr>
+<tr>
+<td>Soroban RPC</td>
+<td><code>http://localhost:8000/rpc</code></td>
+</tr>
+<tr>
+<td>Horizon</td>
+<td><code>http://localhost:8000</code></td>
+</tr>
+<tr>
+<td>Friendbot</td>
+<td><code>http://localhost:8000/friendbot?addr=&lt;ACCOUNT&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<p>You can confirm the RPC is up before going further:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>stellar<span class="w"> </span>network<span class="w"> </span>health<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>stellar<span class="w"> </span>ledger<span class="w"> </span>latest<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span>
+</code></pre></div>
+<h3 id="2-create-and-fund-three-identities">2. Create and fund three identities<a class="headerlink" href="#2-create-and-fund-three-identities" title="Permanent link">&para;</a></h3>
+<p>Three separate accounts, not one: <code>settle_lease</code> checks
+<code>service.provider == provider</code> and <code>revoke_expired_lease</code> checks the lease owner.
+A single account for every role hides exactly the authorisation bugs a sandbox is
+for.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="k">for</span><span class="w"> </span>who<span class="w"> </span><span class="k">in</span><span class="w"> </span>kl-admin<span class="w"> </span>kl-provider<span class="w"> </span>kl-consumer<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="w">  </span>stellar<span class="w"> </span>keys<span class="w"> </span>generate<span class="w"> </span><span class="s2">"</span><span class="nv">$who</span><span class="s2">"</span><span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--fund
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="k">done</span>
+</code></pre></div>
+<p><code>--fund</code> works on <code>local</code> too — the CLI posts to the container's own friendbot,
+the same code path as Testnet. Read a balance back to be sure the account exists:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>stellar<span class="w"> </span>token<span class="w"> </span>balance<span class="w"> </span>--id<span class="w"> </span>native<span class="w"> </span>--account<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-consumer<span class="k">)</span><span class="s2">"</span><span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span>
+</code></pre></div>
+<h3 id="3-deploy-the-registry">3. Deploy the registry<a class="headerlink" href="#3-deploy-the-registry" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>cargo<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>wasm32v1-none<span class="w"> </span>--release<span class="w"> </span>--all
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>
+<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="nv">REGISTRY</span><span class="o">=</span><span class="k">$(</span>stellar<span class="w"> </span>contract<span class="w"> </span>deploy<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a><span class="w">  </span>--wasm<span class="w"> </span>target/wasm32v1-none/release/keylease_registry.wasm<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a><span class="w">  </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-n1<span class="k">)</span>
+</code></pre></div>
+<h3 id="4-initialise-set-the-escrow-token-publish-a-service">4. Initialise, set the escrow token, publish a service<a class="headerlink" href="#4-initialise-set-the-escrow-token-publish-a-service" title="Permanent link">&para;</a></h3>
+<p>Each step reads what the previous one wrote, which is why the order is fixed.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>init<span class="w"> </span>--admin<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-admin<span class="k">)</span><span class="s2">"</span>
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>stellar<span class="w"> </span>contract<span class="w"> </span>id<span class="w"> </span>asset<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--asset<span class="w"> </span>native<span class="k">)</span>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>set_token<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-7" name="__codelineno-20-7" href="#__codelineno-20-7"></a><span class="w">     </span>--admin<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-admin<span class="k">)</span><span class="s2">"</span><span class="w"> </span>--token<span class="w"> </span><span class="s2">"</span><span class="nv">$TOKEN</span><span class="s2">"</span>
+<a id="__codelineno-20-8" name="__codelineno-20-8" href="#__codelineno-20-8"></a>
+<a id="__codelineno-20-9" name="__codelineno-20-9" href="#__codelineno-20-9"></a><span class="nv">ENDPOINT_HASH</span><span class="o">=</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-provider<span class="k">)</span><span class="s2">:local-demo"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-10" name="__codelineno-20-10" href="#__codelineno-20-10"></a><span class="w">  </span><span class="p">|</span><span class="w"> </span>shasum<span class="w"> </span>-a<span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span><span class="s1">'{print $1}'</span><span class="k">)</span>
+<a id="__codelineno-20-11" name="__codelineno-20-11" href="#__codelineno-20-11"></a>
+<a id="__codelineno-20-12" name="__codelineno-20-12" href="#__codelineno-20-12"></a><span class="nv">SERVICE_ID</span><span class="o">=</span><span class="k">$(</span>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-provider<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-13" name="__codelineno-20-13" href="#__codelineno-20-13"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>register_service<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-14" name="__codelineno-20-14" href="#__codelineno-20-14"></a><span class="w">     </span>--provider<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-provider<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-15" name="__codelineno-20-15" href="#__codelineno-20-15"></a><span class="w">     </span>--rate_per_call<span class="w"> </span><span class="m">1000000</span><span class="w"> </span>--endpoint_hash<span class="w"> </span><span class="s2">"</span><span class="nv">$ENDPOINT_HASH</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-n1<span class="k">)</span>
+</code></pre></div>
+<p><code>rate_per_call</code> is in stroops, so <code>1000000</code> is 0.1 XLM per call.</p>
+<p>The native SAC address is derived from the network passphrase, not assigned. On
+the standalone passphrase it is
+<code>CDMLFMKMMD7MWZP3FKUBZPVHTUEDLSX4BYGYKH4GCESXYHS3IHQ4EIG4</code> — re-derive it with the
+command above rather than copying that value, because your own <code>stellar network add</code>
+passphrase would give a different address.</p>
+<h3 id="5-create-one-lease">5. Create one lease<a class="headerlink" href="#5-create-one-lease" title="Permanent link">&para;</a></h3>
+<p>100 calls at 0.1 XLM escrows 10 XLM:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="nv">LEASE_ID</span><span class="o">=</span><span class="k">$(</span>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-consumer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>create_lease<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="w">     </span>--consumer<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-consumer<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="w">     </span>--service_id<span class="w"> </span><span class="s2">"</span><span class="nv">$SERVICE_ID</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a><span class="w">     </span>--requested_calls<span class="w"> </span><span class="m">100</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a><span class="w">     </span>--duration_secs<span class="w"> </span><span class="m">120</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-n1<span class="k">)</span>
+<a id="__codelineno-21-7" name="__codelineno-21-7" href="#__codelineno-21-7"></a>
+<a id="__codelineno-21-8" name="__codelineno-21-8" href="#__codelineno-21-8"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-consumer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-9" name="__codelineno-21-9" href="#__codelineno-21-9"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--<span class="w"> </span>get_lease<span class="w"> </span>--lease_id<span class="w"> </span><span class="s2">"</span><span class="nv">$LEASE_ID</span><span class="s2">"</span>
+<a id="__codelineno-21-10" name="__codelineno-21-10" href="#__codelineno-21-10"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-consumer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-11" name="__codelineno-21-11" href="#__codelineno-21-11"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--<span class="w"> </span>remaining_calls<span class="w"> </span>--lease_id<span class="w"> </span><span class="s2">"</span><span class="nv">$LEASE_ID</span><span class="s2">"</span>
+</code></pre></div>
+<p>Do not <code>approve</code> an allowance first — there is none to grant. <code>create_lease</code>
+calls <code>transfer(consumer, contract, amount)</code> itself under the consumer's own auth,
+so the consumer needs a balance, not a permission.</p>
+<p><code>duration_secs</code> is a wall-clock number, and the ledger still advances in real
+time. 120 seconds is enough to settle an expired lease without leaving the
+terminal; a day-long lease is not a sandbox demo.</p>
+<h3 id="6-settle-it">6. Settle it<a class="headerlink" href="#6-settle-it" title="Permanent link">&para;</a></h3>
+<p><code>settle_lease</code> proposes a payout when the lease has <strong>expired</strong>, or when the
+provider reports full consumption — whichever comes first. It does not move funds:
+the consumer has a 24-hour challenge window, after which <code>finalize_settlement</code>
+releases them. Reporting everything immediately is the fastest path through the
+happy case:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-provider<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>settle_lease<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="w">     </span>--provider<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-provider<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a><span class="w">     </span>--lease_id<span class="w"> </span><span class="s2">"</span><span class="nv">$LEASE_ID</span><span class="s2">"</span><span class="w"> </span>--verified_calls<span class="w"> </span><span class="m">100</span>
+</code></pre></div>
+<p>Payout and refund must sum to the deposit, so 100 verified of 100 allocated pays
+the provider 10 XLM and refunds 0 once the challenge window closes and anyone
+calls <code>finalize_settlement --lease_id "$LEASE_ID"</code>. Create a second lease and settle it
+<em>partially</em> before it expires to see the guard refuse:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="nv">OTHER</span><span class="o">=</span><span class="k">$(</span>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-consumer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>create_lease<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a><span class="w">     </span>--consumer<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-consumer<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a><span class="w">     </span>--service_id<span class="w"> </span><span class="s2">"</span><span class="nv">$SERVICE_ID</span><span class="s2">"</span><span class="w"> </span>--requested_calls<span class="w"> </span><span class="m">100</span><span class="w"> </span>--duration_secs<span class="w"> </span><span class="m">120</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-n1<span class="k">)</span>
+<a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a>
+<a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-provider<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>settle_lease<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a><span class="w">     </span>--provider<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-provider<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-9" name="__codelineno-23-9" href="#__codelineno-23-9"></a><span class="w">     </span>--lease_id<span class="w"> </span><span class="s2">"</span><span class="nv">$OTHER</span><span class="s2">"</span><span class="w"> </span>--verified_calls<span class="w"> </span><span class="m">30</span>
+<a id="__codelineno-23-10" name="__codelineno-23-10" href="#__codelineno-23-10"></a><span class="c1"># Error(LeaseNotSettleable) — the lease is live and under-consumed</span>
+</code></pre></div>
+<p>Wait past <code>duration_secs</code> and the same call succeeds, paying 3 XLM and refunding
+7 XLM to the consumer. Verify it with the read views and the token itself:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="w">  </span>--<span class="w"> </span>locked_balance<span class="w"> </span>--lease_id<span class="w"> </span><span class="s2">"</span><span class="nv">$OTHER</span><span class="s2">"</span><span class="w">      </span><span class="c1"># 0 once settled</span>
+<a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a>stellar<span class="w"> </span>token<span class="w"> </span>balance<span class="w"> </span>--id<span class="w"> </span>native<span class="w"> </span>--account<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-provider<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span>
+</code></pre></div>
+<h3 id="7-read-the-events">7. Read the events<a class="headerlink" href="#7-read-the-events" title="Permanent link">&para;</a></h3>
+<p>Note the ledger sequence before you deploy, then read the whole lifecycle out of
+the chain afterwards:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a>stellar<span class="w"> </span>ledger<span class="w"> </span>latest<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w">          </span><span class="c1"># write down the sequence</span>
+<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="c1"># ... run steps 3 to 6 ...</span>
+<a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a>stellar<span class="w"> </span>events<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--start-ledger<span class="w"> </span>&lt;that<span class="w"> </span>sequence&gt;<span class="w"> </span>-c<span class="w"> </span><span class="m">50</span>
+</code></pre></div>
+<p>Expect <code>RegistryInitialized</code>, <code>EscrowTokenSet</code>, <code>ServiceRegistered</code>,
+<code>LeaseCreated</code>, <code>LeaseSettled</code>. Use <code>-c</code> generously: the default is 10 events,
+and a full lifecycle plus the token transfers is more than that. Event payloads
+and their fields are in the <a href="../contract-reference/">contract reference</a>.</p>
+<h3 id="8-keep-an-entry-alive">8. Keep an entry alive<a class="headerlink" href="#8-keep-an-entry-alive" title="Permanent link">&para;</a></h3>
+<p>A local network is the only place this costs nothing to try. Reads never extend a
+storage entry, so an entry that is looked at but not written ages toward
+eviction until somebody bumps it explicitly.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="c1"># Both are permissionless — any account can pay for any entry's rent.</span>
+<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-provider<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a><span class="w">  </span>--<span class="w"> </span>bump_service<span class="w"> </span>--service_id<span class="w"> </span><span class="s2">"</span><span class="nv">$SERVICE_ID</span><span class="s2">"</span>
+</code></pre></div>
+<p>A successful bump is silent: no event, no field changes, and the only effect is a
+later <code>liveUntilLedgerSeq</code> plus the rent charged into the caller's fee. Lease
+entries need a lease that can still be acted on, because <code>bump_lease</code> refuses a
+settled one — so create a third lease and leave it unsettled:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="nv">LIVE</span><span class="o">=</span><span class="k">$(</span>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-consumer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="w">  </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>create_lease<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a><span class="w">     </span>--consumer<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-consumer<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="w">     </span>--service_id<span class="w"> </span><span class="s2">"</span><span class="nv">$SERVICE_ID</span><span class="s2">"</span><span class="w"> </span>--requested_calls<span class="w"> </span><span class="m">10</span><span class="w"> </span>--duration_secs<span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-n1<span class="k">)</span>
+<a id="__codelineno-27-5" name="__codelineno-27-5" href="#__codelineno-27-5"></a>
+<a id="__codelineno-27-6" name="__codelineno-27-6" href="#__codelineno-27-6"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-consumer<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-7" name="__codelineno-27-7" href="#__codelineno-27-7"></a><span class="w">  </span>--<span class="w"> </span>bump_lease<span class="w"> </span>--lease_id<span class="w"> </span><span class="s2">"</span><span class="nv">$LIVE</span><span class="s2">"</span>
+</code></pre></div>
+<p>Then try the two refusals, because they are the reason these calls are safe to
+leave open to anyone. <code>$LEASE_ID</code> was settled in step 6, so its funds have already
+moved and extending it would only grow state:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-provider<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a><span class="w">  </span>--<span class="w"> </span>bump_lease<span class="w"> </span>--lease_id<span class="w"> </span><span class="s2">"</span><span class="nv">$LEASE_ID</span><span class="s2">"</span><span class="w">         </span><span class="c1"># Error(LeaseAlreadySettled)</span>
+<a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a>
+<a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a><span class="c1"># A miss is an error, so nobody pays rent for an entry that is not there.</span>
+<a id="__codelineno-28-5" name="__codelineno-28-5" href="#__codelineno-28-5"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-provider<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-28-6" name="__codelineno-28-6" href="#__codelineno-28-6"></a><span class="w">  </span>--<span class="w"> </span>bump_service<span class="w"> </span>--service_id<span class="w"> </span><span class="m">404</span><span class="w">             </span><span class="c1"># Error(ServiceNotFound)</span>
+</code></pre></div>
+<p><code>bump_lease</code> takes only a <code>lease_id</code>: the horizon comes from the lease's own
+<code>expires_at</code> and the contract's ceiling, never from the caller. The policy, the
+per-lease arithmetic and what eviction costs a consumer are in
+<a href="../contract-reference/#storage-classes-and-ttl-policies">Storage classes and TTL policies</a>.</p>
+<h3 id="what-differs-from-testnet">What differs from Testnet<a class="headerlink" href="#what-differs-from-testnet" title="Permanent link">&para;</a></h3>
+<p>Only the network is different; the contract, its ABI and the step order are not.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Testnet</th>
+<th>Local sandbox</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Network flag</td>
+<td><code>--network testnet</code></td>
+<td><code>--network local</code></td>
+</tr>
+<tr>
+<td>Who operates the network</td>
+<td>SDF</td>
+<td>you, in a container you start</td>
+</tr>
+<tr>
+<td>RPC</td>
+<td><code>https://soroban-testnet.stellar.org</code></td>
+<td><code>http://localhost:8000/rpc</code></td>
+</tr>
+<tr>
+<td>Friendbot</td>
+<td><code>https://friendbot.stellar.org?addr=…</code></td>
+<td><code>http://localhost:8000/friendbot?addr=…</code></td>
+</tr>
+<tr>
+<td>Funding an identity</td>
+<td><code>stellar keys generate x --network testnet --fund</code></td>
+<td><code>stellar keys generate x --network local --fund</code> — same flag</td>
+</tr>
+<tr>
+<td>Native SAC address</td>
+<td>derived from <code>Test SDF Network ; September 2015</code></td>
+<td>derived from <code>Standalone Network ; February 2017</code>; different address</td>
+</tr>
+<tr>
+<td>Deploy script</td>
+<td><code>./scripts/deploy-testnet.sh</code></td>
+<td><code>./scripts/sandbox-local.sh</code>, or the sequence above</td>
+</tr>
+<tr>
+<td>Contract id lifetime</td>
+<td>until the next Testnet reset</td>
+<td>until you stop the container</td>
+</tr>
+<tr>
+<td>Wiping the ledger</td>
+<td>2–4× a year, on SDF's schedule</td>
+<td>whenever you like: <code>stellar container stop local</code></td>
+</tr>
+<tr>
+<td>Value at risk</td>
+<td>fake XLM</td>
+<td>none</td>
+</tr>
+</tbody>
+</table>
+<p>The commands that are <em>identical</em> are worth stating, because contributors expect
+to rewrite them: <code>stellar contract deploy</code>, <code>upload</code>, <code>invoke</code>,
+<code>contract id asset</code> and the <code>--send=yes</code> form all take the same arguments with a
+different <code>--network</code>. Nothing in <code>contracts/</code> is network-aware.</p>
+<h3 id="teardown">Teardown<a class="headerlink" href="#teardown" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a>stellar<span class="w"> </span>container<span class="w"> </span>stop<span class="w"> </span><span class="nb">local</span>
+<a id="__codelineno-29-2" name="__codelineno-29-2" href="#__codelineno-29-2"></a>
+<a id="__codelineno-29-3" name="__codelineno-29-3" href="#__codelineno-29-3"></a><span class="c1"># optional: the identities are only seeds on your machine</span>
+<a id="__codelineno-29-4" name="__codelineno-29-4" href="#__codelineno-29-4"></a><span class="k">for</span><span class="w"> </span>who<span class="w"> </span><span class="k">in</span><span class="w"> </span>kl-admin<span class="w"> </span>kl-provider<span class="w"> </span>kl-consumer<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<a id="__codelineno-29-5" name="__codelineno-29-5" href="#__codelineno-29-5"></a><span class="w">  </span>stellar<span class="w"> </span>keys<span class="w"> </span>rm<span class="w"> </span>--force<span class="w"> </span><span class="s2">"</span><span class="nv">$who</span><span class="s2">"</span>
+<a id="__codelineno-29-6" name="__codelineno-29-6" href="#__codelineno-29-6"></a><span class="k">done</span>
+</code></pre></div>
+<p><code>stellar keys rm</code> takes one name at a time and asks for confirmation unless you
+pass <code>--force</code>.</p>
+<p><code>stellar container start</code> uses <code>--rm</code>, so stopping the container discards the
+ledger. Starting it again gives you an empty network with the same passphrase —
+which means the redeploy you must now do is the same one described in
+<a href="../networks/#after-a-testnet-reset">After a Testnet reset</a>, including
+<code>register_service</code> returning <code>1</code> again because <code>ServiceCount</code> lives in instance
+storage.</p>
+<h3 id="using-contractsmock_token-instead-of-the-native-sac">Using <code>contracts/mock_token</code> instead of the native SAC<a class="headerlink" href="#using-contractsmock_token-instead-of-the-native-sac" title="Permanent link">&para;</a></h3>
+<p>The mock token exists so a sandbox does not depend on lumens at all. It has an
+<strong>unlimited mint</strong> and must never be configured on a network that holds value —
+see <a href="../contract-reference/">contract reference</a>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="nv">MOCK</span><span class="o">=</span><span class="k">$(</span>stellar<span class="w"> </span>contract<span class="w"> </span>deploy<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a><span class="w">  </span>--wasm<span class="w"> </span>target/wasm32v1-none/release/keylease_mock_token.wasm<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a><span class="w">  </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tail<span class="w"> </span>-n1<span class="k">)</span>
+<a id="__codelineno-30-4" name="__codelineno-30-4" href="#__codelineno-30-4"></a>
+<a id="__codelineno-30-5" name="__codelineno-30-5" href="#__codelineno-30-5"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$MOCK</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-30-6" name="__codelineno-30-6" href="#__codelineno-30-6"></a><span class="w">  </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>init<span class="w"> </span>--admin<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-admin<span class="k">)</span><span class="s2">"</span>
+<a id="__codelineno-30-7" name="__codelineno-30-7" href="#__codelineno-30-7"></a>
+<a id="__codelineno-30-8" name="__codelineno-30-8" href="#__codelineno-30-8"></a><span class="c1"># Mint 1000 tokens (7 decimals) to the consumer, then point the registry at it.</span>
+<a id="__codelineno-30-9" name="__codelineno-30-9" href="#__codelineno-30-9"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$MOCK</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-30-10" name="__codelineno-30-10" href="#__codelineno-30-10"></a><span class="w">  </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>mint<span class="w"> </span>--to<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-consumer<span class="k">)</span><span class="s2">"</span><span class="w"> </span>--amount<span class="w"> </span><span class="m">10000000000</span>
+<a id="__codelineno-30-11" name="__codelineno-30-11" href="#__codelineno-30-11"></a>
+<a id="__codelineno-30-12" name="__codelineno-30-12" href="#__codelineno-30-12"></a>stellar<span class="w"> </span>contract<span class="w"> </span>invoke<span class="w"> </span>--id<span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY</span><span class="s2">"</span><span class="w"> </span>--source-account<span class="w"> </span>kl-admin<span class="w"> </span>--network<span class="w"> </span><span class="nb">local</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-30-13" name="__codelineno-30-13" href="#__codelineno-30-13"></a><span class="w">  </span>--send<span class="o">=</span>yes<span class="w"> </span>--<span class="w"> </span>set_token<span class="w"> </span>--admin<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>stellar<span class="w"> </span>keys<span class="w"> </span>address<span class="w"> </span>kl-admin<span class="k">)</span><span class="s2">"</span><span class="w"> </span>--token<span class="w"> </span><span class="s2">"</span><span class="nv">$MOCK</span><span class="s2">"</span>
+</code></pre></div>
+<p>From here the lease steps are unchanged: every money path goes through the token
+address that <code>set_token</code> stored, so swapping the asset changes nothing else. That
+indirection is also how you exercise a misbehaving token by hand — point the
+registry at a contract that reverts or re-enters on <code>transfer</code>. The automated
+version of exactly that attack is
+<code>test_reentrant_token_cannot_settle_a_lease_twice</code> in
+<code>contracts/registry/src/test.rs</code>.</p>
+<h2 id="contributing">Contributing<a class="headerlink" href="#contributing" title="Permanent link">&para;</a></h2>
+<p>See <a href="https://github.com/KeyLease-Security/keylease-core/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>.
+Drips Wave tasks are filed from the templates in <code>.github/ISSUE_TEMPLATE/</code>, or in
+bulk with <code>scripts/create-issues.sh</code>.</p>
+<h2 id="read-next">Read next<a class="headerlink" href="#read-next" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../contract-reference/">Contract reference</a></li>
+<li><a href="../security/">Security model</a></li>
+<li><a href="../integration/">Integration</a></li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      MIT © 2026 KeyLease Security
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.indexes", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
